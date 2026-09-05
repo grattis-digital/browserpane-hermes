@@ -1,0 +1,9 @@
+# Deny all context files unless explicitly needed below. This also excludes
+# .env/.env.*, secrets/, .git/, __pycache__/, *.pyc and test-results/ at any depth.
+*
+!Dockerfile
+!bootstrap.py
+!config.yaml
+!entrypoint.sh
+!healthcheck.py
+!verify.py

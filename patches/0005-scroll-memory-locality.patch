@@ -1,0 +1,287 @@
+diff --git a/code/apps/bpane-host/src/scroll/detect.rs b/code/apps/bpane-host/src/scroll/detect.rs
+index 5f84c77..4764b45 100644
+--- a/code/apps/bpane-host/src/scroll/detect.rs
++++ b/code/apps/bpane-host/src/scroll/detect.rs
+@@ -22,6 +22,100 @@ pub fn detect_column_scroll(
+     {
+         return None;
+     }
++    let max_dy = max_search.min(height / 2);
++    if max_dy == 0 {
++        return None;
++    }
++    let sample_xs = [10, 30, 50, 70, 90].map(|pct| (pct * width / 100).min(width - 1));
++    let sampled_end = (height - 1) * stride + sample_xs[4] * 4 + 4;
++    if sampled_end > current.len() || sampled_end > previous.len() {
++        // Preserve the original individual-pixel bounds behavior for unusual
++        // undersized strides. Real capture frames, including padded strides,
++        // use the packed fast path below.
++        return detect_column_scroll_strided(current, previous, stride, width, height, max_search);
++    }
++
++    // Read strided framebuffer memory only once. Five columns from both 720p
++    // images occupy 28 KiB; candidate comparisons are contiguous u32 equality
++    // scans instead of repeatedly walking megabytes of row-strided pixels.
++    // Native endian is immaterial: equality preserves all four BGRA bytes.
++    let mut current_columns = Vec::with_capacity(height * sample_xs.len());
++    let mut previous_columns = Vec::with_capacity(height * sample_xs.len());
++    for &col_x in &sample_xs {
++        for y in 0..height {
++            let offset = y * stride + col_x * 4;
++            current_columns.push(u32::from_ne_bytes(
++                current[offset..offset + 4].try_into().unwrap(),
++            ));
++            previous_columns.push(u32::from_ne_bytes(
++                previous[offset..offset + 4].try_into().unwrap(),
++            ));
++        }
++    }
++
++    let mut best_dy: i32 = 0;
++    let mut best_total_matches: usize = 0;
++    let mut best_agreeing_cols: usize = 0;
++    // Deliberately retain candidate order, strict comparisons and unnormalized
++    // total-match scoring, including the original positive-direction tie break.
++    for dy in 1..=max_dy {
++        for sign in [1i32, -1i32] {
++            let signed_dy = dy as i32 * sign;
++            let overlap = height - dy;
++            let mut total_matches = 0usize;
++            let mut agreeing_cols = 0usize;
++            for column in 0..sample_xs.len() {
++                let base = column * height;
++                let (current_start, previous_start) = if sign > 0 {
++                    (base, base + dy)
++                } else {
++                    (base + dy, base)
++                };
++                let current = &current_columns[current_start..current_start + overlap];
++                let previous = &previous_columns[previous_start..previous_start + overlap];
++                let col_matches = current.iter().zip(previous).filter(|(a, b)| a == b).count();
++                let col_confidence = col_matches as f32 / overlap as f32;
++                if col_confidence > 0.6 {
++                    agreeing_cols += 1;
++                }
++                total_matches += col_matches;
++            }
++            if agreeing_cols >= 3 && total_matches > best_total_matches {
++                best_total_matches = total_matches;
++                best_dy = signed_dy;
++                best_agreeing_cols = agreeing_cols;
++            }
++        }
++    }
++    if best_dy == 0 || best_agreeing_cols < 3 {
++        return None;
++    }
++    let overlap = height - best_dy.unsigned_abs() as usize;
++    let confidence = best_total_matches as f32 / (overlap * sample_xs.len()) as f32;
++    if confidence > 0.7 {
++        Some((best_dy, confidence))
++    } else {
++        None
++    }
++}
++
++/// Pinned original algorithm: fallback for incomplete sampled pixels and an
++/// independent reference for differential tests/explicit microbenchmarks.
++fn detect_column_scroll_strided(
++    current: &[u8],
++    previous: &[u8],
++    stride: usize,
++    width: usize,
++    height: usize,
++    max_search: usize,
++) -> Option<(i32, f32)> {
++    if height < 16
++        || width < 16
++        || current.len() < stride * height
++        || previous.len() < stride * height
++    {
++        return None;
++    }
+ 
+     let max_dy = max_search.min(height / 2);
+     let sample_xs: Vec<usize> = [10, 30, 50, 70, 90]
+@@ -133,3 +227,181 @@ pub fn content_scroll_search_limit_px(cdp_scroll_dy_px: Option<i16>) -> usize {
+         .unwrap_or(0);
+     cdp_abs.clamp(256, CONTENT_SCROLL_SEARCH_MAX_PX)
+ }
++
++#[cfg(test)]
++mod packed_column_tests {
++    use super::{detect_column_scroll, detect_column_scroll_strided};
++
++    fn patterned_frame(width: usize, height: usize, stride: usize, seed: u64) -> Vec<u8> {
++        let mut state = seed;
++        let mut frame = vec![0xCE; stride * height];
++        for y in 0..height {
++            for x in 0..width {
++                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++                frame[y * stride + x * 4..y * stride + x * 4 + 4]
++                    .copy_from_slice(&((state >> 32) as u32).to_ne_bytes());
++            }
++        }
++        frame
++    }
++
++    fn shifted_frame(previous: &[u8], stride: usize, height: usize, dy: i32) -> Vec<u8> {
++        let mut current = vec![0xA7; previous.len()];
++        for y in 0..height {
++            let source_y = y as i32 + dy;
++            if source_y >= 0 && source_y < height as i32 {
++                let source = source_y as usize * stride;
++                current[y * stride..(y + 1) * stride]
++                    .copy_from_slice(&previous[source..source + stride]);
++            }
++        }
++        current
++    }
++
++    fn assert_reference(
++        current: &[u8],
++        previous: &[u8],
++        stride: usize,
++        width: usize,
++        height: usize,
++        search: usize,
++    ) {
++        assert_eq!(
++            detect_column_scroll(current, previous, stride, width, height, search),
++            detect_column_scroll_strided(current, previous, stride, width, height, search),
++            "width={width} height={height} stride={stride} search={search}"
++        );
++    }
++
++    #[test]
++    fn packed_columns_preserve_both_scroll_directions_and_padded_stride() {
++        for padding in [0, 3, 16, 129] {
++            let (width, height) = (83, 96);
++            let stride = width * 4 + padding;
++            let previous = patterned_frame(width, height, stride, 19);
++            for dy in [-31, -8, -1, 1, 8, 31] {
++                let current = shifted_frame(&previous, stride, height, dy);
++                assert_reference(&current, &previous, stride, width, height, 48);
++                assert_eq!(
++                    detect_column_scroll(&current, &previous, stride, width, height, 48),
++                    Some((dy, 1.0))
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn packed_columns_preserve_repeated_patterns_and_tie_order() {
++        let (width, height, stride) = (40, 64, 163);
++        let solid = vec![255; stride * height];
++        // Do not add an approximate stationary-frame shortcut: the detector's
++        // historic output for ambiguous pixels is part of the caller contract.
++        assert_eq!(
++            detect_column_scroll(&solid, &solid, stride, width, height, 32),
++            Some((1, 1.0))
++        );
++        assert_reference(&solid, &solid, stride, width, height, 32);
++        for period in [2, 3, 7] {
++            let mut pattern = solid.clone();
++            for y in 0..height {
++                pattern[y * stride..y * stride + width * 4].fill((y % period) as u8);
++            }
++            assert_reference(&pattern, &pattern, stride, width, height, 32);
++            assert_eq!(
++                detect_column_scroll(&pattern, &pattern, stride, width, height, 32),
++                Some((period as i32, 1.0))
++            );
++        }
++    }
++
++    #[test]
++    fn packed_columns_match_reference_with_changed_pixels_and_partial_agreement() {
++        for seed in 1..=48 {
++            let width = 16 + (seed as usize * 13 % 89);
++            let height = 16 + (seed as usize * 7 % 81);
++            let stride = width * 4 + seed as usize % 17;
++            let previous = patterned_frame(width, height, stride, seed);
++            let dy = seed as i32 % (height as i32 / 2) - height as i32 / 4;
++            let mut current = shifted_frame(&previous, stride, height, dy);
++            // Includes sparse keyboard-like updates, partial scroll ownership,
++            // and densities straddling the column/global confidence thresholds.
++            for (index, pixel) in current.chunks_exact_mut(4).enumerate() {
++                if index % (seed as usize % 7 + 2) == 0 {
++                    pixel[0] ^= 0x5A;
++                }
++            }
++            for search in [0, 1, 8, 256] {
++                assert_reference(&current, &previous, stride, width, height, search);
++            }
++        }
++    }
++
++    #[test]
++    fn packed_columns_keep_tiny_truncated_and_unusual_stride_behavior() {
++        for (width, height, stride, length) in [
++            (8, 8, 32, 256),
++            (16, 15, 64, 960),
++            (16, 32, 64, 2047),
++            (16, 32, 3, 96),
++            (16, 32, 0, 80),
++        ] {
++            let previous = vec![1; length];
++            let mut current = previous.clone();
++            if let Some(byte) = current.last_mut() {
++                *byte = 2;
++            }
++            assert_reference(&current, &previous, stride, width, height, 32);
++        }
++        let previous = vec![1; 64 * 32];
++        let current = vec![1; 64 * 32 - 1];
++        assert_reference(&current, &previous, 64, 16, 32, 32);
++    }
++
++    /// Full gather cost is included. No display, browser, or network is used.
++    #[test]
++    #[ignore]
++    fn benchmark_packed_columns_against_original_strided_scroll() {
++        use std::hint::black_box;
++        use std::time::Instant;
++        const RUNS: usize = 20;
++        let (width, height) = (1280, 720);
++        let stride = width * 4;
++        let previous = patterned_frame(width, height, stride, 1);
++        let mut typing = previous.clone();
++        typing[height / 2 * stride..height / 2 * stride + 80].fill(0);
++        for (workload, current) in [
++            ("keyboard_repaint", typing),
++            ("scroll_down", shifted_frame(&previous, stride, height, 64)),
++            ("scroll_up", shifted_frame(&previous, stride, height, -64)),
++        ] {
++            assert_reference(&current, &previous, stride, width, height, 256);
++            for round in 0..3 {
++                let started = Instant::now();
++                for _ in 0..RUNS {
++                    black_box(detect_column_scroll_strided(
++                        black_box(&current),
++                        black_box(&previous),
++                        stride,
++                        width,
++                        height,
++                        256,
++                    ));
++                }
++                let original_us = started.elapsed().as_micros();
++                let started = Instant::now();
++                for _ in 0..RUNS {
++                    black_box(detect_column_scroll(
++                        black_box(&current),
++                        black_box(&previous),
++                        stride,
++                        width,
++                        height,
++                        256,
++                    ));
++                }
++                let improved_us = started.elapsed().as_micros();
++                println!("{{\"workload\":\"{workload}\",\"round\":{round},\"runs\":{RUNS},\"original_us\":{original_us},\"improved_us\":{improved_us}}}");
++            }
++        }
++    }
++}

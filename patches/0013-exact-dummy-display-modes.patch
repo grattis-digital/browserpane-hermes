@@ -1,0 +1,510 @@
+diff --git a/code/apps/bpane-host/src/capture/ffmpeg.rs b/code/apps/bpane-host/src/capture/ffmpeg.rs
+index 3595fa5..a19032f 100644
+--- a/code/apps/bpane-host/src/capture/ffmpeg.rs
++++ b/code/apps/bpane-host/src/capture/ffmpeg.rs
+@@ -98,14 +98,18 @@ fn pipeline_thread(
+         match cmd_rx.try_recv() {
+             Ok(PipelineCmd::Resize(w, h, ack_tx)) => {
+                 // H.264 requires even dimensions
+-                let w = (w.max(320).min(3840)) & !1;
+-                let h = (h.max(200).min(2160)) & !1;
+-                if w != width || h != height {
++                let (w, h) = normalized_resize_dimensions(w, h);
++                let mut applied = Some((width, height));
++                if display_resize_needed((width, height), (w, h), || {
++                    dummy_display_size(&display).ok()
++                }) {
+                     tracing::debug!(from = %format!("{width}x{height}"), to = %format!("{w}x{h}"), "pipeline resize");
+                     stop_ffmpeg(&mut child);
+-                    resize_display(&display, w, h);
+-                    width = w;
+-                    height = h;
++                    applied = resize_display_or_previous(&display, (width, height), (w, h));
++                    if let Some((actual_w, actual_h)) = applied {
++                        width = actual_w;
++                        height = actual_h;
++                    }
+                     capture_region = capture_region
+                         .and_then(|region| clamp_capture_region(region, width, height));
+                     active_capture = effective_capture_region(width, height, capture_region);
+@@ -123,7 +127,9 @@ fn pipeline_thread(
+                     }
+                 }
+                 // Notify caller of actual applied dimensions
+-                let _ = ack_tx.send((w as u16, h as u16));
++                if let Some((actual_w, actual_h)) = applied {
++                    let _ = ack_tx.send((actual_w as u16, actual_h as u16));
++                }
+             }
+             Ok(PipelineCmd::BitrateHint(target_bps)) => {
+                 tracing::debug!(
+@@ -203,20 +209,27 @@ fn pipeline_thread(
+                     // We need to handle it inline since we already consumed it.
+                     match cmd {
+                         PipelineCmd::Resize(w, h, ack_tx) => {
+-                            let w = (w.max(320).min(3840)) & !1;
+-                            let h = (h.max(200).min(2160)) & !1;
+-                            if w != width || h != height {
++                            let (w, h) = normalized_resize_dimensions(w, h);
++                            let mut applied = Some((width, height));
++                            if display_resize_needed((width, height), (w, h), || {
++                                dummy_display_size(&display).ok()
++                            }) {
+                                 tracing::debug!(from = %format!("{width}x{height}"), to = %format!("{w}x{h}"), "pipeline resize (disabled)");
+-                                resize_display(&display, w, h);
+-                                width = w;
+-                                height = h;
++                                applied =
++                                    resize_display_or_previous(&display, (width, height), (w, h));
++                                if let Some((actual_w, actual_h)) = applied {
++                                    width = actual_w;
++                                    height = actual_h;
++                                }
+                                 capture_region = capture_region
+                                     .and_then(|region| clamp_capture_region(region, width, height));
+                                 active_capture =
+                                     effective_capture_region(width, height, capture_region);
+                                 nal_buf.clear();
+                             }
+-                            let _ = ack_tx.send((w as u16, h as u16));
++                            if let Some((actual_w, actual_h)) = applied {
++                                let _ = ack_tx.send((actual_w as u16, actual_h as u16));
++                            }
+                         }
+                         PipelineCmd::BitrateHint(target_bps) => {
+                             bitrate_override = Some(format!("{}k", target_bps / 1000));
+@@ -542,79 +555,206 @@ fn stop_ffmpeg(child: &mut Option<Child>) {
+     }
+ }
+ 
+-/// Resize the display using xrandr with the Xorg dummy driver.
+-/// The dummy driver supports --newmode/--addmode/--output --mode
+-/// for arbitrary runtime resolution changes. Firefox and other X11
+-/// clients receive ConfigureNotify events and reflow automatically.
+-fn resize_display(x_display: &str, w: u32, h: u32) {
+-    let mode_name = format!("{w}x{h}_60.00");
+-    tracing::debug!(mode = %mode_name, "xrandr resize");
++fn normalized_resize_dimensions(w: u32, h: u32) -> (u32, u32) {
++    ((w.clamp(320, 3840)) & !1, (h.clamp(200, 2160)) & !1)
++}
+ 
+-    // Generate mode timings with cvt
+-    let cvt = Command::new("cvt")
+-        .arg(w.to_string())
+-        .arg(h.to_string())
+-        .arg("60")
+-        .output();
+-
+-    let timings = if let Ok(cvt_out) = cvt {
+-        let cvt_str = String::from_utf8_lossy(&cvt_out.stdout);
+-        cvt_str
+-            .lines()
+-            .find(|l| l.starts_with("Modeline"))
+-            .map(|line| {
+-                let parts: Vec<&str> = line.split_whitespace().collect();
+-                // parts[0] = "Modeline", parts[1] = name, parts[2..] = timings
+-                parts[2..].join(" ")
+-            })
+-    } else {
+-        None
+-    };
++fn display_resize_needed(
++    previous: (u32, u32),
++    requested: (u32, u32),
++    observe: impl FnOnce() -> Option<(u32, u32)>,
++) -> bool {
++    // A previous failed/partial resize or an external RandR change may make
++    // cached dimensions stale. Even a no-op ACK needs current observed truth.
++    previous != requested || observe() != Some(requested)
++}
++
++/// Validate CVT output before adjusting active dimensions for a virtual mode.
++/// libxcvt 0.1.2 lib/libxcvt.c:294-299 deliberately substitutes 1366 for
++/// 1360x768. Real monitor timings must retain that policy; our DUMMY0 capture
++/// instead needs the exact requested pixel rectangle. Clock, sync and totals
++/// remain unchanged, and both original and adjusted timings must be ordered.
++fn exact_dummy_mode_args(cvt_output: &str, w: u32, h: u32) -> anyhow::Result<Vec<String>> {
++    anyhow::ensure!(
++        w > 0 && h > 0 && w <= u16::MAX as u32 && h <= u16::MAX as u32,
++        "invalid requested dummy dimensions"
++    );
++    anyhow::ensure!(
++        w % 2 == 0 && h % 2 == 0,
++        "caller must normalize H.264 dimensions first"
++    );
++    let mut lines = cvt_output
++        .lines()
++        .filter(|line| line.split_whitespace().next() == Some("Modeline"));
++    let line = lines
++        .next()
++        .ok_or_else(|| anyhow::anyhow!("cvt returned no Modeline"))?;
++    anyhow::ensure!(lines.next().is_none(), "ambiguous cvt Modelines");
++    let parts: Vec<_> = line.split_whitespace().collect();
++    anyhow::ensure!(parts.len() == 13, "unexpected cvt Modeline fields");
++    anyhow::ensure!(
++        parts[1].starts_with('"') && parts[1].ends_with('"') && parts[1].len() > 2,
++        "invalid cvt mode name"
++    );
++    let clock: f64 = parts[2].parse()?;
++    anyhow::ensure!(
++        clock.is_finite() && clock > 0.0 && clock * 1_000_000.0 <= u32::MAX as f64,
++        "invalid cvt pixel clock"
++    );
++    anyhow::ensure!(
++        matches!(parts[11], "+hsync" | "-hsync") && matches!(parts[12], "+vsync" | "-vsync"),
++        "unsupported cvt sync flags"
++    );
++    let mut timing = [0u32; 8];
++    for (value, field) in timing.iter_mut().zip(&parts[3..11]) {
++        *value = u32::from(field.parse::<u16>()?);
++    }
++    let ordered = |axis: &[u32]| axis[0] > 0 && axis.windows(2).all(|pair| pair[0] < pair[1]);
++    anyhow::ensure!(
++        ordered(&timing[..4]) && ordered(&timing[4..]),
++        "unordered cvt timings"
++    );
++    timing[0] = w;
++    timing[4] = h;
++    anyhow::ensure!(
++        ordered(&timing[..4]) && ordered(&timing[4..]),
++        "requested dimensions exceed cvt porch/sync bounds"
++    );
++    let mut args = vec![parts[2].to_owned()];
++    args.extend(timing.iter().map(u32::to_string));
++    args.extend([parts[11].to_owned(), parts[12].to_owned()]);
++    Ok(args)
++}
+ 
+-    if let Some(timings) = timings {
+-        let timing_args: Vec<&str> = timings.split_whitespace().collect();
+-
+-        // Add new mode (ignore error if it already exists)
+-        let _ = Command::new("xrandr")
+-            .arg("--newmode")
+-            .arg(&mode_name)
+-            .args(&timing_args)
+-            .env("DISPLAY", x_display)
+-            .output();
+-
+-        // Add mode to the DUMMY0 output
+-        let _ = Command::new("xrandr")
+-            .arg("--addmode")
+-            .arg("DUMMY0")
+-            .arg(&mode_name)
+-            .env("DISPLAY", x_display)
+-            .output();
+-
+-        // Switch to the new mode
+-        let switch = Command::new("xrandr")
+-            .arg("--output")
+-            .arg("DUMMY0")
+-            .arg("--mode")
+-            .arg(&mode_name)
+-            .env("DISPLAY", x_display)
+-            .output();
+-
+-        match switch {
+-            Ok(out) if out.status.success() => {
+-                tracing::debug!(mode = %mode_name, "xrandr mode switch succeeded");
++/// The capture root must be exactly the sole active DUMMY0 rectangle at 0,0.
++/// Do not mistake a misleading mode name for the X server's actual geometry.
++fn parse_dummy_display_size(output: &str) -> anyhow::Result<(u32, u32)> {
++    let mut root_size = None;
++    let mut dummy_size = None;
++    for line in output.lines() {
++        let fields: Vec<_> = line.split_whitespace().collect();
++        if fields.first() == Some(&"Screen") {
++            anyhow::ensure!(root_size.is_none(), "ambiguous capture root geometry");
++            if let Some(current) = fields.iter().position(|field| *field == "current") {
++                anyhow::ensure!(
++                    fields.get(current + 2) == Some(&"x"),
++                    "invalid root geometry"
++                );
++                let w = fields
++                    .get(current + 1)
++                    .ok_or_else(|| anyhow::anyhow!("missing root width"))?
++                    .parse::<u32>()?;
++                let h = fields
++                    .get(current + 3)
++                    .ok_or_else(|| anyhow::anyhow!("missing root height"))?
++                    .trim_end_matches(',')
++                    .parse::<u32>()?;
++                root_size = Some((w, h));
+             }
+-            Ok(out) => {
+-                let stderr = String::from_utf8_lossy(&out.stderr);
+-                tracing::warn!(stderr = %stderr.trim(), "xrandr mode switch failed");
++        }
++        // An active output has a WxH+X+Y (or negative-position) geometry token.
++        // Inactive connected outputs have no such token and are harmless.
++        let active_geometry = fields.iter().skip(2).any(|field| {
++            field.as_bytes().first().is_some_and(u8::is_ascii_digit)
++                && field.contains('x')
++                && field.contains(['+', '-'])
++        });
++        if fields.get(1) == Some(&"connected") && active_geometry {
++            anyhow::ensure!(
++                fields.first() == Some(&"DUMMY0"),
++                "another output is active on capture root"
++            );
++        }
++        if fields.first() == Some(&"DUMMY0") && fields.get(1) == Some(&"connected") {
++            anyhow::ensure!(dummy_size.is_none(), "ambiguous DUMMY0 geometry");
++            for field in &fields[2..] {
++                if let Some(geometry) = field.strip_suffix("+0+0") {
++                    if let Some((w, h)) = geometry.split_once('x') {
++                        dummy_size = Some((w.parse::<u32>()?, h.parse::<u32>()?));
++                    }
++                }
+             }
+-            Err(e) => tracing::error!("xrandr exec failed: {e}"),
+         }
+-    } else {
+-        tracing::warn!("cvt failed, cannot generate mode timings");
+     }
++    let size = dummy_size.ok_or_else(|| anyhow::anyhow!("no active DUMMY0 at origin"))?;
++    anyhow::ensure!(
++        size.0 > 0 && size.1 > 0 && root_size == Some(size),
++        "DUMMY0 does not cover the complete capture root"
++    );
++    Ok(size)
++}
++
++fn dummy_display_size(x_display: &str) -> anyhow::Result<(u32, u32)> {
++    let output = Command::new("xrandr")
++        .arg("--current")
++        .env("DISPLAY", x_display)
++        .env("LC_ALL", "C")
++        .output()?;
++    anyhow::ensure!(output.status.success(), "xrandr geometry query failed");
++    parse_dummy_display_size(std::str::from_utf8(&output.stdout)?)
++}
++
++fn resize_display_or_previous(
++    x_display: &str,
++    previous: (u32, u32),
++    requested: (u32, u32),
++) -> Option<(u32, u32)> {
++    if let Err(error) = resize_display(x_display, requested.0, requested.1) {
++        tracing::warn!(%error, ?previous, ?requested, "dummy resize failed; preserving capture configuration");
++        // A failed command normally leaves the old mode intact. Confirm that
++        // before acknowledging it; uncertain/partially applied resizes must
++        // not falsely claim the requested size or a successful rollback.
++        return (dummy_display_size(x_display).ok() == Some(previous)).then_some(previous);
++    }
++    Some(requested)
++}
+ 
+-    // Brief pause for the X server to process the mode change
++/// Exact modes are deliberately limited to the virtual DUMMY0 output.
++/// The generic X11 backend's physical-monitor timing behavior is unchanged.
++fn resize_display(x_display: &str, w: u32, h: u32) -> anyhow::Result<()> {
++    // Refuse non-dummy or multi-output capture roots before creating a mode.
++    dummy_display_size(x_display)?;
++    // Old CVT-derived names can already describe incorrect active dimensions.
++    // Keep corrected modes in a separate namespace so those cannot be reused.
++    let mode_name = format!("bpane-exact-{w}x{h}_60");
++    let cvt = Command::new("cvt")
++        .args([w.to_string(), h.to_string(), "60".to_owned()])
++        .env("LC_ALL", "C")
++        .output()?;
++    anyhow::ensure!(cvt.status.success(), "cvt mode generation failed");
++    let args = exact_dummy_mode_args(std::str::from_utf8(&cvt.stdout)?, w, h)?;
++    // --newmode/--addmode may fail when the same corrected mode already exists.
++    // Still attempt the switch, but require both command success and observed
++    // exact geometry; neither mode names nor ignored errors establish success.
++    let _ = Command::new("xrandr")
++        .arg("--newmode")
++        .arg(&mode_name)
++        .args(&args)
++        .env("DISPLAY", x_display)
++        .output()?;
++    let _ = Command::new("xrandr")
++        .args(["--addmode", "DUMMY0", &mode_name])
++        .env("DISPLAY", x_display)
++        .output()?;
++    let switch = Command::new("xrandr")
++        .args(["--output", "DUMMY0", "--mode", &mode_name])
++        .env("DISPLAY", x_display)
++        .output()?;
++    anyhow::ensure!(
++        switch.status.success(),
++        "xrandr mode switch failed: {}",
++        String::from_utf8_lossy(&switch.stderr).trim()
++    );
+     std::thread::sleep(std::time::Duration::from_millis(100));
++    let actual = dummy_display_size(x_display)?;
++    anyhow::ensure!(
++        actual == (w, h),
++        "dummy mode geometry mismatch: requested {w}x{h}, observed {}x{}",
++        actual.0,
++        actual.1
++    );
++    tracing::debug!(mode = %mode_name, "exact dummy mode switch verified");
++    Ok(())
+ }
+ 
+ /// Extract one complete NAL unit from the buffer (Annex B format).
+@@ -668,6 +808,162 @@ fn find_start_code(buf: &[u8], from: usize) -> Option<usize> {
+ mod tests {
+     use super::*;
+ 
++    const CVT_1360: &str = "# 1360x768 59.80 Hz\nModeline \"1360x768_60.00\" 84.75 1366 1431 1567 1776 768 771 781 798 -hsync +vsync\n";
++    const CVT_1280: &str =
++        "Modeline \"1280x720_60.00\" 74.50 1280 1344 1472 1664 720 723 728 748 -hsync +vsync";
++    const DUMMY_1360: &str = "Screen 0: minimum 64 x 64, current 1360 x 768, maximum 32767 x 32767\nDUMMY0 connected primary 1360x768+0+0 (normal left inverted right x axis y axis) 0mm x 0mm\n   bpane-exact-1360x768_60 59.80*\nDUMMY1 disconnected (normal left inverted right x axis y axis)\n";
++
++    #[test]
++    fn no_op_resize_rechecks_actual_geometry_after_failed_or_external_resize() {
++        let previous = (1360, 768);
++        assert!(!display_resize_needed(previous, previous, || Some(
++            previous
++        )));
++        assert!(display_resize_needed(previous, previous, || None));
++        assert!(display_resize_needed(previous, previous, || Some((
++            1366, 768
++        ))));
++        assert!(display_resize_needed(previous, (1280, 720), || panic!(
++            "changed sizes are verified during the switch"
++        )));
++    }
++
++    #[test]
++    fn exact_dummy_mode_corrects_libxcvt_1366_substitution_without_changing_timings() {
++        let args = exact_dummy_mode_args(CVT_1360, 1360, 768).unwrap();
++        assert_eq!(
++            args,
++            [
++                "84.75", "1360", "1431", "1567", "1776", "768", "771", "781", "798", "-hsync",
++                "+vsync"
++            ]
++        );
++    }
++
++    #[test]
++    fn exact_dummy_mode_leaves_ordinary_cvt_timings_unchanged() {
++        let args = exact_dummy_mode_args(CVT_1280, 1280, 720).unwrap();
++        assert_eq!(
++            args.join(" "),
++            "74.50 1280 1344 1472 1664 720 723 728 748 -hsync +vsync"
++        );
++    }
++
++    #[test]
++    fn exact_dummy_mode_receives_the_callers_even_clamped_dimensions() {
++        let normalized = normalized_resize_dimensions(1361, 769);
++        assert_eq!(normalized, (1360, 768));
++        let args = exact_dummy_mode_args(CVT_1360, normalized.0, normalized.1).unwrap();
++        assert_eq!(
++            (&args[1], &args[5]),
++            (&"1360".to_owned(), &"768".to_owned())
++        );
++        assert_eq!(normalized_resize_dimensions(0, 1), (320, 200));
++        assert_eq!(
++            normalized_resize_dimensions(u32::MAX, u32::MAX),
++            (3840, 2160)
++        );
++        assert!(exact_dummy_mode_args(CVT_1360, 1361, 769).is_err());
++    }
++
++    #[test]
++    fn exact_dummy_mode_rejects_missing_extra_ambiguous_or_unsupported_fields() {
++        for output in [
++            "",
++            "Modeline",
++            "Modeline \"name\"",
++            "# no mode",
++            "Modeline \"name\" 74.50",
++        ] {
++            assert!(
++                exact_dummy_mode_args(output, 1280, 720).is_err(),
++                "{output}"
++            );
++        }
++        for output in [
++            format!("{CVT_1280}\n{CVT_1280}"),
++            format!("{CVT_1280} interlace"),
++            CVT_1280.replace("-hsync", "--output"),
++            CVT_1280.replace("+vsync", "+hsync"),
++            CVT_1280.replace("\"1280x720_60.00\"", "unquoted"),
++        ] {
++            assert!(
++                exact_dummy_mode_args(&output, 1280, 720).is_err(),
++                "{output}"
++            );
++        }
++    }
++
++    #[test]
++    fn exact_dummy_mode_rejects_nonfinite_or_overflowing_clocks_and_timings() {
++        for clock in ["NaN", "inf", "-1", "0", "1e100", "broken"] {
++            assert!(exact_dummy_mode_args(&CVT_1280.replace("74.50", clock), 1280, 720).is_err());
++        }
++        for value in ["65536", "4294967296", "-1", "1664.5", "bad"] {
++            assert!(exact_dummy_mode_args(&CVT_1280.replace("1664", value), 1280, 720).is_err());
++        }
++        assert!(exact_dummy_mode_args(CVT_1280, 0, 720).is_err());
++        assert!(exact_dummy_mode_args(CVT_1280, 1280, u32::MAX).is_err());
++    }
++
++    #[test]
++    fn exact_dummy_mode_rejects_unordered_source_or_adjusted_porches() {
++        for output in [
++            CVT_1280.replace("1280 1344", "0 1344"),
++            CVT_1280.replace("1280 1344", "1344 1344"),
++            CVT_1280.replace("1344 1472", "1473 1472"),
++            CVT_1280.replace("1472 1664", "1664 1664"),
++            CVT_1280.replace("720 723", "724 723"),
++            CVT_1280.replace("723 728", "728 728"),
++            CVT_1280.replace("728 748", "749 748"),
++        ] {
++            assert!(
++                exact_dummy_mode_args(&output, 1280, 720).is_err(),
++                "{output}"
++            );
++        }
++        assert!(exact_dummy_mode_args(CVT_1280, 1344, 720).is_err());
++        assert!(exact_dummy_mode_args(CVT_1280, 1280, 724).is_err());
++    }
++
++    #[test]
++    fn dummy_geometry_uses_observed_root_and_output_not_mode_names() {
++        assert_eq!(parse_dummy_display_size(DUMMY_1360).unwrap(), (1360, 768));
++        // The old CVT mode name lies; the active rectangle/root is authoritative.
++        let stale = DUMMY_1360
++            .replace("current 1360", "current 1366")
++            .replace("1360x768+0+0", "1366x768+0+0");
++        assert_eq!(parse_dummy_display_size(&stale).unwrap(), (1366, 768));
++        assert_eq!(
++            parse_dummy_display_size(&DUMMY_1360.replace(" primary", "")).unwrap(),
++            (1360, 768)
++        );
++    }
++
++    #[test]
++    fn dummy_geometry_refuses_other_active_outputs_offsets_and_ambiguous_roots() {
++        for output in [
++            String::new(),
++            DUMMY_1360.replace("DUMMY0 connected", "HDMI-1 connected"),
++            DUMMY_1360.replace("current 1360", "current 1366"),
++            DUMMY_1360.replace("+0+0", "+8+0"),
++            DUMMY_1360.replace("+0+0", "-8+0"),
++            format!("{DUMMY_1360}HDMI-1 connected 1360x768+0+0\n"),
++            format!("{DUMMY_1360}DUMMY1 connected 1360x768+1360+0\n"),
++            format!("{DUMMY_1360}DUMMY0 connected 1360x768+0+0\n"),
++            format!("{DUMMY_1360}{DUMMY_1360}"),
++        ] {
++            assert!(parse_dummy_display_size(&output).is_err(), "{output}");
++        }
++        assert_eq!(
++            parse_dummy_display_size(&format!(
++                "{DUMMY_1360}DUMMY2 connected (normal left inverted right x axis y axis)\n"
++            ))
++            .unwrap(),
++            (1360, 768)
++        );
++    }
++
+     #[test]
+     fn extract_nal_from_annex_b() {
+         let mut buf = vec![

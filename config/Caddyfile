@@ -1,0 +1,20 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$VIEWER_HOST}:8443 {
+	tls internal
+	@root path /
+	redir @root /browser/ 308
+	@viewer path /browser /browser/*
+	handle @viewer {
+		reverse_proxy browserpane:8090
+	}
+	handle {
+		respond 404
+	}
+}

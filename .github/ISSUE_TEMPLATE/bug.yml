@@ -1,0 +1,25 @@
+name: Bundle bug
+description: Report a reproducible viewer, container or shared-browser issue.
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste cookies, tokens, profiles, private page content or a full .env. Use a synthetic page when possible. Security reports follow SECURITY.md.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description: Fork commit/image digest, architecture, Pi model if relevant, Docker/Compose and local viewer browser versions. No operator addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and expected result
+      description: Include a minimal synthetic fixture and exact steps, including resolution/density and whether a fresh disposable profile reproduces it.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Safe evidence
+      description: Relevant redacted error lines or synthetic screenshots only. Do not upload raw browser/agent data.

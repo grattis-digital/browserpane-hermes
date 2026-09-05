@@ -1,0 +1,296 @@
+diff --git a/code/apps/bpane-host/src/tiles/emitter.rs b/code/apps/bpane-host/src/tiles/emitter.rs
+index 7ed0ae6..97bc355 100644
+--- a/code/apps/bpane-host/src/tiles/emitter.rs
++++ b/code/apps/bpane-host/src/tiles/emitter.rs
+@@ -77,7 +77,7 @@ pub struct TileEmitter {
+     /// Shifted by `shift_hashes()` during scroll to match content displacement.
+     last_hashes: Vec<u64>,
+     /// Per-position hash for static (non-scrolling) tiles (header, scrollbar).
+-    /// Never shifted - these tiles are drawn at fixed screen positions.
++    /// Never shifted; invalidated wherever ScrollCopy changes their pixels.
+     static_last_hashes: Vec<u64>,
+     cols: u16,
+     /// Content hashes of QOI tiles the client has in its tile cache.
+@@ -193,6 +193,12 @@ impl TileEmitter {
+         }
+         if i32::from(dy) % i32::from(grid.tile_size) == 0 {
+             self.shift_hashes(i32::from(dy) / i32::from(grid.tile_size), grid.rows);
++            // "Static" is a grid partition, not proof the copied pixels stay
++            // fixed. In particular the clipped final row is static even when
++            // it lies inside the viewport. An upward copy overwrites a fixed
++            // footer there without exposing that bottom strip. Its unchanged
++            // capture hash must not suppress the exact residual/static repair.
++            self.invalidate_static_region_positions(grid, region);
+         } else {
+             self.invalidate_region_positions(grid, offset_y, region, |_| {});
+             return; // exposed positions are already included, outside chrome is not
+@@ -206,6 +212,20 @@ impl TileEmitter {
+         );
+     }
+ 
++    fn invalidate_static_region_positions(&mut self, grid: &TileGrid, region: Rect) {
++        for row in 0..grid.rows {
++            for col in 0..grid.cols {
++                let coord = TileCoord::new(col, row);
++                if region.overlaps(&Self::offset_tile_rect(coord, grid, 0)) {
++                    let index = usize::from(row) * usize::from(self.cols) + usize::from(col);
++                    if let Some(hash) = self.static_last_hashes.get_mut(index) {
++                        *hash = 0;
++                    }
++                }
++            }
++        }
++    }
++
+     /// Shift per-position hashes by `row_shift` rows after a scroll.
+     ///
+     /// When scrolling causes the content at each grid position to shift by
+@@ -233,7 +253,7 @@ impl TileEmitter {
+         self.last_hashes = new_hashes;
+     }
+ 
+-    /// Zero hash entries for tile rows in the client-side exposed strip.
++    /// Zero content hash entries for tile rows in the client-side exposed strip.
+     ///
+     /// After `shift_hashes`, the grid-level shift correctly handles rows that
+     /// shift beyond the grid boundary. But when the scroll region starts at
+@@ -287,24 +307,9 @@ impl TileEmitter {
+             }
+         }
+ 
+-        // Also zero static_last_hashes for tile rows whose RAW position
+-        // (offset_y=0) overlaps the exposed strip. Static tiles (buffer row,
+-        // header, scrollbar) are drawn at raw grid positions. If the buffer
+-        // row's content is unchanged (e.g., solid white), its static hash
+-        // still matches - causing L1 skip even though ScrollCopy cleared
+-        // that area on the client canvas. Zeroing forces re-emission.
+-        let static_total = self.static_last_hashes.len();
+-        for r in 0..(static_total / cols.max(1)) {
+-            let tile_pixel_top = r as i32 * ts; // no offset for static tiles
+-            let tile_pixel_bot = tile_pixel_top + ts;
+-            if tile_pixel_bot > exposed_start && tile_pixel_top < exposed_end {
+-                let start = r * cols;
+-                let end = (start + cols).min(static_total);
+-                for h in &mut self.static_last_hashes[start..end] {
+-                    *h = 0;
+-                }
+-            }
+-        }
++        // Static positions are invalidated over the entire copy region by
++        // apply_scroll_copy_to_hashes, including its exposed strip. Keeping
++        // that separate also preserves static columns outside a narrow copy.
+     }
+ 
+     /// Mark a known hash as recently used in the sender-side LRU index.
+@@ -1167,6 +1172,38 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn whole_row_scroll_invalidates_moved_static_positions_but_keeps_outside_and_l2() {
++        let grid = TileGrid::new(192, 272, 64);
++        let region = Rect::new(0, 64, 128, 208);
++        for dy in [-64, 64, -128, 128] {
++            for offset in [0, 17, 63] {
++                let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++                emitter.last_hashes.fill(42);
++                emitter.static_last_hashes.fill(43);
++                emitter.track_sent_hash(42);
++                emitter.apply_scroll_copy_to_hashes(&grid, dy, offset, region);
++                for row in 0..grid.rows {
++                    for col in 0..grid.cols {
++                        let moved = col < 2 && row > 0;
++                        let index = usize::from(row * grid.cols + col);
++                        assert_eq!(
++                            emitter.static_last_hashes[index],
++                            if moved { 0 } else { 43 },
++                            "static position: dy={dy}, offset={offset}, col={col}, row={row}"
++                        );
++                    }
++                }
++                // The copy's interior still benefits from whole-row dynamic
++                // hash reuse; repairing static positions must not clear L2.
++                assert!(emitter.last_hashes.contains(&42));
++                assert!(emitter.sent_hashes.contains(&42));
++                assert_eq!(emitter.sent_hash_evictions_total(), 0);
++                assert!(!emitter.snapshot_requested);
++            }
++        }
++    }
++
+     #[test]
+     fn sender_cache_evicts_true_lru_after_cache_miss() {
+         let mut emitter = TileEmitter::new(1, 1);
+diff --git a/code/apps/bpane-host/src/tile_loop/integrity_tests.rs b/code/apps/bpane-host/src/tile_loop/integrity_tests.rs
+index 56d3fce..7917feb 100644
+--- a/code/apps/bpane-host/src/tile_loop/integrity_tests.rs
++++ b/code/apps/bpane-host/src/tile_loop/integrity_tests.rs
+@@ -273,9 +273,9 @@ fn random_scroll_reversals_reconstruct_every_pixel_with_matching_chrome_and_offs
+                         stride,
+                         &chrome,
+                         &grid,
+-                        (right % 64 != 0).then_some(right / 64),
++                        (right < grid.screen_w && right % 64 != 0).then_some(right / 64),
+                         (top % 64 != 0).then_some(top / 64),
+-                        (bottom % 64 != 0).then_some(bottom / 64),
++                        (bottom < grid.screen_h && bottom % 64 != 0).then_some(bottom / 64),
+                         None,
+                         None,
+                     ),
+@@ -298,6 +298,156 @@ fn random_scroll_reversals_reconstruct_every_pixel_with_matching_chrome_and_offs
+     }
+ }
+ 
++#[test]
++fn retained_scroll_repairs_stationary_footer_in_partial_bottom_tile_row() {
++    for height in [720u16, 767, 768] {
++        let grid = TileGrid::new(1280, height, 64);
++        let stride = usize::from(grid.screen_w) * 4;
++        let top = 87;
++        let right = 1265;
++        let coords: Vec<_> = (0..grid.rows)
++            .flat_map(|row| (0..grid.cols).map(move |col| TileCoord::new(col, row)))
++            .collect();
++        let capture = |origin: u16| -> Vec<u8> {
++            (0..height)
++                .flat_map(|y| {
++                    (0..grid.screen_w).flat_map(move |x| {
++                        if y < top || x >= right {
++                            [192, 192, 192, 255] // fixed browser chrome / scrollbar
++                        } else if y >= height - 27 {
++                            // Unchanged fixed footer: copying moving content over
++                            // it must invalidate static L1 even when capture is equal.
++                            [40, 24, (x % 113) as u8, 255]
++                        } else {
++                            let document_y = y + origin;
++                            [x as u8, document_y as u8, (x ^ document_y) as u8, 255]
++                        }
++                    })
++                })
++                .collect()
++        };
++        let emit = |emitter: &mut TileEmitter, pixels: &[u8], dirty: &[TileCoord]| {
++            let (content, chrome): (Vec<_>, Vec<_>) = dirty.iter().copied().partition(|coord| {
++                is_content_tile_in_scroll_region(*coord, 64, top, height, right)
++            });
++            let mut frames = emitter
++                .emit_frame(pixels, stride, &content, &grid, 0, None, None)
++                .tile_frames;
++            let end = frames.pop().expect("every emission ends its batch");
++            frames.push(
++                TileMessage::TileDrawMode {
++                    apply_offset: false,
++                }
++                .to_frame(),
++            );
++            frames.extend(emitter.emit_static_tiles(
++                pixels,
++                stride,
++                &chrome,
++                &grid,
++                Some(right / 64),
++                Some(top / 64),
++                // Match production: the physical screen edge is NOT a split
++                // boundary. Forcing this row to encode would mask stale L1.
++                None,
++                None,
++                None,
++            ));
++            frames.push(TileMessage::TileDrawMode { apply_offset: true }.to_frame());
++            frames.push(end);
++            frames
++        };
++        let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++        let mut viewer = Viewer::new(&grid);
++        let mut origin = 512u16;
++        let mut previous = capture(origin);
++        viewer.apply(emit(&mut emitter, &previous, &coords), &grid);
++        assert!(viewer.pixels == rgba_from_bgra(&previous));
++        let mut upward_copies = 0;
++        let mut downward_copies = 0;
++        for dy in [-64i16, -128, 64, 128, -64, 64] {
++            origin = (i32::from(origin) + i32::from(dy)) as u16;
++            let current = capture(origin);
++            let scroll = DetectedScrollFrame {
++                dy,
++                confidence: 1.0,
++                source: "test",
++                direction_matches: true,
++                min_confidence: None,
++                row_shift: i32::from(dy) / 64,
++                region_top: top,
++                region_bottom: height,
++                region_right: right,
++            };
++            let partition = partition_and_compare(
++                &current,
++                &previous,
++                stride,
++                &grid,
++                0,
++                64,
++                32,
++                dy,
++                &coords,
++                &scroll,
++                top,
++                height,
++                right,
++                grid.screen_w,
++            );
++            assert!(
++                partition.quantized_scroll_copy && partition.saved_tiles > 0,
++                "footer regression must exercise real retained ScrollCopy"
++            );
++            assert!(
++                partition.interior_ratio <= 0.70,
++                "production must accept this residual without full fallback"
++            );
++            emitter.apply_scroll_copy_to_hashes(
++                &grid,
++                dy,
++                0,
++                Rect::new(0, top, right, height - top),
++            );
++            viewer.apply(
++                [TileMessage::ScrollCopy {
++                    dx: 0,
++                    dy,
++                    region_top: top,
++                    region_bottom: height,
++                    region_right: right,
++                }
++                .to_frame()],
++                &grid,
++            );
++            if dy < 0 {
++                upward_copies += 1;
++            } else {
++                downward_copies += 1;
++            }
++            let dirty: Vec<_> = partition
++                .residual
++                .into_iter()
++                .chain(partition.chrome_emit_coords)
++                .collect();
++            viewer.apply(emit(&mut emitter, &current, &dirty), &grid);
++            let expected = rgba_from_bgra(&current);
++            let bad: Vec<_> = viewer
++                .pixels
++                .chunks_exact(4)
++                .zip(expected.chunks_exact(4))
++                .enumerate()
++                .filter_map(|(index, (a, b))| (a != b).then_some(index))
++                .collect();
++            assert!(bad.is_empty(),
++                "stationary footer corrupted: height={height}, dy={dy}, wrong_pixels={}, first_xy={:?}",
++                bad.len(), bad.first().map(|index| (index % 1280, index / 1280)));
++            previous = current;
++        }
++        assert_eq!((upward_copies, downward_copies), (3, 3));
++    }
++}
++
+ #[test]
+ fn delayed_cache_miss_recovers_moved_holes_with_one_fresh_snapshot() {
+     let grid = TileGrid::new(128, 145, 64);

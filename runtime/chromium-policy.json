@@ -1,0 +1,10 @@
+{
+  "URLBlocklist": ["file://*", "file:///*"],
+  "DefaultFileSystemReadGuardSetting": 2,
+  "DefaultFileSystemWriteGuardSetting": 2,
+  "DownloadDirectory": "/shared/downloads",
+  "PromptForDownloadLocation": false,
+  "PasswordManagerEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true
+}

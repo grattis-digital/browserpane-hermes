@@ -1,0 +1,8 @@
+# Native Linux tests, including X11/MIT-SHM regression tests. No browser profile.
+FROM rust:1.93-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopus-dev pkg-config cmake xvfb x11-xserver-utils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+ENV CARGO_TARGET_DIR=/build-target
+CMD ["cargo", "test", "--locked", "-p", "bpane-host", "-p", "bpane-gateway"]

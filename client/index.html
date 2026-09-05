@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BrowserPane Hermes · Shared browser</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header>
+    <div class="connection-controls">
+      <strong>BrowserPane Hermes</strong>
+      <span id="status" role="status">Connecting…</span>
+      <button id="connect">Connect</button>
+      <button id="disconnect" disabled>Disconnect</button>
+    </div>
+    <div class="display-controls" role="group" aria-label="Display settings">
+      <label class="display-field" for="density">
+        <span>HiDPI</span>
+        <select id="density" aria-describedby="display-help"></select>
+      </label>
+      <label class="display-field" for="resolution">
+        <span>Resolution</span>
+        <select id="resolution" aria-describedby="display-help"></select>
+      </label>
+      <button id="fullscreen" aria-pressed="false">Full screen</button>
+      <a href="./source">Source</a>
+    </div>
+  </header>
+  <div id="display-bar">
+    <span id="display-summary">Auto · Pi balanced</span>
+    <details id="display-help">
+      <summary>Display help</summary>
+      <p>Resolutions are actual capture pixels. Smaller views are centered;
+        larger views fit without stretching. Auto keeps the Raspberry Pi near
+        720p and uses readable 1× sizing. Presets go up to Full HD.</p>
+      <p>HiDPI changes local display density, not Chrome’s zoom. Higher values
+        make the same desktop smaller; Native matches your monitor’s pixel
+        density (up to 3×) when space permits. Chrome stays at 1× and does not restart.
+        Large captures require more Pi CPU and bandwidth.</p>
+      <p>Preferences are saved in this viewer. The first connected viewer controls
+        the shared capture; other viewers fit that resolution locally.</p>
+    </details>
+  </div>
+  <main id="viewport" aria-label="Shared Chromium session">
+    <div id="screen"></div>
+  </main>
+  <div id="display-notice" role="status" aria-live="polite"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

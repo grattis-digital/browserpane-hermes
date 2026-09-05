@@ -123,9 +123,62 @@ cookies, access tickets, API keys or raw environment dumps in artifacts.
 8. Verify documentation links, public-data/secret hygiene and exact final Git tree.
 9. Push the branch, inspect specialized CI, and publish according to user direction.
 
-Exact runnable commands and actual evidence will replace these acceptance steps
-once the new setup interface is implemented. No upstream enterprise gate is
-represented as relevant evidence for this narrowed deployment.
+Runnable checks (see CONTRIBUTING.md for isolated browser selection):
+
+```sh
+npm ci
+sh scripts/fetch-upstream.sh
+node scripts/audit-upstream.mjs
+npm test
+npm run test:client
+npm run build
+npm audit --omit=dev --audit-level=high
+python3 -m unittest discover -s hermes -p 'test_*.py' -v
+docker compose --env-file .env.example config --quiet
+npm run test:linux
+npm run test:webgl
+docker build --tag browserpane-hermes:test .
+npm run test:runtime
+node scripts/test-viewer.mjs browserpane-hermes:test
+docker build --tag browserpane-hermes-agent:test ./hermes
+python3 hermes/check-container.py --image browserpane-hermes-agent:test
+node scripts/test-compose.mjs browserpane-hermes:test browserpane-hermes-agent:test
+```
+
+The fetch intentionally refuses an existing generated snapshot; run that step
+once per clean checkout, not over local source. No enterprise deployment gate is
+represented as evidence for this narrowed bundle.
+
+## Local qualification and publication status
+
+Implementation slices 1–4 are complete. Before publication, local ARM64 Linux
+containers on a Mac passed the following checks; hosted GitHub CI is a separate
+gate, not inferred from local success:
+
+- Strict pristine replay: 15 ordered patches, 816 source files, exact byte match.
+- Wrapper/configuration/safety/source-packaging: 92 tests; frontend: 771 tests.
+- Native gateway: 532 passed, 1 intentionally ignored; host: 419 passed,
+  20 intentionally ignored. Gateway integration suites passed. All seven private
+  X11/MIT-SHM regressions and three new listener regressions explicitly ran.
+- Both actual ARM64 images built. Hermes bootstrap: six tests; linked SQLite
+  3.53.4 with working FTS5/trigram; classic CLI and idle gateway startup passed.
+- Real MCP and browser tab/cookie/localStorage/shared-file persistence passed
+  through reconnect, restart and recreation using fresh owned volumes.
+- Full Compose passed local-CA-verified HTTPS, redirect, protected bootstrap,
+  hidden control routes, private listeners and real Hermes discovery of 27
+  permitted BrowserPane tools. No provider key, paid call or host CA change.
+- Real viewer: 27 display checkpoints; scroll: 16/16 complete pixel and geometry
+  checkpoints. No display page errors or unexpected downloads. WebGL texture
+  reuse, resize and context-loss checks passed with zero mismatched channels.
+- Actionlint/ShellCheck passed; npm production audit reported zero vulnerabilities.
+  This is not a comprehensive vulnerability or security guarantee.
+- Screenshot captured from the synthetic demo through real WebTransport, with
+  the visible field edited through real MCP. Original AI-assisted logo inspected.
+
+The existing Raspberry Pi deployment was not changed or benchmarked again.
+Historical Pi measurements remain explicitly labelled in docs/OPTIMIZATIONS.md.
+Publish as a review branch/PR by default; do not infer a merge or release from
+these local results. Record the hosted workflow outcome on the PR/canonical issue.
 
 ## Definition of done
 

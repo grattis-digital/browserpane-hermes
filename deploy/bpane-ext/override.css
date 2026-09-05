@@ -1,4 +1,0 @@
-*, *::before, *::after,
-html, body {
-  scroll-behavior: auto !important;
-}

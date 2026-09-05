@@ -1,0 +1,797 @@
+diff --git a/code/apps/bpane-host/src/capture/x11.rs b/code/apps/bpane-host/src/capture/x11.rs
+index 4296e57..9ffcccc 100644
+--- a/code/apps/bpane-host/src/capture/x11.rs
++++ b/code/apps/bpane-host/src/capture/x11.rs
+@@ -65,15 +65,18 @@ impl ShmSegment {
+             // Mark for auto-cleanup when all processes detach
+             libc::shmctl(shm_id, libc::IPC_RMID, std::ptr::null_mut());
+ 
+-            let seg_id = conn.generate_id()?;
+-            conn.shm_attach(seg_id, shm_id as u32, false)?.check()?;
+-
+-            Ok(Self {
+-                seg_id,
++            // Own the attachment before fallible X11 work so failures cannot
++            // leak the mapping (IPC_RMID alone does not detach this process).
++            let mut segment = Self {
++                seg_id: 0,
+                 shm_id,
+                 ptr: ptr as *mut u8,
+                 size,
+-            })
++            };
++            segment.seg_id = conn.generate_id()?;
++            conn.shm_attach(segment.seg_id, shm_id as u32, false)?
++                .check()?;
++            Ok(segment)
+         }
+     }
+ 
+@@ -424,17 +427,33 @@ impl X11CaptureBackend {
+     /// the cached values.
+     #[cfg(target_os = "linux")]
+     pub fn refresh_screen_size(&mut self) -> (u32, u32) {
+-        match self.conn.get_geometry(self.root) {
+-            Ok(cookie) => match cookie.reply() {
+-                Ok(geo) => {
+-                    self.screen_w = geo.width as u32;
+-                    self.screen_h = geo.height as u32;
+-                    (self.screen_w, self.screen_h)
++        let geometry = self
++            .conn
++            .get_geometry(self.root)
++            .ok()
++            .and_then(|cookie| cookie.reply().ok());
++        if let Some(geo) = geometry {
++            self.screen_w = geo.width as u32;
++            self.screen_h = geo.height as u32;
++            let required = self.screen_w as usize * self.screen_h as usize * 4;
++            if self
++                .shm
++                .as_ref()
++                .is_some_and(|segment| segment.size < required)
++            {
++                // External RANDR resizes do not run xrandr_resize(). Keep SHM
++                // usable after growth instead of permanently falling back to
++                // full-frame socket transfers. Retain larger buffers on shrink.
++                if let Some(segment) = self.shm.take() {
++                    if let Ok(cookie) = self.conn.shm_detach(segment.seg_id) {
++                        let _ = cookie.check();
++                    }
++                    drop(segment);
+                 }
+-                Err(_) => (self.screen_w, self.screen_h),
+-            },
+-            Err(_) => (self.screen_w, self.screen_h),
++                self.shm = Self::init_shm_static(&self.conn, self.screen_w, self.screen_h);
++            }
+         }
++        (self.screen_w, self.screen_h)
+     }
+ 
+     #[cfg(not(target_os = "linux"))]
+@@ -484,6 +503,18 @@ impl X11CaptureBackend {
+         anyhow::bail!("X11 capture not available on this platform")
+     }
+ 
++    #[cfg(not(target_os = "linux"))]
++    pub fn capture_region_raw_into(
++        &mut self,
++        _x: u16,
++        _y: u16,
++        _w: u16,
++        _h: u16,
++        _data: &mut Vec<u8>,
++    ) -> anyhow::Result<()> {
++        anyhow::bail!("X11 capture not available on this platform")
++    }
++
+     /// Capture a sub-region of the screen via SHM or GetImage.
+     /// Returns BGRA pixel data (NOT swapped to RGBA — caller must handle).
+     #[cfg(target_os = "linux")]
+@@ -494,7 +525,23 @@ impl X11CaptureBackend {
+         w: u16,
+         h: u16,
+     ) -> anyhow::Result<Vec<u8>> {
+-        let data = if let Some(ref shm_seg) = self.shm {
++        let mut data = Vec::new();
++        self.capture_region_raw_into(x, y, w, h, &mut data)?;
++        Ok(data)
++    }
++
++    /// Capture into caller-owned storage. The tile loop rotates two buffers:
++    /// one current image and one previous image for scroll/motion comparison.
++    #[cfg(target_os = "linux")]
++    pub fn capture_region_raw_into(
++        &mut self,
++        x: u16,
++        y: u16,
++        w: u16,
++        h: u16,
++        data: &mut Vec<u8>,
++    ) -> anyhow::Result<()> {
++        if let Some(ref shm_seg) = self.shm {
+             // SHM requires segment large enough; if region fits, use it
+             let region_bytes = (w as usize) * (h as usize) * 4;
+             if region_bytes <= shm_seg.size {
+@@ -513,7 +560,10 @@ impl X11CaptureBackend {
+                     )?
+                     .reply();
+                 match reply {
+-                    Ok(_) => shm_seg.as_slice()[..region_bytes].to_vec(),
++                    Ok(_) => {
++                        data.clear();
++                        data.extend_from_slice(&shm_seg.as_slice()[..region_bytes]);
++                    }
+                     Err(e) => {
+                         tracing::warn!("SHM region capture failed, fallback: {e}");
+                         let reply = self
+@@ -528,7 +578,7 @@ impl X11CaptureBackend {
+                                 !0,
+                             )?
+                             .reply()?;
+-                        reply.data
++                        *data = reply.data;
+                     }
+                 }
+             } else {
+@@ -544,7 +594,7 @@ impl X11CaptureBackend {
+                         !0,
+                     )?
+                     .reply()?;
+-                reply.data
++                *data = reply.data;
+             }
+         } else {
+             let reply = self
+@@ -559,9 +609,9 @@ impl X11CaptureBackend {
+                     !0,
+                 )?
+                 .reply()?;
+-            reply.data
+-        };
+-        Ok(data)
++            *data = reply.data;
++        }
++        Ok(())
+     }
+ }
+ 
+@@ -581,7 +631,21 @@ impl CaptureBackend for X11CaptureBackend {
+             let w = self.screen_w;
+             let h = self.screen_h;
+ 
++            // Acknowledge before reading pixels. Repaints arriving during or
++            // after GetImage must remain queued for the next capture; draining
++            // them after capture can permanently lose the final repaint.
++            if let Some(damage_id) = self.damage_id {
++                self.conn
++                    .damage_subtract(damage_id, x11rb::NONE, x11rb::NONE)?
++                    .check()?;
++                // Do not drain events after this acknowledgement. NON_EMPTY
++                // emits only once until the next subtract: consuming a fresh
++                // post-ack event here and clearing dirty after GetImage would
++                // leave the server nonempty with no pending client wakeup.
++            }
++
+             // Capture pixels via SHM or fallback to GetImage
++            self.damage_dirty = true; // retain retry on a failed read
+             let data = if let Some(ref shm_seg) = self.shm {
+                 let reply = self
+                     .conn
+@@ -633,19 +697,7 @@ impl CaptureBackend for X11CaptureBackend {
+                     .reply()?;
+                 reply.data
+             };
+-
+-            // Acknowledge damage so we get notified of the next change.
+-            // We must flush + drain events after subtract to consume any
+-            // DamageNotify generated by the subtract itself, otherwise the
+-            // next poll_damage_events() would immediately see it as dirty.
+-            if let Some(damage_id) = self.damage_id {
+-                let _ = self
+-                    .conn
+-                    .damage_subtract(damage_id, x11rb::NONE, x11rb::NONE);
+-                let _ = self.conn.flush();
+-                self.poll_damage_events();
+-                self.damage_dirty = false;
+-            }
++            self.damage_dirty = false;
+ 
+             let ts = SystemTime::now()
+                 .duration_since(UNIX_EPOCH)
+@@ -715,6 +767,8 @@ pub struct DamageTracker {
+     consecutive_small_damage: u32,
+     /// Last time a small-damage frame was allowed through.
+     last_small_damage_sent: Option<std::time::Instant>,
++    /// Lossless tiles must never suppress the last update of a small control.
++    preserve_all_damage: bool,
+ }
+ 
+ /// A damage rectangle reported by XDamage.
+@@ -729,6 +783,19 @@ pub struct DamageRect {
+ 
+ #[cfg(target_os = "linux")]
+ impl DamageTracker {
++    /// Tile cadence already coalesces damage. Unlike the optional video gate,
++    /// a lossless tile stream must not discard small or repetitive updates.
++    pub fn for_tile_capture(
++        display: &str,
++        input_activity_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
++    ) -> anyhow::Result<Option<Self>> {
++        let mut tracker = Self::with_options(display, None, Some(0), Some(input_activity_ms))?;
++        if let Some(tracker) = tracker.as_mut() {
++            tracker.preserve_all_damage = true;
++        }
++        Ok(tracker)
++    }
++
+     /// Create a new damage tracker on a fresh X11 connection.
+     /// Returns `None` if XDamage is unavailable (graceful fallback).
+     pub fn new(display: &str) -> anyhow::Result<Option<Self>> {
+@@ -746,8 +813,7 @@ impl DamageTracker {
+         if display.is_empty() {
+             return Ok(None);
+         }
+-        std::env::set_var("DISPLAY", display);
+-        let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
++        let (conn, screen_num) = x11rb::rust_connection::RustConnection::connect(Some(display))?;
+         let screen = &conn.setup().roots[screen_num];
+         let root = screen.root;
+ 
+@@ -800,6 +866,7 @@ impl DamageTracker {
+                     blink_history: Vec::new(),
+                     consecutive_small_damage: 0,
+                     last_small_damage_sent: None,
++                    preserve_all_damage: false,
+                 }))
+             }
+             Err(e) => {
+@@ -822,6 +889,10 @@ impl DamageTracker {
+             return false;
+         }
+ 
++        if self.preserve_all_damage {
++            return true;
++        }
++
+         let bypass_small_damage_filters = self.has_recent_input_activity();
+ 
+         // If aggregation window is zero, skip timing logic
+@@ -961,6 +1032,59 @@ impl DamageTracker {
+         }
+     }
+ 
++    /// Sleep until X11 has activity, without burning CPU on a polling loop.
++    /// The finite timeout also lets the caller service cache misses/disconnects.
++    pub fn wait_for_damage(&mut self, timeout: std::time::Duration) {
++        use std::os::fd::AsRawFd;
++        self.drain_events();
++        if self.dirty {
++            return;
++        }
++        let mut descriptor = libc::pollfd {
++            fd: self.conn.stream().as_raw_fd(),
++            events: libc::POLLIN,
++            revents: 0,
++        };
++        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
++        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
++        if result < 0 || descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
++        {
++            self.force_refresh();
++            // A broken X socket must not turn the capture thread into a spin.
++            std::thread::sleep(timeout);
++        }
++    }
++
++    /// Freeze this frame's dirty bounds and acknowledge the server BEFORE
++    /// GetImage. The round trip orders the acknowledgement ahead of capture,
++    /// even though capture uses another X11 connection. Never clear events
++    /// after the frame has been read/encoded/sent.
++    pub fn begin_capture(&mut self) -> Option<(u16, u16, u16, u16)> {
++        self.drain_events();
++        let acknowledged = self
++            .conn
++            .damage_subtract(self.damage_id, x11rb::NONE, x11rb::NONE)
++            .ok()
++            .and_then(|cookie| cookie.check().ok())
++            .is_some();
++        self.drain_events();
++        let bounds = self.damage_bounding_box();
++        self.dirty = false;
++        self.first_damage_at = None;
++        self.damage_rects.clear();
++        if !acknowledged {
++            self.force_refresh();
++            return None;
++        }
++        bounds
++    }
++
++    pub fn force_refresh(&mut self) {
++        self.dirty = true;
++        self.first_damage_at = Some(std::time::Instant::now());
++        self.damage_rects.clear();
++    }
++
+     fn has_recent_input_activity(&self) -> bool {
+         let Some(activity_ms) = &self.input_activity_ms else {
+             return false;
+@@ -1182,6 +1306,13 @@ pub struct DamageRect {
+ 
+ #[cfg(not(target_os = "linux"))]
+ impl DamageTracker {
++    pub fn for_tile_capture(
++        _display: &str,
++        _input_activity_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
++    ) -> anyhow::Result<Option<Self>> {
++        Ok(None)
++    }
++
+     pub fn new(_display: &str) -> anyhow::Result<Option<Self>> {
+         Ok(None)
+     }
+@@ -1201,6 +1332,16 @@ impl DamageTracker {
+ 
+     pub fn reset(&mut self) {}
+ 
++    pub fn begin_capture(&mut self) -> Option<(u16, u16, u16, u16)> {
++        None
++    }
++
++    pub fn force_refresh(&mut self) {}
++
++    pub fn wait_for_damage(&mut self, timeout: std::time::Duration) {
++        std::thread::sleep(timeout);
++    }
++
+     pub fn damage_bounding_box(&self) -> Option<(u16, u16, u16, u16)> {
+         None
+     }
+@@ -1256,6 +1397,174 @@ mod tests {
+         })
+     }
+ 
++    #[cfg(target_os = "linux")]
++    fn paint_root_rect(display: &str, x: i16, color: u32) {
++        use x11rb::protocol::xproto::{CreateGCAux, Rectangle};
++        let (conn, screen) =
++            x11rb::rust_connection::RustConnection::connect(Some(display)).unwrap();
++        let root = conn.setup().roots[screen].root;
++        let gc = conn.generate_id().unwrap();
++        conn.create_gc(gc, root, &CreateGCAux::new().foreground(color))
++            .unwrap()
++            .check()
++            .unwrap();
++        conn.poly_fill_rectangle(
++            root,
++            gc,
++            &[Rectangle {
++                x,
++                y: 10,
++                width: 2,
++                height: 2,
++            }],
++        )
++        .unwrap()
++        .check()
++        .unwrap();
++    }
++
++    /// Requires a disposable, otherwise idle X11 display. A repaint arriving
++    /// while encoding must still be pending for the next capture.
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore]
++    fn tile_damage_survives_processing_window() {
++        let display = display_or_skip();
++        if display.is_empty() {
++            return;
++        }
++        let mut tracker = DamageTracker::for_tile_capture(&display, Default::default())
++            .unwrap()
++            .unwrap();
++        tracker.begin_capture();
++        paint_root_rect(&display, 10, 0x010203);
++        assert!(tracker.poll());
++        let bounds = tracker.begin_capture().unwrap();
++        assert!(bounds.0 <= 10 && bounds.0 + bounds.2 >= 12);
++        assert!(!tracker.poll(), "acknowledgement must not self-trigger");
++        // Simulate X rendering after our image read, during tile encoding.
++        paint_root_rect(&display, 100, 0x040506);
++        assert!(tracker.poll(), "a later repaint must not be discarded");
++        let bounds = tracker.begin_capture().unwrap();
++        assert!(bounds.0 <= 100 && bounds.0 + bounds.2 >= 102);
++        assert!(!tracker.poll());
++    }
++
++    /// NON_EMPTY events that arrive after the acknowledgement must remain
++    /// available to the next capture, including when the server already has
++    /// damage and therefore sends no new notification for a later repaint.
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore]
++    fn nonempty_damage_remains_pending_until_next_capture() {
++        let display = display_or_skip();
++        if display.is_empty() {
++            return;
++        }
++        let mut backend = X11CaptureBackend::new(&display, 0, 0).unwrap();
++        backend.capture_frame().unwrap().unwrap();
++        // Start the same acknowledgement/image-read window as capture_frame.
++        let damage_id = backend.damage_id.expect("test requires XDamage");
++        backend
++            .conn
++            .damage_subtract(damage_id, x11rb::NONE, x11rb::NONE)
++            .unwrap()
++            .check()
++            .unwrap();
++        paint_root_rect(&display, 30, 0x112233);
++        // Reading pixels must not consume the DamageNotify queued on this
++        // connection. A second paint occurs while its NON_EMPTY region is set.
++        backend.capture_region_raw(0, 0, 64, 64).unwrap();
++        paint_root_rect(&display, 30, 0x445566);
++        backend.damage_dirty = false;
++        assert!(backend.capture_frame().unwrap().is_some());
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore]
++    fn tile_damage_preserves_small_repeated_final_updates() {
++        let display = display_or_skip();
++        if display.is_empty() {
++            return;
++        }
++        let mut tracker = DamageTracker::for_tile_capture(&display, Default::default())
++            .unwrap()
++            .unwrap();
++        tracker.begin_capture();
++        for color in 1..=8 {
++            paint_root_rect(&display, 20, color);
++            assert!(
++                tracker.poll(),
++                "small update {color} must not be blink/idle-suppressed"
++            );
++            tracker.begin_capture();
++        }
++        assert!(!tracker.poll());
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore]
++    fn tile_shm_capture_reuses_caller_buffer() {
++        let display = display_or_skip();
++        if display.is_empty() {
++            return;
++        }
++        let mut backend = X11CaptureBackend::new(&display, 0, 0).unwrap();
++        assert!(backend.shm.is_some(), "test requires MIT-SHM");
++        let mut data = Vec::new();
++        backend
++            .capture_region_raw_into(0, 0, 32, 24, &mut data)
++            .unwrap();
++        let ptr = data.as_ptr();
++        let capacity = data.capacity();
++        for _ in 0..8 {
++            backend
++                .capture_region_raw_into(0, 0, 32, 24, &mut data)
++                .unwrap();
++            assert_eq!(data.len(), 32 * 24 * 4);
++            assert_eq!(data.capacity(), capacity);
++            assert_eq!(
++                data.as_ptr(),
++                ptr,
++                "steady-state frame must reuse allocation"
++            );
++        }
++    }
++
++    #[cfg(target_os = "linux")]
++    #[test]
++    #[ignore]
++    fn tile_geometry_refresh_grows_undersized_shm() {
++        let display = display_or_skip();
++        if display.is_empty() {
++            return;
++        }
++        let mut backend = X11CaptureBackend::new(&display, 0, 0).unwrap();
++        let old = backend.shm.take().expect("test requires MIT-SHM");
++        backend
++            .conn
++            .shm_detach(old.seg_id)
++            .unwrap()
++            .check()
++            .unwrap();
++        drop(old);
++        // Model the same state as an external framebuffer growth: the saved
++        // SHM capacity is smaller than the server's current root geometry.
++        backend.shm = Some(ShmSegment::allocate(&backend.conn, 16, 16).unwrap());
++        let old_id = backend.shm.as_ref().unwrap().seg_id;
++        let (w, h) = backend.refresh_screen_size();
++        let segment = backend.shm.as_ref().unwrap();
++        assert_ne!(segment.seg_id, old_id);
++        assert!(segment.size >= w as usize * h as usize * 4);
++        let mut data = Vec::new();
++        backend
++            .capture_region_raw_into(0, 0, w as u16, h as u16, &mut data)
++            .unwrap();
++        assert_eq!(data.len(), w as usize * h as usize * 4);
++    }
++
+     /// After construction, `damage_dirty` must be `true` so the first
+     /// `capture_frame()` always captures regardless of XDamage state.
+     #[cfg(target_os = "linux")]
+diff --git a/code/apps/bpane-host/src/config/mod.rs b/code/apps/bpane-host/src/config/mod.rs
+index 6f2c187..1ad4ffa 100644
+--- a/code/apps/bpane-host/src/config/mod.rs
++++ b/code/apps/bpane-host/src/config/mod.rs
+@@ -204,7 +204,11 @@ impl TileCaptureConfig {
+             tile_codec: tile_codec_from_env(),
+             chromium_wheel_step_px,
+             scroll_copy_quantum_px,
+-            base_frame_interval: Duration::from_millis(100),
++            // Damage-driven capture sleeps while idle. Interactive repaints
++            // should not be artificially limited to the former 10 Hz cadence.
++            base_frame_interval: Duration::from_millis(env_u32_clamped(
++                "BPANE_TILE_FRAME_INTERVAL_MS", 16, 8, 1000,
++            ) as u64),
+             scroll_active_frame_interval: Duration::from_millis(env_u32_clamped(
+                 "BPANE_SCROLL_ACTIVE_FRAME_INTERVAL_MS",
+                 33,
+diff --git a/code/apps/bpane-host/src/config/tests.rs b/code/apps/bpane-host/src/config/tests.rs
+index ec99433..4e319e8 100644
+--- a/code/apps/bpane-host/src/config/tests.rs
++++ b/code/apps/bpane-host/src/config/tests.rs
+@@ -143,6 +143,7 @@ fn tile_capture_config_has_sane_defaults() {
+         "BPANE_SCROLL_COPY_QUANTUM_PX",
+         "BPANE_SCROLL_ACTIVE_FRAME_INTERVAL_MS",
+         "BPANE_SCROLL_ACTIVE_CAPTURE_FRAMES",
++        "BPANE_TILE_FRAME_INTERVAL_MS",
+         "BPANE_CDP_MIN_VIDEO_WIDTH",
+         "BPANE_CDP_MIN_VIDEO_HEIGHT",
+         "BPANE_CDP_MIN_VIDEO_AREA_RATIO",
+@@ -158,6 +159,7 @@ fn tile_capture_config_has_sane_defaults() {
+         "BPANE_SCROLL_COPY_QUANTUM_PX",
+         "BPANE_SCROLL_ACTIVE_FRAME_INTERVAL_MS",
+         "BPANE_SCROLL_ACTIVE_CAPTURE_FRAMES",
++        "BPANE_TILE_FRAME_INTERVAL_MS",
+         "BPANE_CDP_MIN_VIDEO_WIDTH",
+         "BPANE_CDP_MIN_VIDEO_HEIGHT",
+         "BPANE_CDP_MIN_VIDEO_AREA_RATIO",
+@@ -170,7 +172,7 @@ fn tile_capture_config_has_sane_defaults() {
+     let cfg = TileCaptureConfig::from_env();
+     assert_eq!(cfg.h264_mode, H264Mode::VideoTiles);
+     assert_eq!(cfg.tile_size, 64);
+-    assert_eq!(cfg.base_frame_interval, Duration::from_millis(100));
++    assert_eq!(cfg.base_frame_interval, Duration::from_millis(16));
+     assert!(cfg.video_classification_enabled);
+     assert!(!cfg.scroll_thin_mode_enabled);
+     assert!(cfg.min_cdp_video_width_px % 2 == 0, "width must be even");
+@@ -178,6 +180,18 @@ fn tile_capture_config_has_sane_defaults() {
+     assert_eq!(cfg.cdp_video_tile_margin, 1);
+ }
+ 
++#[test]
++fn tile_capture_interval_is_configurable_and_bounded() {
++    let _environment = EnvironmentFixture::capture(&["BPANE_TILE_FRAME_INTERVAL_MS"]);
++    for (value, expected_ms) in [("100", 100), ("0", 8), ("2000", 1000), ("invalid", 16)] {
++        std::env::set_var("BPANE_TILE_FRAME_INTERVAL_MS", value);
++        assert_eq!(
++            TileCaptureConfig::from_env().base_frame_interval,
++            Duration::from_millis(expected_ms)
++        );
++    }
++}
++
+ #[test]
+ fn tile_capture_config_off_disables_classification() {
+     let _environment = EnvironmentFixture::capture(&["BPANE_H264_MODE"]);
+diff --git a/code/apps/bpane-host/src/tile_loop/mod.rs b/code/apps/bpane-host/src/tile_loop/mod.rs
+index 359963f..f73aff8 100644
+--- a/code/apps/bpane-host/src/tile_loop/mod.rs
++++ b/code/apps/bpane-host/src/tile_loop/mod.rs
+@@ -63,6 +63,8 @@ pub struct TileCaptureThread {
+     pub(crate) damage: Option<capture::x11::DamageTracker>,
+     pub(crate) screen_w: u16,
+     pub(crate) screen_h: u16,
++    pub(crate) frame_damage_bounds: Option<(u16, u16, u16, u16)>,
++    pub(crate) capture_scratch: Vec<u8>,
+ 
+     // ── Grid & emitter ───────────────────────────────────────────────
+     pub(crate) grid: tiles::TileGrid,
+@@ -202,11 +204,9 @@ impl TileCaptureThread {
+             .flat_map(|r| (0..grid.cols).map(move |c| tiles::TileCoord::new(c, r)))
+             .collect();
+ 
+-        let damage = capture::x11::DamageTracker::with_options(
++        let damage = capture::x11::DamageTracker::for_tile_capture(
+             display,
+-            None,
+-            None,
+-            Some(input_activity.clone()),
++            input_activity.clone(),
+         )
+         .ok()
+         .flatten();
+@@ -233,6 +233,8 @@ impl TileCaptureThread {
+             damage,
+             screen_w,
+             screen_h,
++            frame_damage_bounds: None,
++            capture_scratch: Vec::new(),
+             grid,
+             emitter,
+             full_emit_coords,
+diff --git a/code/apps/bpane-host/src/tile_loop/run.rs b/code/apps/bpane-host/src/tile_loop/run.rs
+index f54a49d..c195933 100644
+--- a/code/apps/bpane-host/src/tile_loop/run.rs
++++ b/code/apps/bpane-host/src/tile_loop/run.rs
+@@ -14,6 +14,13 @@ use crate::capture::ffmpeg::CaptureRegion;
+ use crate::cdp_video::{HintRegionKind, PageHintState};
+ use crate::scroll::select_capture_frame_interval;
+ 
++pub(super) fn capture_budget_wait(
++    frame_interval: std::time::Duration,
++    since_last: std::time::Duration,
++) -> std::time::Duration {
++    frame_interval.saturating_sub(since_last)
++}
++
+ pub(super) fn should_force_refresh_for_video_hint_drop(
+     active_region: Option<CaptureRegion>,
+     hint: &PageHintState,
+@@ -65,23 +72,17 @@ impl super::TileCaptureThread {
+         }
+ 
+         loop {
++            if self.tile_tx.is_closed() {
++                return;
++            }
+             // ── Frame timing ─────────────────────────────────────
+             let frame_interval = select_capture_frame_interval(
+                 self.base_frame_interval,
+                 self.scroll_active_frame_interval,
+                 self.scroll_active_capture_frames_remaining,
+             );
+-            let now = std::time::Instant::now();
+-            let since_last = now.duration_since(self.last_capture);
+-            let sleep_dur = if since_last >= frame_interval {
+-                std::time::Duration::from_millis(16)
+-            } else {
+-                (frame_interval - since_last).max(std::time::Duration::from_millis(16))
+-            };
+-            std::thread::sleep(sleep_dur);
+-
+             // ── Cache miss handling ──────────────────────────────
+-            let mut force_refresh = false;
++            let mut force_refresh = self.prev_frame.is_none();
+             while let Ok((frame_seq, col, row, hash)) = self.cache_miss_rx.try_recv() {
+                 self.emitter.handle_cache_miss(col, row, hash);
+                 self.client_cache_miss_reports_total =
+@@ -114,13 +115,19 @@ impl super::TileCaptureThread {
+                 None => true,
+             };
+             if !has_damage && !force_refresh {
++                if let Some(dt) = self.damage.as_mut() {
++                    dt.wait_for_damage(std::time::Duration::from_millis(50));
++                }
+                 continue;
+             }
+ 
+             let now = std::time::Instant::now();
+-            if now.duration_since(self.last_capture) < frame_interval {
+-                continue;
++            let budget_wait =
++                capture_budget_wait(frame_interval, now.duration_since(self.last_capture));
++            if !budget_wait.is_zero() {
++                std::thread::sleep(budget_wait);
+             }
++            let now = std::time::Instant::now();
+             self.last_capture = now;
+ 
+             // ── Resize check ─────────────────────────────────────
+@@ -129,17 +136,22 @@ impl super::TileCaptureThread {
+             }
+ 
+             // ── Capture ──────────────────────────────────────────
+-            let raw = match self
+-                .cap
+-                .capture_region_raw(0, 0, self.screen_w, self.screen_h)
++            self.frame_damage_bounds = self.damage.as_mut().and_then(|dt| dt.begin_capture());
++            let mut rgba = std::mem::take(&mut self.capture_scratch);
++            if let Err(e) =
++                self.cap
++                    .capture_region_raw_into(0, 0, self.screen_w, self.screen_h, &mut rgba)
+             {
+-                Ok(data) => data,
+-                Err(e) => {
+-                    warn!("tile capture: GetImage failed: {e}");
+-                    continue;
++                warn!("tile capture: GetImage failed: {e}");
++                self.capture_scratch = rgba;
++                // Damage was acknowledged before the failed read. Force a
++                // full retry, not only whatever happens to repaint afterward.
++                self.prev_frame = None;
++                if let Some(dt) = self.damage.as_mut() {
++                    dt.force_refresh();
+                 }
+-            };
+-            let rgba = raw;
++                continue;
++            }
+             self.grid.advance_frame();
+             let stride = self.screen_w as usize * 4;
+ 
+@@ -230,10 +242,9 @@ impl super::TileCaptureThread {
+             );
+ 
+             // ── Phase 6: Send frames + cleanup ───────────────────
+-            if let Some(dt) = self.damage.as_mut() {
+-                dt.reset();
++            if let Some(previous) = self.prev_frame.replace(rgba) {
++                self.capture_scratch = previous;
+             }
+-            self.prev_frame = Some(rgba);
+         }
+     }
+ }
+diff --git a/code/apps/bpane-host/src/tile_loop/dirty_set.rs b/code/apps/bpane-host/src/tile_loop/dirty_set.rs
+index 397691d..8c95a9e 100644
+--- a/code/apps/bpane-host/src/tile_loop/dirty_set.rs
++++ b/code/apps/bpane-host/src/tile_loop/dirty_set.rs
+@@ -25,8 +25,8 @@ impl super::TileCaptureThread {
+         self.refresh_full_emit_coords();
+         // Narrow dirty set to tiles overlapping XDamage bounding box.
+         let all_dirty: Vec<tiles::TileCoord> = if !force_refresh {
+-            if let Some(ref dt) = self.damage {
+-                if let Some((dx, dy, dw, dh)) = dt.damage_bounding_box() {
++            if self.damage.is_some() {
++                if let Some((dx, dy, dw, dh)) = self.frame_damage_bounds {
+                     let ts = self.tile_size as u16;
+                     let dx2 = dx.saturating_add(dw);
+                     let dy2 = dy.saturating_add(dh);
+diff --git a/code/apps/bpane-host/src/tile_loop/classify.rs b/code/apps/bpane-host/src/tile_loop/classify.rs
+index 727786f..ed5ffe5 100644
+--- a/code/apps/bpane-host/src/tile_loop/classify.rs
++++ b/code/apps/bpane-host/src/tile_loop/classify.rs
+@@ -33,6 +33,16 @@ impl super::TileCaptureThread {
+         min_video_bbox_height_tiles: u16,
+         min_video_bbox_area_ratio: f32,
+     ) -> ClassifyResult {
++        // In lossless-only mode the grid is born/reset Static and no code can
++        // latch video tiles. Avoid hashing/copying every tile on every frame
++        // for a classifier whose output is disabled. The emitter still hashes
++        // the actual dirty tiles, so cache/damage correctness is unchanged.
++        if !self.video_classification_enabled {
++            return ClassifyResult {
++                latched_video_tiles: Vec::new(),
++                cdp_motion_tiles: 0,
++            };
++        }
+         let prev_for_analysis = self.prev_frame.as_deref();
+         // ── Per-tile change detection (two-pass) ─────────────
+         // Pass 1: hash each tile, extract motion features for changed
+diff --git a/code/apps/bpane-host/src/tile_loop/tests.rs b/code/apps/bpane-host/src/tile_loop/tests.rs
+index 7c9a892..cafa00e 100644
+--- a/code/apps/bpane-host/src/tile_loop/tests.rs
++++ b/code/apps/bpane-host/src/tile_loop/tests.rs
+@@ -3,6 +3,16 @@ use crate::capture::ffmpeg::CaptureRegion;
+ use crate::cdp_video::{HintRegionKind, PageHintState};
+ use crate::tiles;
+ 
++#[test]
++fn capture_budget_wait_never_adds_delay_after_overrun() {
++    use std::time::Duration;
++    let interval = Duration::from_millis(16);
++    assert_eq!(super::run::capture_budget_wait(interval, Duration::ZERO), interval);
++    assert_eq!(super::run::capture_budget_wait(interval, Duration::from_millis(12)), Duration::from_millis(4));
++    assert_eq!(super::run::capture_budget_wait(interval, interval), Duration::ZERO);
++    assert_eq!(super::run::capture_budget_wait(interval, Duration::from_millis(120)), Duration::ZERO);
++}
++
+ // ── DetectedScrollFrame ─────────────────────────────────────────────
+ 
+ #[test]

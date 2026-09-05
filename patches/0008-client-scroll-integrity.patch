@@ -1,0 +1,1147 @@
+diff --git a/code/web/bpane-client/js/__tests__/canvas-scroll-copy-renderer.test.ts b/code/web/bpane-client/js/__tests__/canvas-scroll-copy-renderer.test.ts
+index e186490..4b73dad 100644
+--- a/code/web/bpane-client/js/__tests__/canvas-scroll-copy-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/canvas-scroll-copy-renderer.test.ts
+@@ -46,9 +46,9 @@ describe('CanvasScrollCopyRenderer', () => {
+ 
+     expect(scratchCanvas.width).toBe(640);
+     expect(scratchCanvas.height).toBe(640);
+-    expect(scratchCtx.clearRect).toHaveBeenCalledWith(0, 0, 640, 640);
+-    expect(scratchCtx.drawImage).toHaveBeenCalledWith(canvas, 0, 0);
+-    expect(ctx.drawImage).toHaveBeenCalledWith(scratchCanvas, 0, 128);
++    expect(scratchCtx.clearRect).toHaveBeenCalledWith(0, 0, 640, 512);
++    expect(scratchCtx.drawImage).toHaveBeenCalledWith(canvas, 0, 0, 640, 512, 0, 0, 640, 512);
++    expect(ctx.drawImage).toHaveBeenCalledWith(scratchCanvas, 0, 0, 640, 512, 0, 128, 640, 512);
+   });
+ 
+   it('clips viewport-only scroll copies to the shifted destination region', () => {
+@@ -75,8 +75,8 @@ describe('CanvasScrollCopyRenderer', () => {
+     );
+   });
+ 
+-  it('does not crash when the scratch canvas has no 2d context', () => {
+-    const { ctx } = createMainContext();
++  it('performs a clipped self-copy instead of silently losing regional scrolls when scratch allocation fails', () => {
++    const { ctx, canvas } = createMainContext();
+     const scratchCanvas = createScratchCanvas(null);
+     const renderer = new CanvasScrollCopyRenderer(() => scratchCanvas);
+ 
+@@ -91,6 +91,16 @@ describe('CanvasScrollCopyRenderer', () => {
+       screenH: 640,
+     });
+ 
++    expect(ctx.drawImage).toHaveBeenCalledWith(canvas, 0, 64, 400, 192, 0, 128, 400, 192);
++  });
++
++  it('does not allocate or copy when no source pixels survive a scroll', () => {
++    const { ctx } = createMainContext();
++    const create = vi.fn();
++    const renderer = new CanvasScrollCopyRenderer(create);
++    expect(renderer.apply({ ctx, dx: 0, dy: 256, regionTop: 64, regionBottom: 320, regionRight: 400,
++      screenW: 640, screenH: 640 })).toBe(false);
++    expect(create).not.toHaveBeenCalled();
+     expect(ctx.drawImage).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
+index 83db600..93fe554 100644
+--- a/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
+@@ -131,7 +131,7 @@ describe('QoiTileRenderer', () => {
+     expect(cache.get(56n)).not.toBe(wrongShape);
+   });
+ 
+-  it('caches but does not draw when shouldDraw rejects a stale completion', () => {
++  it('does not mutate the new epoch cache when shouldDraw rejects stale work', () => {
+     const cache = new TileCache();
+     const ctx = createCanvasContext();
+     const renderer = new QoiTileRenderer();
+@@ -146,12 +146,8 @@ describe('QoiTileRenderer', () => {
+       shouldDraw: () => false,
+     });
+ 
+-    expect(result).toEqual({
+-      kind: 'cached',
+-      redundant: false,
+-      decodedBytes: createPngLikeQoi().byteLength,
+-    });
+-    expect(cache.get(8n)).toBeInstanceOf(ImageData);
++    expect(result).toEqual({ kind: 'skipped', reason: 'stale' });
++    expect(cache.has(8n)).toBe(false);
+     expect(ctx.putImageData).not.toHaveBeenCalled();
+   });
+ 
+diff --git a/code/web/bpane-client/js/__tests__/scroll-copy-rect.test.ts b/code/web/bpane-client/js/__tests__/scroll-copy-rect.test.ts
+new file mode 100644
+index 0000000..734e2b5
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/scroll-copy-rect.test.ts
+@@ -0,0 +1,29 @@
++import { describe, expect, it } from 'vitest';
++import { resolveScrollCopyRect } from '../render/scroll-copy-rect.js';
++
++describe('resolveScrollCopyRect', () => {
++  const request = { canvasWidth: 640, canvasHeight: 480, screenW: 640, screenH: 480,
++    dx: 0, dy: 0, regionTop: 64, regionBottom: 400, regionRight: 600 };
++
++  it.each([[20, 32], [-20, 32], [20, -32], [-20, -32]])('preserves exact regional source/destination correspondence for (%i,%i)', (dx, dy) => {
++    const rect = resolveScrollCopyRect({ ...request, dx, dy })!;
++    expect(rect.width).toBe(580);
++    expect(rect.height).toBe(304);
++    expect(rect.sourceX - rect.destinationX).toBe(dx);
++    expect(rect.sourceY - rect.destinationY).toBe(dy);
++    expect(Math.min(rect.sourceX, rect.destinationX)).toBe(0);
++    expect(Math.min(rect.sourceY, rect.destinationY)).toBe(64);
++    expect(Math.max(rect.sourceX, rect.destinationX) + rect.width).toBe(600);
++    expect(Math.max(rect.sourceY, rect.destinationY) + rect.height).toBe(400);
++  });
++
++  it('clips both source and destination to the real backing canvas', () => {
++    expect(resolveScrollCopyRect({ ...request, canvasWidth: 300, canvasHeight: 200, dx: 10, dy: 20 })).toEqual({
++      sourceX: 10, sourceY: 84, destinationX: 0, destinationY: 64, width: 290, height: 116,
++    });
++  });
++
++  it.each([{ dy: 336 }, { dx: -600 }, { regionBottom: 64 }, { regionTop: 481 }, { dx: NaN }, { dy: 1.5 }])('rejects empty or invalid intersections: %j', (change) => {
++    expect(resolveScrollCopyRect({ ...request, dy: 10, ...change })).toBeNull();
++  });
++});
+diff --git a/code/web/bpane-client/js/__tests__/tile-batch-command-applier.test.ts b/code/web/bpane-client/js/__tests__/tile-batch-command-applier.test.ts
+index 43714ad..aac0bc5 100644
+--- a/code/web/bpane-client/js/__tests__/tile-batch-command-applier.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-batch-command-applier.test.ts
+@@ -61,8 +61,8 @@ describe('TileBatchCommandApplier', () => {
+     expect(callbacks.setApplyOffsetMode).toHaveBeenCalledWith(false);
+     expect(callbacks.drawFill).toHaveBeenCalledWith(1, 2, 0xff332211);
+     expect(callbacks.drawCacheHit).toHaveBeenCalledWith(3, 4, 99n, 42);
+-    expect(callbacks.drawQoi).toHaveBeenCalledWith(5, 6, 100n, qoiData, 7);
+-    expect(callbacks.drawZstd).toHaveBeenCalledWith(7, 8, 101n, zstdData, 7);
++    expect(callbacks.drawQoi).toHaveBeenCalledWith(5, 6, 100n, qoiData, 7, 42);
++    expect(callbacks.drawZstd).toHaveBeenCalledWith(7, 8, 101n, zstdData, 7, 42);
+     expect(callbacks.setVideoRegion).toHaveBeenCalledWith({ x: 10, y: 20, w: 30, h: 40 });
+   });
+ 
+diff --git a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+index 4a23a47..c535f06 100644
+--- a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+@@ -90,9 +90,133 @@ describe('TileCompositor', () => {
+   });
+ 
+   afterEach(() => {
++    compositor.reset();
++    vi.useRealTimers();
+     vi.restoreAllMocks();
+   });
+ 
++  describe('missing tile snapshot recovery', () => {
++    const grid = { tileSize: 64, cols: 10, rows: 10, screenW: 640, screenH: 640 };
++
++    beforeEach(() => vi.useFakeTimers());
++
++    it.each(['cache-hit', 'qoi', 'zstd'] as const)('pauses dependent commands after a %s failure until fresh grid pixels arrive', async (type) => {
++      const onMiss = vi.fn();
++      const onError = vi.fn();
++      compositor.setCacheMissHandler(onMiss);
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type, col: 2, row: 3, hash: 0n, data: new Uint8Array([255]) });
++      compositor.processCommand({ type: 'fill', col: 0, row: 0, rgba: 0xff });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 101 });
++      compositor.processCommand({ type: 'grid-offset', offsetX: 0, offsetY: 37 });
++      compositor.processCommand({ type: 'scroll-copy', dx: 0, dy: 64, regionTop: 0, regionBottom: 640, regionRight: 640 });
++      compositor.processCommand({ type: 'cache-hit', col: 3, row: 2, hash: 4n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 102 });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(onMiss).toHaveBeenCalledExactlyOnceWith({ frameSeq: 101, col: 2, row: 3, hash: 0n });
++      expect(ctx.fillRect).not.toHaveBeenCalled();
++      expect(compositor.stats.scrollCopies).toBe(0);
++      expect(compositor.stats.cacheMisses).toBe(1);
++
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'fill', col: 1, row: 2, rgba: 0xff });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 103 });
++      await vi.advanceTimersByTimeAsync(5001);
++      expect(ctx.fillRect).toHaveBeenCalledExactlyOnceWith(64, 128, 64, 64);
++      expect(onError).not.toHaveBeenCalled();
++      expect(vi.getTimerCount()).toBe(0);
++    });
++
++    it('requests reconnect when a repair snapshot never arrives instead of freezing indefinitely', async () => {
++      const onError = vi.fn();
++      compositor.setCacheMissHandler(vi.fn());
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      await vi.advanceTimersByTimeAsync(4999);
++      expect(onError).not.toHaveBeenCalled();
++      await vi.advanceTimersByTimeAsync(1);
++      expect(onError).toHaveBeenCalledOnce();
++      expect(onError.mock.calls[0][0].message).toBe('Tile snapshot recovery timed out');
++      await vi.advanceTimersByTimeAsync(5000);
++      expect(onError).toHaveBeenCalledOnce();
++    });
++
++    it('keeps the recovery deadline through a snapshot header without a complete batch', async () => {
++      const onError = vi.fn();
++      compositor.setCacheMissHandler(vi.fn());
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      await vi.advanceTimersByTimeAsync(1000);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'fill', col: 0, row: 0, rgba: 0xff });
++      await vi.advanceTimersByTimeAsync(3999);
++      expect(onError).not.toHaveBeenCalled();
++      expect(ctx.fillRect).not.toHaveBeenCalled();
++      await vi.advanceTimersByTimeAsync(1);
++      expect(onError).toHaveBeenCalledOnce();
++      expect(onError.mock.calls[0][0].message).toBe('Tile snapshot recovery timed out');
++    });
++
++    it('does not extend the original deadline or leak timers when a replacement snapshot also fails', async () => {
++      const onError = vi.fn();
++      const onMiss = vi.fn();
++      compositor.setCacheMissHandler(onMiss);
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      await vi.advanceTimersByTimeAsync(1000);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 10n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 2 });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(onMiss).toHaveBeenCalledTimes(2);
++      expect(vi.getTimerCount()).toBe(1);
++      await vi.advanceTimersByTimeAsync(4000);
++      expect(onError).toHaveBeenCalledOnce();
++      expect(vi.getTimerCount()).toBe(0);
++    });
++
++    it('falls back to fatal render recovery if sending the repair request fails', async () => {
++      const failure = new Error('disconnected while reporting cache miss');
++      const onError = vi.fn();
++      compositor.setCacheMissHandler(() => { throw failure; });
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      await vi.advanceTimersByTimeAsync(5001);
++      expect(onError).toHaveBeenCalledExactlyOnceWith(failure);
++      expect(vi.getTimerCount()).toBe(0);
++    });
++
++    it('cancels pending recovery on disconnect and ignores discarded old-grid failures', async () => {
++      const onMiss = vi.fn();
++      const onError = vi.fn();
++      compositor.setCacheMissHandler(onMiss);
++      compositor.setRenderErrorHandler(onError);
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(onMiss).not.toHaveBeenCalled();
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 9n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 2 });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(onMiss).toHaveBeenCalledOnce();
++      compositor.reset();
++      await vi.advanceTimersByTimeAsync(5001);
++      expect(onError).not.toHaveBeenCalled();
++      expect(vi.getTimerCount()).toBe(0);
++    });
++  });
++
+   it('reports failed draws for snapshot recovery instead of replaying dependent batches', async () => {
+     const onError = vi.fn();
+     const failure = new Error('GPU upload failed');
+diff --git a/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts b/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
+index 1cc7421..773a5f7 100644
+--- a/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
+@@ -22,6 +22,17 @@ function createStats(): TileCompositorRenderStats {
+ }
+ 
+ describe('TileDrawRuntime', () => {
++  it.each(['qoi', 'zstd'] as const)('reports %s failures with their batch sequence, including uncached repair tiles', (codec) => {
++    const miss = { draw: vi.fn(() => ({ kind: 'miss' as const, reason: 'size-mismatch' as const })) };
++    const onMiss = vi.fn();
++    const runtime = new TileDrawRuntime({ stats: createStats(), qoiTileRenderer: miss, zstdTileRenderer: miss });
++    runtime.setCacheMissHandler(onMiss);
++    const draw = codec === 'qoi' ? runtime.drawQoi.bind(runtime) : runtime.drawZstd.bind(runtime);
++    draw(2, 7, 0n, new Uint8Array([1]), () => true, 123);
++    expect(onMiss).toHaveBeenCalledWith({ frameSeq: 123, col: 2, row: 7, hash: 0n });
++    expect(runtime.getStats().cacheMisses).toBe(1);
++  });
++
+   it('drops GPU cache references on grid reset, disconnect and renderer changes', () => {
+     const runtime = new TileDrawRuntime({ stats: createStats() });
+     const first = { clearTileCache: vi.fn() };
+diff --git a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+index a3d6b8c..b78a5cf 100644
+--- a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+@@ -95,6 +95,8 @@ function createHardwareGl(renderer: string): WebGL2RenderingContext {
+     createFramebuffer: vi.fn(() => ({})),
+     bindFramebuffer: vi.fn(),
+     framebufferTexture2D: vi.fn(),
++    FRAMEBUFFER_COMPLETE: 0x8CD5,
++    checkFramebufferStatus: vi.fn(() => 0x8CD5),
+     deleteFramebuffer: vi.fn(),
+     deleteTexture: vi.fn(),
+     deleteBuffer: vi.fn(),
+@@ -330,8 +332,8 @@ describe('WebGLTileRenderer', () => {
+     renderer.scrollCopy(0, -64, 64, 320, 400, 640, 480);
+     expect(gl.createFramebuffer).toHaveBeenCalledTimes(1);
+     expect(gl.blitFramebuffer.mock.calls[0]).toEqual([
+-      0, 160, 400, 416,
+-      0, 160, 400, 416,
++      0, 224, 400, 416,
++      0, 224, 400, 416,
+       gl.COLOR_BUFFER_BIT,
+       gl.NEAREST,
+     ]);
+diff --git a/code/web/bpane-client/js/__tests__/webgl-scroll-copy-renderer.test.ts b/code/web/bpane-client/js/__tests__/webgl-scroll-copy-renderer.test.ts
+index db5cd32..2a2a352 100644
+--- a/code/web/bpane-client/js/__tests__/webgl-scroll-copy-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/webgl-scroll-copy-renderer.test.ts
+@@ -18,6 +18,7 @@ function createScrollGl(): WebGL2RenderingContext {
+     RGBA: 0x1908,
+     UNSIGNED_BYTE: 0x1401,
+     FRAMEBUFFER: 0x8D40,
++    FRAMEBUFFER_COMPLETE: 0x8CD5,
+     COLOR_ATTACHMENT0: 0x8CE0,
+     READ_FRAMEBUFFER: 0x8CA8,
+     DRAW_FRAMEBUFFER: 0x8CA9,
+@@ -30,6 +31,7 @@ function createScrollGl(): WebGL2RenderingContext {
+     createFramebuffer: vi.fn(() => ({ id: `framebuffer-${++framebufferId}` })),
+     bindFramebuffer: vi.fn(),
+     framebufferTexture2D: vi.fn(),
++    checkFramebufferStatus: vi.fn(() => 0x8CD5),
+     deleteFramebuffer: vi.fn(),
+     blitFramebuffer: vi.fn(),
+   } as unknown as WebGL2RenderingContext;
+@@ -59,8 +61,8 @@ describe('WebGLScrollCopyRenderer', () => {
+     expect(gl.createTexture).toHaveBeenCalledTimes(1);
+     expect(gl.createFramebuffer).toHaveBeenCalledTimes(1);
+     expect(gl.blitFramebuffer.mock.calls[0]).toEqual([
+-      0, 160, 400, 416,
+-      0, 160, 400, 416,
++      0, 224, 400, 416,
++      0, 224, 400, 416,
+       gl.COLOR_BUFFER_BIT,
+       gl.NEAREST,
+     ]);
+@@ -89,8 +91,8 @@ describe('WebGLScrollCopyRenderer', () => {
+     });
+ 
+     expect(gl.blitFramebuffer.mock.calls[0]).toEqual([
+-      0, 0, 640, 480,
+-      0, 0, 640, 480,
++      20, 10, 640, 480,
++      20, 10, 640, 480,
+       gl.COLOR_BUFFER_BIT,
+       gl.NEAREST,
+     ]);
+@@ -152,6 +154,7 @@ describe('WebGLScrollCopyRenderer', () => {
+ 
+     expect(gl.createTexture).toHaveBeenCalledTimes(1);
+     expect(gl.createFramebuffer).toHaveBeenCalledTimes(1);
++    expect(gl.checkFramebufferStatus).toHaveBeenCalledTimes(1);
+ 
+     renderer.scrollCopy({
+       canvasWidth: 800,
+@@ -172,4 +175,41 @@ describe('WebGLScrollCopyRenderer', () => {
+     expect(gl.deleteTexture).toHaveBeenCalledWith({ id: 'texture-2' });
+     expect(gl.deleteFramebuffer).toHaveBeenCalledWith({ id: 'framebuffer-2' });
+   });
++
++  const request = { canvasWidth: 640, canvasHeight: 480, screenW: 640, screenH: 480,
++    dx: 0, dy: 32, regionTop: 64, regionBottom: 400, regionRight: 600 };
++
++  it.each(['texture', 'framebuffer', 'incomplete'] as const)('fails closed and disposes partial resources on %s allocation failure', (failure) => {
++    const gl = createScrollGl() as any;
++    if (failure === 'texture') gl.createTexture.mockReturnValue(null);
++    if (failure === 'framebuffer') gl.createFramebuffer.mockReturnValue(null);
++    if (failure === 'incomplete') gl.checkFramebufferStatus.mockReturnValue(0x8CD6);
++    const renderer = new WebGLScrollCopyRenderer(gl);
++    expect(() => renderer.scrollCopy(request)).toThrow(/scroll-copy/);
++    expect(gl.blitFramebuffer).not.toHaveBeenCalled();
++    expect(gl.bindFramebuffer).toHaveBeenLastCalledWith(gl.FRAMEBUFFER, null);
++    if (failure !== 'texture') expect(gl.deleteTexture).toHaveBeenCalledOnce();
++    if (failure === 'incomplete') expect(gl.deleteFramebuffer).toHaveBeenCalledOnce();
++    renderer.destroy();
++    if (failure !== 'texture') expect(gl.deleteTexture).toHaveBeenCalledOnce();
++  });
++
++  it('does not blit inverted rectangles or allocate scratch storage for large/empty scrolls', () => {
++    const gl = createScrollGl() as any;
++    const renderer = new WebGLScrollCopyRenderer(gl);
++    renderer.scrollCopy({ ...request, dy: 400 });
++    renderer.scrollCopy({ ...request, dx: 700 });
++    renderer.scrollCopy({ ...request, dx: 0, dy: 0 });
++    renderer.scrollCopy({ ...request, regionTop: 401 });
++    expect(gl.blitFramebuffer).not.toHaveBeenCalled();
++    expect(gl.createTexture).not.toHaveBeenCalled();
++  });
++
++  it('restores default framebuffers even if a blit throws', () => {
++    const gl = createScrollGl() as any;
++    gl.blitFramebuffer.mockImplementationOnce(() => { throw new Error('lost during blit'); });
++    expect(() => new WebGLScrollCopyRenderer(gl).scrollCopy(request)).toThrow('lost during blit');
++    expect(gl.bindFramebuffer).toHaveBeenLastCalledWith(gl.DRAW_FRAMEBUFFER, null);
++    expect(gl.bindFramebuffer).toHaveBeenCalledWith(gl.READ_FRAMEBUFFER, null);
++  });
+ });
+diff --git a/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
+index 8859207..be938a7 100644
+--- a/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
+@@ -101,10 +101,11 @@ describe('ZstdTileRenderer', () => {
+     });
+   });
+ 
+-  it('caches but does not draw when shouldDraw rejects a stale completion', () => {
++  it('does not decode or cache stale work from a retired grid epoch', () => {
+     const cache = new TileCache();
+     const ctx = createCanvasContext();
+-    const renderer = new ZstdTileRenderer();
++    const decode = vi.fn();
++    const renderer = new ZstdTileRenderer(decode);
+ 
+     const result = renderer.draw({
+       cache,
+@@ -116,15 +117,42 @@ describe('ZstdTileRenderer', () => {
+       shouldDraw: () => false,
+     });
+ 
+-    expect(result).toEqual({
+-      kind: 'cached',
+-      redundant: false,
+-      encodedBytes: createCompressedRgbaPixel().byteLength,
++    expect(result).toEqual({ kind: 'skipped', reason: 'stale' });
++    expect(decode).not.toHaveBeenCalled();
++    expect(cache.has(4n)).toBe(false);
++    expect(ctx.putImageData).not.toHaveBeenCalled();
++  });
++
++  it('rechecks the epoch after decode before touching the cache or canvas', () => {
++    let current = true;
++    const decode = vi.fn(() => { current = false; return new Uint8Array([1, 2, 3, 255]); });
++    const cache = new TileCache();
++    const ctx = createCanvasContext();
++    const result = new ZstdTileRenderer(decode).draw({
++      cache, hash: 91n, data: createCompressedRgbaPixel(),
++      rect: { x: 0, y: 0, w: 1, h: 1 }, ctx, glRenderer: null,
++      shouldDraw: () => current,
+     });
+-    expect(cache.get(4n)).toBeInstanceOf(ImageData);
++    expect(result).toEqual({ kind: 'skipped', reason: 'stale' });
++    expect(cache.size).toBe(0);
+     expect(ctx.putImageData).not.toHaveBeenCalled();
+   });
+ 
++  it.each(['exception', 'wrong-size'] as const)('does not report a retired epoch %s as a new-grid cache miss', (failure) => {
++    let current = true;
++    const decode = () => {
++      current = false;
++      if (failure === 'exception') throw new Error('old decode failed');
++      return new Uint8Array();
++    };
++    const result = new ZstdTileRenderer(decode).draw({
++      cache: new TileCache(), hash: 91n, data: createCompressedRgbaPixel(),
++      rect: { x: 0, y: 0, w: 1, h: 1 }, ctx: createCanvasContext(), glRenderer: null,
++      shouldDraw: () => current,
++    });
++    expect(result).toEqual({ kind: 'skipped', reason: 'stale' });
++  });
++
+   it('does not cache tiles with a zero hash', () => {
+     const cache = new TileCache();
+     const ctx = createCanvasContext();
+diff --git a/code/web/bpane-client/js/render/canvas-scroll-copy-renderer.ts b/code/web/bpane-client/js/render/canvas-scroll-copy-renderer.ts
+index 5022960..21927df 100644
+--- a/code/web/bpane-client/js/render/canvas-scroll-copy-renderer.ts
++++ b/code/web/bpane-client/js/render/canvas-scroll-copy-renderer.ts
+@@ -1,3 +1,5 @@
++import { resolveScrollCopyRect } from './scroll-copy-rect.js';
++
+ export type CanvasScrollCopyRequest = {
+   ctx: CanvasRenderingContext2D;
+   dx: number;
+@@ -37,52 +39,23 @@ export class CanvasScrollCopyRenderer {
+       screenH,
+     } = request;
+     const canvas = ctx.canvas as HTMLCanvasElement;
+-    const tx = -dx || 0;
+-    const ty = -dy || 0;
+-    const hasRegion = regionTop !== 0 || regionBottom !== screenH || regionRight !== screenW;
+-
+-    if (hasRegion) {
+-      const regionWidth = regionRight;
+-      const regionHeight = regionBottom - regionTop;
+-      if (regionWidth <= 0 || regionHeight <= 0) {
+-        return false;
+-      }
+-
+-      if (this.ensureScratchCanvas(canvas.width, canvas.height) && this.scratchCanvas && this.scratchContext) {
+-        this.scratchContext.clearRect(0, 0, canvas.width, canvas.height);
+-        this.scratchContext.drawImage(
+-          canvas,
+-          0, regionTop, regionWidth, regionHeight,
+-          0, 0, regionWidth, regionHeight,
+-        );
+-
+-        const sourceX = Math.max(0, -tx);
+-        const sourceY = Math.max(0, -ty);
+-        const destinationX = Math.max(0, tx);
+-        const destinationY = regionTop + Math.max(0, ty);
+-        const sourceWidth = regionWidth - Math.abs(tx);
+-        const sourceHeight = regionHeight - Math.abs(ty);
+-
+-        if (sourceWidth > 0 && sourceHeight > 0) {
+-          ctx.drawImage(
+-            this.scratchCanvas,
+-            sourceX, sourceY, sourceWidth, sourceHeight,
+-            destinationX, destinationY, sourceWidth, sourceHeight,
+-          );
+-        }
+-      }
+-
+-      return true;
+-    }
++    const rect = resolveScrollCopyRect({ canvasWidth: canvas.width, canvasHeight: canvas.height,
++      dx, dy, regionTop, regionBottom, regionRight, screenW, screenH });
++    if (!rect) return false;
++    const { sourceX, sourceY, destinationX, destinationY, width, height } = rect;
+ 
+     if (this.ensureScratchCanvas(canvas.width, canvas.height) && this.scratchCanvas && this.scratchContext) {
+-      this.scratchContext.clearRect(0, 0, canvas.width, canvas.height);
+-      this.scratchContext.drawImage(canvas, 0, 0);
+-      ctx.drawImage(this.scratchCanvas, tx, ty);
++      // Only the surviving intersection is read or cleared. Exposed pixels
++      // are supplied by the batch's repair tiles, never by a stale scratch area.
++      this.scratchContext.clearRect(0, 0, width, height);
++      this.scratchContext.drawImage(canvas, sourceX, sourceY, width, height, 0, 0, width, height);
++      ctx.drawImage(this.scratchCanvas, 0, 0, width, height, destinationX, destinationY, width, height);
+       return true;
+     }
+ 
+-    ctx.drawImage(canvas, tx, ty);
++    // Canvas drawImage snapshots an overlapping same-canvas source. Preserve
++    // regional scroll correctness even when a scratch context cannot be made.
++    ctx.drawImage(canvas, sourceX, sourceY, width, height, destinationX, destinationY, width, height);
+     return true;
+   }
+ 
+diff --git a/code/web/bpane-client/js/render/qoi-tile-renderer.ts b/code/web/bpane-client/js/render/qoi-tile-renderer.ts
+index 4a45549..a2d88a5 100644
+--- a/code/web/bpane-client/js/render/qoi-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/qoi-tile-renderer.ts
+@@ -7,7 +7,7 @@ export type QoiTileDrawResult =
+   | { kind: 'drawn'; redundant: boolean; decodedBytes: number }
+   | { kind: 'cached'; redundant: boolean; decodedBytes: number }
+   | { kind: 'miss'; reason: 'decode-failed' | 'size-mismatch' }
+-  | { kind: 'skipped'; reason: 'offscreen' | 'no-output' };
++  | { kind: 'skipped'; reason: 'offscreen' | 'no-output' | 'stale' };
+ 
+ export class QoiTileRenderer {
+   draw(args: {
+@@ -26,26 +26,24 @@ export class QoiTileRenderer {
+     if (!rect) {
+       return { kind: 'skipped', reason: 'offscreen' };
+     }
++    if (shouldDraw && !shouldDraw()) return { kind: 'skipped', reason: 'stale' };
+ 
+     // Nonzero hashes are immutable content IDs in the same trusted-host
+     // contract as CacheHit. Dimensions must also match: hashes omit geometry.
+     const cached = hash !== 0n && cache.has(hash) ? cache.get(hash) : null;
+     if (cached && cached.width === rect.w && cached.height === rect.h) {
+-      if (shouldDraw && !shouldDraw()) {
+-        return { kind: 'cached', redundant: true, decodedBytes: data.byteLength };
+-      }
+       drawCachedTile(cached, rect, ctx, glRenderer);
+       return { kind: 'drawn', redundant: true, decodedBytes: data.byteLength };
+     }
+ 
+     const decoded = decodeQoi(data);
++    if (shouldDraw && !shouldDraw()) return { kind: 'skipped', reason: 'stale' };
+     if (!decoded) {
+       return { kind: 'miss', reason: 'decode-failed' };
+     }
+     if (decoded.width !== rect.w || decoded.height !== rect.h) {
+       return { kind: 'miss', reason: 'size-mismatch' };
+     }
+-
+     const imageData = new ImageData(decoded.pixels, decoded.width, decoded.height);
+     const cacheable = hash !== 0n;
+     const redundant = false;
+@@ -53,14 +51,6 @@ export class QoiTileRenderer {
+       cache.set(hash, imageData);
+     }
+ 
+-    if (shouldDraw && !shouldDraw()) {
+-      return {
+-        kind: 'cached',
+-        redundant,
+-        decodedBytes: data.byteLength,
+-      };
+-    }
+-
+     if (glRenderer) {
+       if (cacheable) {
+         glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
+diff --git a/code/web/bpane-client/js/render/scroll-copy-rect.ts b/code/web/bpane-client/js/render/scroll-copy-rect.ts
+new file mode 100644
+index 0000000..1cb21e5
+--- /dev/null
++++ b/code/web/bpane-client/js/render/scroll-copy-rect.ts
+@@ -0,0 +1,30 @@
++export interface ScrollCopyRectInput {
++  canvasWidth: number;
++  canvasHeight: number;
++  screenW: number;
++  screenH: number;
++  dx: number;
++  dy: number;
++  regionTop: number;
++  regionBottom: number;
++  regionRight: number;
++}
++
++/** The surviving source/destination intersection, in top-left pixel coordinates. */
++export function resolveScrollCopyRect(input: ScrollCopyRectInput): {
++  sourceX: number; sourceY: number; destinationX: number; destinationY: number;
++  width: number; height: number;
++} | null {
++  if (!Object.values(input).every(Number.isSafeInteger)) return null;
++  const right = Math.min(input.regionRight, input.screenW, input.canvasWidth);
++  const top = Math.max(0, input.regionTop);
++  const bottom = Math.min(input.regionBottom, input.screenH, input.canvasHeight);
++  const width = right - Math.abs(input.dx);
++  const height = bottom - top - Math.abs(input.dy);
++  if (width <= 0 || height <= 0 || (input.dx === 0 && input.dy === 0)) return null;
++  return {
++    sourceX: Math.max(0, input.dx), sourceY: top + Math.max(0, input.dy),
++    destinationX: Math.max(0, -input.dx), destinationY: top + Math.max(0, -input.dy),
++    width, height,
++  };
++}
+diff --git a/code/web/bpane-client/js/render/tile-batch-command-applier.ts b/code/web/bpane-client/js/render/tile-batch-command-applier.ts
+index bee1cd2..ef33fd0 100644
+--- a/code/web/bpane-client/js/render/tile-batch-command-applier.ts
++++ b/code/web/bpane-client/js/render/tile-batch-command-applier.ts
+@@ -7,8 +7,8 @@ export interface TileBatchCommandApplierCallbacks {
+   setVideoRegion(region: { x: number; y: number; w: number; h: number } | null): void;
+   drawFill(col: number, row: number, rgba: number): void;
+   drawCacheHit(col: number, row: number, hash: bigint, frameSeq: number): void;
+-  drawQoi(col: number, row: number, hash: bigint, data: Uint8Array, epoch: number): void;
+-  drawZstd(col: number, row: number, hash: bigint, data: Uint8Array, epoch: number): void;
++  drawQoi(col: number, row: number, hash: bigint, data: Uint8Array, epoch: number, frameSeq: number): void;
++  drawZstd(col: number, row: number, hash: bigint, data: Uint8Array, epoch: number, frameSeq: number): void;
+ }
+ 
+ export class TileBatchCommandApplier {
+@@ -63,11 +63,11 @@ export class TileBatchCommandApplier {
+         break;
+ 
+       case 'qoi':
+-        this.callbacks.drawQoi(command.col, command.row, command.hash, command.data, epoch);
++        this.callbacks.drawQoi(command.col, command.row, command.hash, command.data, epoch, frameSeq);
+         break;
+ 
+       case 'zstd':
+-        this.callbacks.drawZstd(command.col, command.row, command.hash, command.data, epoch);
++        this.callbacks.drawZstd(command.col, command.row, command.hash, command.data, epoch, frameSeq);
+         break;
+ 
+       case 'video-region':
+diff --git a/code/web/bpane-client/js/render/tile-draw-runtime.ts b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+index f0b1a76..3fdb4cb 100644
+--- a/code/web/bpane-client/js/render/tile-draw-runtime.ts
++++ b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+@@ -227,7 +227,7 @@ export class TileDrawRuntime {
+     }
+   }
+ 
+-  drawQoi(col: number, row: number, hash: bigint, data: Uint8Array, shouldDraw: () => boolean): void {
++  drawQoi(col: number, row: number, hash: bigint, data: Uint8Array, shouldDraw: () => boolean, frameSeq = 0): void {
+     const result = this.qoiTileRenderer.draw({
+       cache: this.cache,
+       hash,
+@@ -252,10 +252,11 @@ export class TileDrawRuntime {
+ 
+     if (result.kind === 'miss') {
+       this.stats.cacheMisses++;
++      this.onCacheMiss?.({ frameSeq, col, row, hash });
+     }
+   }
+ 
+-  drawZstd(col: number, row: number, hash: bigint, data: Uint8Array, shouldDraw: () => boolean): void {
++  drawZstd(col: number, row: number, hash: bigint, data: Uint8Array, shouldDraw: () => boolean, frameSeq = 0): void {
+     const result = this.zstdTileRenderer.draw({
+       cache: this.cache,
+       hash,
+@@ -280,6 +281,7 @@ export class TileDrawRuntime {
+ 
+     if (result.kind === 'miss') {
+       this.stats.cacheMisses++;
++      this.onCacheMiss?.({ frameSeq, col, row, hash });
+     }
+   }
+ 
+diff --git a/code/web/bpane-client/js/render/webgl-scroll-copy-renderer.ts b/code/web/bpane-client/js/render/webgl-scroll-copy-renderer.ts
+index 70bd433..d5d0650 100644
+--- a/code/web/bpane-client/js/render/webgl-scroll-copy-renderer.ts
++++ b/code/web/bpane-client/js/render/webgl-scroll-copy-renderer.ts
+@@ -1,191 +1,92 @@
+-export type WebGLScrollCopyArgs = {
+-  canvasWidth: number;
+-  canvasHeight: number;
+-  dx: number;
+-  dy: number;
+-  regionTop: number;
+-  regionBottom: number;
+-  regionRight: number;
+-  screenW: number;
+-  screenH: number;
+-};
++import { resolveScrollCopyRect, type ScrollCopyRectInput } from './scroll-copy-rect.js';
++
++export type WebGLScrollCopyArgs = ScrollCopyRectInput;
+ 
+ export class WebGLScrollCopyRenderer {
+-  private gl: WebGL2RenderingContext;
+   private scrollFramebuffer: WebGLFramebuffer | null = null;
+   private scrollTexture: WebGLTexture | null = null;
+   private textureWidth = 0;
+   private textureHeight = 0;
+ 
+-  constructor(gl: WebGL2RenderingContext) {
+-    this.gl = gl;
+-  }
++  constructor(private readonly gl: WebGL2RenderingContext) {}
+ 
+   scrollCopy(args: WebGLScrollCopyArgs): void {
+-    const {
+-      canvasWidth,
+-      canvasHeight,
+-      dx,
+-      dy,
+-      regionTop,
+-      regionBottom,
+-      regionRight,
+-      screenW,
+-      screenH,
+-    } = args;
+-
+-    if (canvasWidth <= 0 || canvasHeight <= 0) return;
+-
+-    const tx = -dx || 0;
+-    const ty = -dy || 0;
++    const rect = resolveScrollCopyRect(args);
++    if (!rect) return;
++    this.ensureResources(args.canvasWidth, args.canvasHeight);
+ 
+-    this.ensureResources(canvasWidth, canvasHeight);
+-    if (!this.scrollFramebuffer || !this.scrollTexture) return;
+-
+-    const hasRegion = regionTop !== 0 || regionBottom !== screenH || regionRight !== screenW;
+     const gl = this.gl;
+-
+-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scrollFramebuffer);
+-    if (hasRegion) {
+-      const glTop = canvasHeight - regionBottom;
+-      const glBottom = canvasHeight - regionTop;
++    const { sourceX, sourceY, destinationX, destinationY, width, height } = rect;
++    const sourceBottom = args.canvasHeight - (sourceY + height);
++    const sourceTop = args.canvasHeight - sourceY;
++    const destinationBottom = args.canvasHeight - (destinationY + height);
++    const destinationTop = args.canvasHeight - destinationY;
++
++    try {
++      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
++      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.scrollFramebuffer);
++      // Retain only pixels that survive the scroll, not the exposed region
++      // that the following lossless tile commands will overwrite.
+       gl.blitFramebuffer(
+-        0, glTop, regionRight, glBottom,
+-        0, glTop, regionRight, glBottom,
+-        gl.COLOR_BUFFER_BIT,
+-        gl.NEAREST,
++        sourceX, sourceBottom, sourceX + width, sourceTop,
++        sourceX, sourceBottom, sourceX + width, sourceTop,
++        gl.COLOR_BUFFER_BIT, gl.NEAREST,
+       );
+-    } else {
++      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.scrollFramebuffer);
++      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+       gl.blitFramebuffer(
+-        0, 0, canvasWidth, canvasHeight,
+-        0, 0, canvasWidth, canvasHeight,
+-        gl.COLOR_BUFFER_BIT,
+-        gl.NEAREST,
++        sourceX, sourceBottom, sourceX + width, sourceTop,
++        destinationX, destinationBottom, destinationX + width, destinationTop,
++        gl.COLOR_BUFFER_BIT, gl.NEAREST,
+       );
++    } finally {
++      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
++      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+     }
+-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+-
+-    if (hasRegion) {
+-      const regionWidth = regionRight;
+-      const regionHeight = regionBottom - regionTop;
+-      if (regionWidth <= 0 || regionHeight <= 0) return;
+-
+-      const srcX = Math.max(0, -tx);
+-      const srcY = regionTop + Math.max(0, -ty);
+-      const destX = Math.max(0, tx);
+-      const destY = regionTop + Math.max(0, ty);
+-      const srcWidth = regionWidth - Math.abs(tx);
+-      const srcHeight = regionHeight - Math.abs(ty);
+-
+-      if (srcWidth > 0 && srcHeight > 0) {
+-        this.blitScrollPortion({
+-          canvasHeight,
+-          srcX,
+-          srcY,
+-          srcWidth,
+-          srcHeight,
+-          destX,
+-          destY,
+-          destWidth: srcWidth,
+-          destHeight: srcHeight,
+-        });
+-      }
+-      return;
+-    }
+-
+-    this.blitScrollPortion({
+-      canvasHeight,
+-      srcX: Math.max(0, -tx),
+-      srcY: Math.max(0, -ty),
+-      srcWidth: canvasWidth - Math.abs(tx),
+-      srcHeight: canvasHeight - Math.abs(ty),
+-      destX: Math.max(0, tx),
+-      destY: Math.max(0, ty),
+-      destWidth: canvasWidth - Math.abs(tx),
+-      destHeight: canvasHeight - Math.abs(ty),
+-    });
+   }
+ 
+   destroy(): void {
+-    const gl = this.gl;
+-    if (this.scrollFramebuffer) {
+-      gl.deleteFramebuffer(this.scrollFramebuffer);
+-      this.scrollFramebuffer = null;
+-    }
+-    if (this.scrollTexture) {
+-      gl.deleteTexture(this.scrollTexture);
+-      this.scrollTexture = null;
+-    }
++    if (this.scrollFramebuffer) this.gl.deleteFramebuffer(this.scrollFramebuffer);
++    if (this.scrollTexture) this.gl.deleteTexture(this.scrollTexture);
++    this.scrollFramebuffer = null;
++    this.scrollTexture = null;
++    this.textureWidth = 0;
++    this.textureHeight = 0;
+   }
+ 
+   private ensureResources(width: number, height: number): void {
+-    const gl = this.gl;
+-    if (this.scrollTexture && this.textureWidth === width && this.textureHeight === height) {
+-      return;
+-    }
+-
+-    if (this.scrollTexture) gl.deleteTexture(this.scrollTexture);
+-    this.scrollTexture = gl.createTexture()!;
+-    gl.bindTexture(gl.TEXTURE_2D, this.scrollTexture);
+-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+-    gl.bindTexture(gl.TEXTURE_2D, null);
+-
+-    if (this.scrollFramebuffer) gl.deleteFramebuffer(this.scrollFramebuffer);
+-    this.scrollFramebuffer = gl.createFramebuffer()!;
+-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.scrollFramebuffer);
+-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scrollTexture, 0);
+-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+-
+-    this.textureWidth = width;
+-    this.textureHeight = height;
+-  }
++    if (this.scrollTexture && this.scrollFramebuffer
++      && this.textureWidth === width && this.textureHeight === height) return;
+ 
+-  private blitScrollPortion(args: {
+-    canvasHeight: number;
+-    srcX: number;
+-    srcY: number;
+-    srcWidth: number;
+-    srcHeight: number;
+-    destX: number;
+-    destY: number;
+-    destWidth: number;
+-    destHeight: number;
+-  }): void {
+-    const {
+-      canvasHeight,
+-      srcX,
+-      srcY,
+-      srcWidth,
+-      srcHeight,
+-      destX,
+-      destY,
+-      destWidth,
+-      destHeight,
+-    } = args;
+     const gl = this.gl;
+-
+-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.scrollFramebuffer);
+-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+-
+-    const glSrcTop = canvasHeight - (srcY + srcHeight);
+-    const glSrcBottom = canvasHeight - srcY;
+-    const glDestTop = canvasHeight - (destY + destHeight);
+-    const glDestBottom = canvasHeight - destY;
+-
+-    gl.blitFramebuffer(
+-      srcX, glSrcTop, srcX + srcWidth, glSrcBottom,
+-      destX, glDestTop, destX + destWidth, glDestBottom,
+-      gl.COLOR_BUFFER_BIT,
+-      gl.NEAREST,
+-    );
+-
+-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
++    this.destroy();
++    try {
++      this.scrollTexture = gl.createTexture();
++      if (!this.scrollTexture) throw new Error('Cannot allocate scroll-copy texture');
++      gl.bindTexture(gl.TEXTURE_2D, this.scrollTexture);
++      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
++
++      this.scrollFramebuffer = gl.createFramebuffer();
++      if (!this.scrollFramebuffer) throw new Error('Cannot allocate scroll-copy framebuffer');
++      gl.bindFramebuffer(gl.FRAMEBUFFER, this.scrollFramebuffer);
++      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.scrollTexture, 0);
++      // Allocation/attachment failures normally set a GL error, not a JS
++      // exception. Validate once per allocation, never poll GL per tile.
++      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
++        throw new Error('Incomplete scroll-copy framebuffer');
++      }
++      this.textureWidth = width;
++      this.textureHeight = height;
++    } catch (error) {
++      this.destroy();
++      throw error; // Existing fatal-render recovery requests a clean snapshot.
++    } finally {
++      gl.bindTexture(gl.TEXTURE_2D, null);
++      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
++    }
+   }
+ }
+diff --git a/code/web/bpane-client/js/render/zstd-tile-renderer.ts b/code/web/bpane-client/js/render/zstd-tile-renderer.ts
+index 2653f45..22f2fe6 100644
+--- a/code/web/bpane-client/js/render/zstd-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/zstd-tile-renderer.ts
+@@ -8,7 +8,7 @@ export type ZstdTileDrawResult =
+   | { kind: 'drawn'; redundant: boolean; encodedBytes: number }
+   | { kind: 'cached'; redundant: boolean; encodedBytes: number }
+   | { kind: 'miss'; reason: 'decode-failed' | 'size-mismatch' }
+-  | { kind: 'skipped'; reason: 'offscreen' | 'no-output' };
++  | { kind: 'skipped'; reason: 'offscreen' | 'no-output' | 'stale' };
+ 
+ export class ZstdTileRenderer {
+   private readonly decompressFn: (data: Uint8Array) => Uint8Array;
+@@ -33,14 +33,12 @@ export class ZstdTileRenderer {
+     if (!rect) {
+       return { kind: 'skipped', reason: 'offscreen' };
+     }
++    if (shouldDraw && !shouldDraw()) return { kind: 'skipped', reason: 'stale' };
+ 
+     // Match the protocol's CacheHit invariant: nonzero immutable content ID
+     // plus dimensions. Zero-hash repair tiles must always be decoded afresh.
+     const cached = hash !== 0n && cache.has(hash) ? cache.get(hash) : null;
+     if (cached && cached.width === rect.w && cached.height === rect.h) {
+-      if (shouldDraw && !shouldDraw()) {
+-        return { kind: 'cached', redundant: true, encodedBytes: data.byteLength };
+-      }
+       drawCachedTile(cached, rect, ctx, glRenderer);
+       return { kind: 'drawn', redundant: true, encodedBytes: data.byteLength };
+     }
+@@ -49,14 +47,15 @@ export class ZstdTileRenderer {
+     try {
+       decompressed = this.decompressFn(data);
+     } catch {
++      if (shouldDraw && !shouldDraw()) return { kind: 'skipped', reason: 'stale' };
+       return { kind: 'miss', reason: 'decode-failed' };
+     }
++    if (shouldDraw && !shouldDraw()) return { kind: 'skipped', reason: 'stale' };
+ 
+     const expectedBytes = rect.w * rect.h * 4;
+     if (decompressed.length !== expectedBytes) {
+       return { kind: 'miss', reason: 'size-mismatch' };
+     }
+-
+     const pixels = decompressed.buffer instanceof ArrayBuffer
+       ? new Uint8ClampedArray(
+         decompressed.buffer,
+@@ -71,14 +70,6 @@ export class ZstdTileRenderer {
+       cache.set(hash, imageData);
+     }
+ 
+-    if (shouldDraw && !shouldDraw()) {
+-      return {
+-        kind: 'cached',
+-        redundant,
+-        encodedBytes: data.byteLength,
+-      };
+-    }
+-
+     if (glRenderer) {
+       if (cacheable) {
+         glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
+diff --git a/code/web/bpane-client/js/tile-compositor.ts b/code/web/bpane-client/js/tile-compositor.ts
+index b67cf93..3748c8b 100644
+--- a/code/web/bpane-client/js/tile-compositor.ts
++++ b/code/web/bpane-client/js/tile-compositor.ts
+@@ -25,6 +25,8 @@ import {
+ import { ZstdTileRenderer } from './render/zstd-tile-renderer.js';
+ import type { WebGLTileRenderer } from './webgl-compositor.js';
+ 
++const SNAPSHOT_RECOVERY_TIMEOUT_MS = 5000;
++
+ export interface CompositorStats extends TileCompositorRenderStats {
+   batchesProcessed: number;
+   batchesQueued: number;
+@@ -41,7 +43,11 @@ export class TileCompositor {
+   private readonly tileBatchCommandApplier: TileBatchCommandApplier;
+   private onRenderError: ((error: unknown) => void) | null = null;
+   private onVideoRegionChange: (() => void) | null = null;
++  private onCacheMiss: ((event: CacheMissEvent) => void) | null = null;
++  private awaitingSnapshot = false;
++  private snapshotRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+   private readonly tileBatchSequencer = new TileBatchSequencer((error) => {
++    this.cancelSnapshotRecoveryTimer();
+     this.onRenderError?.(error);
+   });
+   private readonly tileDrawRuntime: TileDrawRuntime;
+@@ -83,6 +89,7 @@ export class TileCompositor {
+       zstdTileRenderer,
+       canvasScrollCopyRenderer,
+     });
++    this.tileDrawRuntime.setCacheMissHandler((event) => this.requestSnapshotRecovery(event));
+     this.tileBatchCommandApplier = new TileBatchCommandApplier({
+       applyScrollCopy: (dx, dy, regionTop, regionBottom, regionRight) => {
+         this.tileDrawRuntime.applyScrollCopy(dx, dy, regionTop, regionBottom, regionRight);
+@@ -102,11 +109,11 @@ export class TileCompositor {
+       drawCacheHit: (col, row, hash, frameSeq) => {
+         this.tileDrawRuntime.drawCacheHit(col, row, hash, frameSeq);
+       },
+-      drawQoi: (col, row, hash, data, epoch) => {
+-        this.tileDrawRuntime.drawQoi(col, row, hash, data, () => this.tileBatchSequencer.isCurrentEpoch(epoch));
++      drawQoi: (col, row, hash, data, epoch, frameSeq) => {
++        this.tileDrawRuntime.drawQoi(col, row, hash, data, () => this.tileBatchSequencer.isCurrentEpoch(epoch), frameSeq);
+       },
+-      drawZstd: (col, row, hash, data, epoch) => {
+-        this.tileDrawRuntime.drawZstd(col, row, hash, data, () => this.tileBatchSequencer.isCurrentEpoch(epoch));
++      drawZstd: (col, row, hash, data, epoch, frameSeq) => {
++        this.tileDrawRuntime.drawZstd(col, row, hash, data, () => this.tileBatchSequencer.isCurrentEpoch(epoch), frameSeq);
+       },
+     });
+   }
+@@ -157,7 +164,32 @@ export class TileCompositor {
+ 
+   /** Register a callback for cache-miss telemetry back to the host. */
+   setCacheMissHandler(handler: ((event: CacheMissEvent) => void) | null): void {
+-    this.tileDrawRuntime.setCacheMissHandler(handler);
++    this.onCacheMiss = handler;
++    if (!handler) this.cancelSnapshotRecoveryTimer();
++  }
++
++  private requestSnapshotRecovery(event: CacheMissEvent): void {
++    if (this.awaitingSnapshot) return;
++    // Missing pixels are framebuffer history: copying them into another row
++    // makes a later coordinate-only repair insufficient. The paired host
++    // upgrades this report to a complete, fresh GridConfig snapshot.
++    this.awaitingSnapshot = true;
++    if (this.snapshotRecoveryTimer === null) {
++      this.snapshotRecoveryTimer = setTimeout(() => {
++        this.snapshotRecoveryTimer = null;
++        this.awaitingSnapshot = true;
++        this.onRenderError?.(new Error('Tile snapshot recovery timed out'));
++      }, SNAPSHOT_RECOVERY_TIMEOUT_MS);
++    }
++    if (!this.onCacheMiss) throw new Error('Missing tile recovery handler');
++    // If sending fails, the batch sequencer invokes the existing fatal render
++    // callback, which reconnects instead of leaving a permanently frozen page.
++    this.onCacheMiss(event);
++  }
++
++  private cancelSnapshotRecoveryTimer(): void {
++    if (this.snapshotRecoveryTimer !== null) clearTimeout(this.snapshotRecoveryTimer);
++    this.snapshotRecoveryTimer = null;
+   }
+ 
+   /** Fatal batch errors need a fresh snapshot, not dependent-delta replay. */
+@@ -187,6 +219,9 @@ export class TileCompositor {
+       case 'grid-config':
+         // Invalidate any in-flight async decode work and reset drawing state.
+         this.tileBatchSequencer.invalidate();
++        // GridConfig permits the fresh epoch to render, but is only a header.
++        // Keep the watchdog until its complete batch has actually been applied.
++        this.awaitingSnapshot = false;
+         this.pendingCommands = [];
+         this.stats.currentPendingCommands = 0;
+         this.setVideoRegion(null);
+@@ -226,6 +261,8 @@ export class TileCompositor {
+ 
+   /** Reset state (e.g., on disconnect or resize). */
+   reset(): void {
++    this.cancelSnapshotRecoveryTimer();
++    this.awaitingSnapshot = false;
+     this.tileBatchSequencer.reset();
+     this.tileDrawRuntime.reset();
+     this.setVideoRegion(null);
+@@ -236,21 +273,22 @@ export class TileCompositor {
+   /** Apply one batch atomically in protocol frame sequence order. */
+   private applyBatch(batch: QueuedTileBatch): boolean {
+     const { frameSeq, commands, epoch } = batch;
+-    if (!this.tileBatchSequencer.isCurrentEpoch(epoch)) {
++    if (!this.tileBatchSequencer.isCurrentEpoch(epoch) || this.awaitingSnapshot) {
+       return false;
+     }
+     const completed = this.tileBatchCommandApplier.applyCommands({
+       commands,
+       frameSeq,
+       epoch,
+-      shouldContinue: () => this.tileBatchSequencer.isCurrentEpoch(epoch),
++      shouldContinue: () => this.tileBatchSequencer.isCurrentEpoch(epoch) && !this.awaitingSnapshot,
+     });
+-    if (!completed) {
++    if (!completed || this.awaitingSnapshot) {
+       return false;
+     }
+     if (this.tileBatchSequencer.isCurrentEpoch(epoch)) {
+       // Safety: ensure offset mode is restored even if TileDrawMode(true) was missed.
+       this.tileDrawRuntime.restoreDefaultDrawMode();
++      this.cancelSnapshotRecoveryTimer();
+       return true;
+     }
+     return false;

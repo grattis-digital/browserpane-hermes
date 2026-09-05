@@ -1,0 +1,400 @@
+diff --git a/code/web/bpane-client/js/__tests__/session-resize-alignment.test.ts b/code/web/bpane-client/js/__tests__/session-resize-alignment.test.ts
+new file mode 100644
+index 0000000..8ec8386
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/session-resize-alignment.test.ts
+@@ -0,0 +1,140 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { SessionResizeRuntime } from '../session-resize-runtime.js';
++import { PointerInputRuntime } from '../input/pointer-input-runtime.js';
++
++function fixture(overrides: Partial<ConstructorParameters<typeof SessionResizeRuntime>[0]> = {}) {
++  const container = document.createElement('div');
++  container.style.cssText = 'flex:1;min-height:0;overflow:hidden';
++  const canvas = document.createElement('canvas');
++  const cursorEl = document.createElement('canvas');
++  for (const child of [canvas, cursorEl]) {
++    child.style.width = '100%'; child.style.height = '100%';
++    container.appendChild(child);
++  }
++  let width = 1366;
++  let height = 769;
++  const rect = (w: number, h: number) => ({ x: 10, y: 51, left: 10, top: 51,
++    width: w, height: h, right: 10 + w, bottom: 51 + h, toJSON() {} });
++  container.getBoundingClientRect = () => rect(width, height);
++  canvas.getBoundingClientRect = () => rect(
++    canvas.style.width.endsWith('px') ? parseFloat(canvas.style.width) : width,
++    canvas.style.height.endsWith('px') ? parseFloat(canvas.style.height) : height,
++  );
++  const sendResizeRequest = vi.fn();
++  const resizeObserver = { observe: vi.fn(), disconnect: vi.fn() };
++  const runtime = new SessionResizeRuntime({
++    container, canvas, cursorEl, hiDpi: false, resizeSource: 'container',
++    resizeAlignment: { width: 8, height: 2 }, resizeObserver,
++    resizeRenderer: vi.fn(), markDisplayDirty: vi.fn(), sendResizeRequest,
++    setRemoteSize: vi.fn(), getDevicePixelRatio: () => 2,
++    ...overrides,
++  });
++  return { runtime, container, canvas, cursorEl, sendResizeRequest, resizeObserver,
++    setSize(w: number, h: number) { width = w; height = h; } };
++}
++
++afterEach(() => vi.useRealTimers());
++
++describe('opt-in physical capture alignment', () => {
++  it('fits odd dimensions to X11/CVT and H.264 without stretching or changing parent layout', () => {
++    const { runtime, container, canvas, cursorEl } = fixture();
++    const containerStyle = container.style.cssText;
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 1360, height: 768 });
++    expect([canvas.width, canvas.height, cursorEl.width, cursorEl.height]).toEqual([1360, 768, 1360, 768]);
++    expect([canvas.style.width, canvas.style.height]).toEqual(['1360px', '768px']);
++    expect([cursorEl.style.width, cursorEl.style.height]).toEqual(['1360px', '768px']);
++    expect(container.style.cssText).toBe(containerStyle);
++    expect(container.getBoundingClientRect()).toMatchObject({ width: 1366, height: 769 });
++  });
++
++  it('aligns physical pixels after HiDPI conversion, not CSS pixels', () => {
++    const { runtime, canvas, cursorEl } = fixture({ hiDpi: true, getDevicePixelRatio: () => 1.5 });
++    // 1366×1.5=2049 →2048, 769×1.5=1153.5 →1152.
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 2048, height: 1152 });
++    expect(parseFloat(canvas.style.width)).toBeCloseTo(2048 / 1.5);
++    expect(canvas.style.height).toBe('768px');
++    expect(cursorEl.style.cssText).toBe(canvas.style.cssText);
++  });
++
++  it('preserves scalar even alignment for hosts without CVT width constraints', () => {
++    const { runtime, setSize } = fixture({ resizeAlignment: 2 });
++    setSize(1367, 769);
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 1366, height: 768 });
++  });
++
++  it.each([undefined, 1])('preserves default/scalar1 CSS and odd dimensions (%s)', resizeAlignment => {
++    const { runtime, canvas, cursorEl } = fixture({ resizeAlignment });
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 1366, height: 769 });
++    expect(canvas.style.width).toBe('100%');
++    expect(cursorEl.style.height).toBe('100%');
++  });
++
++  it('leaves externally sized canvas-driven clients unchanged', () => {
++    const { runtime, canvas } = fixture({ resizeSource: 'canvas' });
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 1366, height: 769 });
++    expect(canvas.style.height).toBe('100%');
++  });
++
++  it.each([0, -2, 1.5, Infinity, NaN, 128])('ignores invalid or unreasonable physical alignment %s', resizeAlignment => {
++    const { runtime } = fixture({ resizeAlignment });
++    expect(runtime.initializeCanvasSize()).toEqual({ width: 1366, height: 769 });
++  });
++
++  it('debounces one normalized resize using available parent dimensions, not pinned child dimensions', async () => {
++    vi.useFakeTimers();
++    const { runtime, canvas, setSize, sendResizeRequest } = fixture();
++    runtime.initializeCanvasSize();
++    setSize(1441, 851);
++    runtime.handleResize(1441, 851);
++    setSize(1447, 853);
++    runtime.handleResize(1447, 853);
++    await vi.advanceTimersByTimeAsync(150);
++    expect(sendResizeRequest.mock.calls).toEqual([[1440, 852]]);
++    expect([canvas.style.width, canvas.style.height]).toEqual(['1440px', '852px']);
++    expect(runtime.getContainerResizeDims()).toEqual({ width: 1440, height: 852 });
++    await vi.advanceTimersByTimeAsync(1000);
++    expect(sendResizeRequest).toHaveBeenCalledTimes(1);
++  });
++
++  it('never rounds authoritative locked dimensions and restores fit-to-small-container CSS', () => {
++    const { runtime, canvas, cursorEl, container, resizeObserver } = fixture();
++    runtime.initializeCanvasSize();
++    runtime.applyClientAccessState(0x02, 1921, 1081);
++    expect([canvas.width, canvas.height]).toEqual([1921, 1081]);
++    expect([canvas.style.width, canvas.style.height, cursorEl.style.width, cursorEl.style.height])
++      .toEqual(['100%', '100%', '100%', '100%']);
++    expect(container.style.width).toBe('');
++    expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
++  });
++
++  it('keeps an authoritative small lock exact then resumes normalized owner sizing on unlock', () => {
++    const { runtime, canvas, cursorEl, container, sendResizeRequest } = fixture();
++    runtime.initializeCanvasSize();
++    runtime.applyClientAccessState(0x02, 1279, 767);
++    expect([canvas.width, canvas.height]).toEqual([1279, 767]);
++    expect([container.style.width, container.style.height]).toEqual(['1279px', '767px']);
++    runtime.applyClientAccessState(0, 0, 0);
++    expect([container.style.width, container.style.height]).toEqual(['', '']);
++    expect([canvas.width, canvas.height, cursorEl.width, cursorEl.height]).toEqual([1360, 768, 1360, 768]);
++    expect(sendResizeRequest.mock.calls).toEqual([[1360, 768]]);
++  });
++
++  it.each([1, 1.5, 2])('maps an edge input and local cursor to the same physical pixel at DPR%s', scale => {
++    const { runtime, canvas } = fixture({ hiDpi: true, getDevicePixelRatio: () => scale });
++    const size = runtime.initializeCanvasSize();
++    const sendMouseMove = vi.fn();
++    const drawCursor = vi.fn();
++    const abort = new AbortController();
++    new PointerInputRuntime({
++      canvas, drawCursor, getRemoteDims: () => size, sendMouseMove,
++      sendMouseButton: vi.fn(), sendScroll: vi.fn(), now: () => 100,
++    }).bind({ signal: abort.signal, focusKeyboardTarget: vi.fn() });
++    canvas.dispatchEvent(new MouseEvent('pointermove', {
++      clientX: 10 + (size.width - 1) / scale,
++      clientY: 51 + (size.height - 1) / scale,
++    }));
++    expect(sendMouseMove).toHaveBeenCalledWith(size.width - 1, size.height - 1);
++    expect(drawCursor).toHaveBeenCalledWith(null, size.width - 1, size.height - 1);
++    abort.abort();
++  });
++});
+diff --git a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+index 50b5e16..63bd746 100644
+--- a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+@@ -127,6 +127,7 @@ describe('SessionRuntimeFactory', () => {
+         pingIntervalMs: 5000,
+         renderBackend: 'canvas2d',
+         resizeSource: 'container',
++        resizeAlignment: { width: 8, height: 2 },
+         onCapabilitiesChange,
+       },
+       context,
+@@ -153,6 +154,7 @@ describe('SessionRuntimeFactory', () => {
+     expect(captured.surface.tileCompositor).toBe(tileCompositor);
+     expect(captured.surface.renderBackend).toBe('canvas2d');
+     expect(captured.surface.resizeSource).toBe('container');
++    expect(captured.surface.resizeAlignment).toEqual({ width: 8, height: 2 });
+ 
+     const framePayload = new Uint8Array([1, 2, 3]);
+     captured.audio.sendFrame(7, framePayload);
+diff --git a/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
+index a522366..10763bf 100644
+--- a/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
+@@ -172,4 +172,34 @@ describe('SessionSurfaceRuntime', () => {
+     expect(onRenderError).toHaveBeenCalledOnce();
+     expect(renderer.destroy).toHaveBeenCalledOnce();
+   });
++
++  it('preserves fractional observed CSS dimensions until physical capture alignment', async () => {
++    vi.useFakeTimers();
++    vi.stubGlobal('devicePixelRatio', 1.5);
++    const container = createContainer();
++    const originalRect = container.getBoundingClientRect();
++    container.getBoundingClientRect = () => ({ ...originalRect, width: 1365.5, height: 769.5 });
++    let observerCallback: ResizeObserverCallback;
++    const sendResizeRequest = vi.fn();
++    const runtime = new SessionSurfaceRuntime({
++      container, tileCompositor: createTileCompositor(), hiDpi: true,
++      resizeSource: 'container', resizeAlignment: { width: 8, height: 2 },
++      renderBackend: 'canvas2d', onTileCacheMiss: vi.fn(), sendResizeRequest,
++      setRemoteSize: vi.fn(), createResizeObserver: callback => {
++        observerCallback = callback;
++        return { observe, disconnect };
++      },
++    });
++    try {
++      expect([runtime.getCanvas().width, runtime.getCanvas().height]).toEqual([2048, 1154]);
++      observerCallback!([{ contentRect: container.getBoundingClientRect() } as ResizeObserverEntry], {} as ResizeObserver);
++      await vi.advanceTimersByTimeAsync(150);
++      expect(sendResizeRequest.mock.calls).toEqual([[2048, 1154]]);
++      expect([runtime.getCanvas().width, runtime.getCanvas().height]).toEqual([2048, 1154]);
++    } finally {
++      runtime.destroy();
++      vi.useRealTimers();
++      vi.unstubAllGlobals();
++    }
++  });
+ });
+diff --git a/code/web/bpane-client/js/bpane-types.ts b/code/web/bpane-client/js/bpane-types.ts
+index 0c20079..126074f 100644
+--- a/code/web/bpane-client/js/bpane-types.ts
++++ b/code/web/bpane-client/js/bpane-types.ts
+@@ -1,6 +1,7 @@
+ export type RenderBackendPreference = 'auto' | 'canvas2d' | 'webgl2';
+ export type SessionClientRole = 'interactive' | 'recorder';
+ export type SessionResizeSourcePreference = 'canvas' | 'container';
++export type SessionResizeAlignmentPreference = number | { width: number; height: number };
+ 
+ export interface BpaneOptions {
+   container: HTMLElement;
+@@ -25,6 +26,12 @@ export interface BpaneOptions {
+   renderBackend?: RenderBackendPreference;
+   /** Resize measurement source. Defaults to rendered canvas sizing for embedded clients. */
+   resizeSource?: SessionResizeSourcePreference;
++  /** Physical-pixel alignment for container-driven resize. Defaults to 1;
++   * use 2 for even capture or { width: 8, height: 2 } for X11/CVT + H.264.
++   * This does not impose host-specific minimum/maximum capture sizes.
++   * Canvas-driven sizing and
++   * authoritative resolution locks are unchanged. */
++  resizeAlignment?: SessionResizeAlignmentPreference;
+   /** Diagnostic switch. Disable retained scroll-copy reuse and rely on repair tiles only. */
+   scrollCopy?: boolean;
+   onConnect?: () => void;
+diff --git a/code/web/bpane-client/js/session/bpane-session.ts b/code/web/bpane-client/js/session/bpane-session.ts
+index 34e26f4..c61b40c 100644
+--- a/code/web/bpane-client/js/session/bpane-session.ts
++++ b/code/web/bpane-client/js/session/bpane-session.ts
+@@ -82,6 +82,7 @@ export class BpaneSession {
+         pingIntervalMs: PING_INTERVAL_MS,
+         renderBackend: options.renderBackend,
+         resizeSource: options.resizeSource,
++        resizeAlignment: options.resizeAlignment,
+         onCapabilitiesChange: (capabilities) => {
+           this.options.onCapabilitiesChange?.(capabilities);
+         },
+diff --git a/code/web/bpane-client/js/session-resize-runtime.ts b/code/web/bpane-client/js/session-resize-runtime.ts
+index 2b31809..b4d1882 100644
+--- a/code/web/bpane-client/js/session-resize-runtime.ts
++++ b/code/web/bpane-client/js/session-resize-runtime.ts
+@@ -1,5 +1,11 @@
++import type { SessionResizeAlignmentPreference } from './bpane-types.js';
++
+ const RESIZE_DEBOUNCE_MS = 150;
+ 
++function physicalAlignment(value: number | undefined): number {
++  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 64 ? value : 1;
++}
++
+ export type SessionResizeSource = 'canvas' | 'container';
+ 
+ export interface SessionResizeRuntimeInput {
+@@ -8,6 +14,8 @@ export interface SessionResizeRuntimeInput {
+   cursorEl: HTMLCanvasElement | null;
+   hiDpi: boolean;
+   resizeSource?: SessionResizeSource;
++  /** Container-driven capture dimensions, in physical pixels. */
++  resizeAlignment?: SessionResizeAlignmentPreference;
+   resizeObserver: Pick<ResizeObserver, 'observe' | 'disconnect'>;
+   resizeRenderer: (width: number, height: number) => void;
+   markDisplayDirty: () => void;
+@@ -26,6 +34,8 @@ export class SessionResizeRuntime {
+   private readonly cursorEl: HTMLCanvasElement | null;
+   private readonly hiDpi: boolean;
+   private readonly resizeSource: SessionResizeSource;
++  private readonly widthAlignment: number;
++  private readonly heightAlignment: number;
+   private readonly resizeObserver: Pick<ResizeObserver, 'observe' | 'disconnect'>;
+   private readonly resizeRenderer: (width: number, height: number) => void;
+   private readonly markDisplayDirty: () => void;
+@@ -46,6 +56,11 @@ export class SessionResizeRuntime {
+     this.cursorEl = input.cursorEl;
+     this.hiDpi = input.hiDpi;
+     this.resizeSource = input.resizeSource ?? 'canvas';
++    // Embedded canvas-driven clients own their CSS sizing. Only opt-in
++    // container-driven sessions may pin child dimensions without a feedback loop.
++    const alignment = this.resizeSource === 'container' ? input.resizeAlignment : 1;
++    this.widthAlignment = physicalAlignment(typeof alignment === 'number' ? alignment : alignment?.width);
++    this.heightAlignment = physicalAlignment(typeof alignment === 'number' ? alignment : alignment?.height);
+     this.resizeObserver = input.resizeObserver;
+     this.resizeRenderer = input.resizeRenderer;
+     this.markDisplayDirty = input.markDisplayDirty;
+@@ -74,6 +89,13 @@ export class SessionResizeRuntime {
+       return;
+     }
+ 
++    // Keep legacy observer rounding for unaligned clients. Aligned capture
++    // must retain CSS fractions until after physical-pixel scale conversion.
++    if (this.widthAlignment === 1 && this.heightAlignment === 1) {
++      width = Math.floor(width);
++      height = Math.floor(height);
++    }
++
+     if (this.resizeTimeout !== null) {
+       this.clearTimeoutFn(this.resizeTimeout);
+     }
+@@ -164,6 +186,21 @@ export class SessionResizeRuntime {
+   }
+ 
+   private applyCanvasSize(width: number, height: number): void {
++    if (this.widthAlignment > 1 || this.heightAlignment > 1) {
++      // Never stretch a rounded capture across the extra CSS pixel: that would
++      // blur text and misalign its cursor/input surface. Leave the parent flex
++      // layout untouched, so ResizeObserver keeps measuring available space.
++      // Locked viewers must retain the existing fit-to-container behavior.
++      const scale = this.computeScale();
++      const cssWidth = this.resolutionLocked ? '100%' : `${width / scale}px`;
++      const cssHeight = this.resolutionLocked ? '100%' : `${height / scale}px`;
++      this.canvas.style.width = cssWidth;
++      this.canvas.style.height = cssHeight;
++      if (this.cursorEl) {
++        this.cursorEl.style.width = cssWidth;
++        this.cursorEl.style.height = cssHeight;
++      }
++    }
+     this.canvas.width = width;
+     this.canvas.height = height;
+     this.resizeRenderer(width, height);
+@@ -206,8 +243,8 @@ export class SessionResizeRuntime {
+   private scaledDims(width: number, height: number): { width: number; height: number } {
+     const scale = this.computeScale();
+     return {
+-      width: Math.floor(width * scale),
+-      height: Math.floor(height * scale),
++      width: Math.floor(width * scale / this.widthAlignment) * this.widthAlignment,
++      height: Math.floor(height * scale / this.heightAlignment) * this.heightAlignment,
+     };
+   }
+ }
+diff --git a/code/web/bpane-client/js/session-runtime-factory.ts b/code/web/bpane-client/js/session-runtime-factory.ts
+index d6073ae..c5599c7 100644
+--- a/code/web/bpane-client/js/session-runtime-factory.ts
++++ b/code/web/bpane-client/js/session-runtime-factory.ts
+@@ -13,7 +13,7 @@ import { SessionSurfaceRuntime } from './session-surface-runtime.js';
+ import { SessionTransportRuntime } from './session-transport-runtime.js';
+ import { SessionVideoDecoderRuntime } from './session-video-decoder-runtime.js';
+ import { TileCompositor } from './tile-compositor.js';
+-import type { SessionResizeSourcePreference } from './bpane-types.js';
++import type { SessionResizeSourcePreference, SessionResizeAlignmentPreference } from './bpane-types.js';
+ 
+ type SendFrame = (channelId: number, payload: Uint8Array) => void;
+ type SendCameraFrame = (payload: Uint8Array) => 'sent' | 'queued' | 'replaced';
+@@ -25,6 +25,7 @@ interface SessionRuntimeFactoryOptions {
+   pingIntervalMs: number;
+   renderBackend?: 'auto' | 'canvas2d' | 'webgl2';
+   resizeSource?: SessionResizeSourcePreference;
++  resizeAlignment?: SessionResizeAlignmentPreference;
+   onCapabilitiesChange?: (capabilities: {
+     audio: boolean;
+     microphone: boolean;
+@@ -216,6 +217,7 @@ export class SessionRuntimeFactory {
+       hiDpi: params.options.hiDpi,
+       renderBackend: params.options.renderBackend,
+       resizeSource: params.options.resizeSource,
++      resizeAlignment: params.options.resizeAlignment,
+       onTileCacheMiss: ({ frameSeq, col, row, hash }) => {
+         params.context.sendTileCacheMiss(frameSeq, col, row, hash);
+       },
+diff --git a/code/web/bpane-client/js/session-surface-runtime.ts b/code/web/bpane-client/js/session-surface-runtime.ts
+index 8450008..e316cb0 100644
+--- a/code/web/bpane-client/js/session-surface-runtime.ts
++++ b/code/web/bpane-client/js/session-surface-runtime.ts
+@@ -1,5 +1,6 @@
+ import type { TileInfo } from './nal.js';
+ import type { CacheMissEvent } from './render/tile-draw-runtime.js';
++import type { SessionResizeAlignmentPreference } from './bpane-types.js';
+ import { SessionCursorRuntime } from './session-cursor-runtime.js';
+ import { SessionRecordingSurfaceRuntime } from './session-recording-surface-runtime.js';
+ import { SessionResizeRuntime, type SessionResizeSource } from './session-resize-runtime.js';
+@@ -28,6 +29,7 @@ export interface SessionSurfaceRuntimeInput {
+   hiDpi: boolean;
+   renderBackend?: SessionSurfaceRenderBackendPreference;
+   resizeSource?: SessionResizeSource;
++  resizeAlignment?: SessionResizeAlignmentPreference;
+   onTileCacheMiss: (event: CacheMissEvent) => void;
+   onRenderError?: (error: unknown) => void;
+   sendResizeRequest: (width: number, height: number) => void;
+@@ -152,7 +154,7 @@ export class SessionSurfaceRuntime {
+     const resizeObserver = resizeObserverFactory((entries) => {
+       for (const entry of entries) {
+         const { width, height } = entry.contentRect;
+-        this.resizeRuntime.handleResize(Math.floor(width), Math.floor(height));
++        this.resizeRuntime.handleResize(width, height);
+       }
+     });
+ 
+@@ -162,6 +164,7 @@ export class SessionSurfaceRuntime {
+       cursorEl: this.cursorEl,
+       hiDpi: input.hiDpi,
+       resizeSource: input.resizeSource,
++      resizeAlignment: input.resizeAlignment,
+       resizeObserver,
+       resizeRenderer: (width, height) => {
+         if (this.glRenderer) {
