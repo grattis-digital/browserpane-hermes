@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+# This is public source, later read through a capability-dropped Linux bind mount.
+# Do not inherit a private operator umask for the generated source tree.
+umask 022
 project_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$project_dir"
 # Never silently overwrite local edits in the ignored source snapshot.
@@ -32,5 +35,8 @@ for patch_file in "$project_dir"/patches/*.patch; do
   (cd "$snapshot_dir" && git apply --check "$patch_file" && git apply "$patch_file")
 done
 if [ -d upstream ]; then rmdir upstream; fi
+# mktemp deliberately creates 0700; root without DAC_OVERRIDE cannot traverse a
+# directory owned by the host checkout user. Keep the container capabilities off.
+chmod 0755 "$snapshot_dir"
 mv "$snapshot_dir" upstream
 echo "Prepared upstream $commit with the ordered patches in patches/."

@@ -2,11 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const execute = promisify(execFile);
+
+test('public generated source is traversable/readable across capability-dropped bind mounts', async () => {
+  // Linux test containers run UID 0 without DAC_OVERRIDE, while checkout files
+  // belong to the runner UID. A mktemp root left at 0700 hides Cargo.toml.
+  assert.equal((await stat('upstream')).mode & 0o005, 0o005,
+    'Generated source root must be world-readable/traversable, not mktemp-private');
+  assert.equal((await stat('upstream/Cargo.toml')).mode & 0o004, 0o004,
+    'Public Cargo manifest must remain readable without DAC_OVERRIDE');
+  assert.match(await readFile('scripts/fetch-upstream.sh', 'utf8'), /umask 0?22/,
+    'A private caller umask must not restrict public generated source files');
+});
 
 test('tracked patches reverse and reproduce current vendored source without touching it', async () => {
   const root = resolve('.');
