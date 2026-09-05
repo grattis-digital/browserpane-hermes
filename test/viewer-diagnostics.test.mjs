@@ -24,6 +24,24 @@ test('diagnostics preserve errors and numeric connection counters without includ
   assert(value.events[0].message.includes('ERR_QUIC_PROTOCOL_ERROR'));
   assert.equal(value.events[0].ticket, '[redacted]');
 });
+test('snapshot reads the session transfer and tile-cache public counter shapes', async () => {
+  const context = {
+    window: { browserpaneSession: {
+      getSessionStats: () => ({ transfer: { rxBytes: 1200, rxFrames: 18, txBytes: 43 }, rxBytes: -1 }),
+      getTileCacheStats: () => ({ qoiDecodes: 2, zstdDecodes: 7, fills: 11, hits: 13, solidFills: -1 }),
+    }, __bpaneViewerConnectionDiagnostics: [{ type: 'ready' }] },
+    document: { visibilityState: 'visible', querySelector: selector => selector === '#status'
+      ? { textContent: 'Connected' } : { width: 1280, height: 720 } },
+    isSecureContext: true, WebTransport: function WebTransport() {},
+  };
+  const snapshot = await new ViewerDiagnostics().snapshot({
+    async evaluate(callback) { return runInNewContext(`(${callback.toString()})()`, context); },
+  });
+  assert.deepEqual(snapshot.state.counts, { rxBytes: 1200, rxFrames: 18, txBytes: 43,
+    qoi: 2, zstd: 7, fills: 11, hits: 13 });
+  assert.deepEqual(snapshot.state.canvas, { width: 1280, height: 720 });
+  assert.equal(snapshot.state.hasSession, true);
+});
 test('connection observer preserves constructor identity, arguments and ready/closed behavior', async () => {
   let install;
   const diagnostics = new ViewerDiagnostics();

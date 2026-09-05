@@ -7,9 +7,12 @@ local control layer, not an alternative capture or streaming path.
   supported bounds. This is a practical Pi workload policy, not a monitor benchmark.
 - **Resolution** presets specify physical capture pixels up to 1920×1080. The
   browser desktop resizes without restarting Chromium or discarding its profile.
-- **HiDPI** changes local display density. Off/1× favors readable UI; higher
-  density makes the same capture smaller and sharper where the monitor allows.
-  Native follows the viewer monitor’s device pixel ratio, capped at 3×.
+- **HiDPI** changes local display density. Off/1× favors readable UI; with a fixed
+  resolution, higher density makes the same capture smaller and sharper where
+  the monitor allows. Native follows the viewer monitor’s device pixel ratio,
+  capped at 3×. With Auto resolution, density changes can also select a new
+  physical capture within the Pi pixel budget; locked secondary viewers never
+  resize the shared capture.
 - Small views are centered; large ones fit while preserving aspect ratio.
 - Local preferences survive viewer reloads. The first viewer owns shared capture
   sizing; subsequent viewers fit locally until ownership changes.

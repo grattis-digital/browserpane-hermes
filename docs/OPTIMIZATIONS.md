@@ -18,6 +18,7 @@ maps them to upstream files and recovery contracts.
 | Recovery | Fail closed on missing stateful commands; coalesced fresh snapshots; failed client batch blocks dependent deltas until recovery completes | Make loss/reconnect/cache eviction recoverable, including idle pages |
 | Video transitions | Reliable region ownership, fresh lossless exit repair, bounded decoder/bootstrap backlog | Stop stale video covering the newly lossless page |
 | Geometry | Optional 8×2 capture alignment and validated exact virtual-display modes | Keep the actual X11 dimensions and displayed bitmap consistent |
+| Resize error cleanup | Restore the saved Chrome window state after a failed intermediate CDP bounds request | Avoid leaving a temporarily normalized window in normal state after failure |
 
 The browser remains at device scale 1 by default. Viewer density controls change
 local display/capture sizing, not Chromium's page/device scale. Auto uses a
@@ -25,6 +26,15 @@ readability-first 1× policy and a 1280×720 pixel-area budget; this is a conser
 policy, not a dynamically measured optimum. Larger presets through 1920×1080
 are opt-in. A historical 4K snapshot sometimes exceeded the stateful broadcast
 queue, so 2560/3840-wide presets are not exposed as qualified options.
+
+Patch 0016 has six native regression tests using the actual resize function and
+a private scripted CDP WebSocket peer. Before the fix, three regressions failed;
+afterward all six passed. They cover successful and rejected bounds requests,
+later resizes, prior normal/minimized/maximized/fullscreen states, and restoration
+failure. A failed operation still reports failure; there is no forced-maximize
+or global retry policy. This proves the cleanup defect, not that it triggered
+every observed geometry failure or an unrelated initial-viewer timeout. A peer
+that rejects restoration can still leave the window in normal state.
 
 ## Historical Raspberry Pi evidence
 

@@ -15,6 +15,8 @@
   initialization, safe SQLite linkage and tests without paid model calls.
 - Replaces platform pipelines with bundle-specific validation and gated image
   publishing, including native ARM64 and x86-64 build targets.
+- Adds bounded, redacted viewer-failure diagnostics and fixes window-state
+  cleanup after failed CDP resize requests, covered by native regression tests.
 - Adds setup/security/operations documentation, measured optimization evidence,
   backport guidance, an original AI-assisted mark and a real synthetic-session
   screenshot.

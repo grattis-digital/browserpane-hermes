@@ -5,8 +5,9 @@ session shared with Hermes. Issue #1 and BPH_00001_BUNDLE_PLAN.md are the curren
 scope; upstream enterprise roadmap items are not implementation authority here.
 
 The source import comes from the qualified single-browser wrapper. Fourteen
-rendering/display patches plus the fork's fifteenth listener-isolation patch
-target upstream 91e0e1b0c772f8ac333b9ccd6fa09ea35b2673e3. The public specialization
+rendering/display patches plus listener-isolation patch 0015 and CDP resize-error
+cleanup patch 0016 target upstream 91e0e1b0c772f8ac333b9ccd6fa09ea35b2673e3.
+The public specialization
 is implemented in PR #2: portable Compose, lean pinned Hermes packaging, setup and
 doctor commands, focused CI, public guides and synthetic-only verification tools.
 Deployment-specific records, credentials and profiles are not included.
@@ -24,11 +25,15 @@ The unused CDP forwarding listener is disabled, and the gateway admin API binds
 to loopback without moving its public rendering transport. These are trusted-LAN
 boundaries, not a multi-tenant or public-internet security guarantee.
 
-Local qualification covers pristine 15-patch replay, wrapper/client/native tests,
+Local qualification covers pristine 16-patch replay, wrapper/client/native tests,
 real WebGL/X11 pixels, profile restart/recreation, deterministic MCP and the actual
 three-service Compose bundle. CI runs the native amd64/ARM64 image and integration
 matrix without paid model calls. Its current run status belongs on PR #2 and the
 Actions page; an image build alone is not proof of runtime or viewer correctness.
+
+The 0016 native mock-CDP regressions prove restoration is attempted after failed
+bounds changes, without forcing a user-chosen normal window to maximize. They do
+not establish the trigger of every intermittent viewer or geometry failure.
 
 PR #2 remains the review path; merging or deployment is a separate decision. Retain
 upstream history and original licenses; do not publish private implementation

@@ -61,9 +61,15 @@ containers see the same `/shared` path, MCP upload paths need no translation.
 Example file exchange:
 
 ```sh
-docker compose cp ./document.txt hermes:/shared/document.txt
+docker compose exec -T hermes sh -c \
+  'umask 077; set -C; cat > /shared/document.txt' < ./document.txt
 docker compose cp hermes:/shared/downloads ./downloads
 ```
+
+The upload creates a private file as UID10000 and refuses to overwrite an
+existing file. Plain `docker compose cp` into a container can instead create
+root-owned files, leaving a source file with private permissions unreadable by
+Hermes. See [Docker copy ownership](https://docs.docker.com/reference/cli/docker/container/cp/).
 
 Treat all three volumes as sensitive. The browser session may already be logged
 in, and agent transcripts may contain private material. Stop writers before a

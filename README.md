@@ -78,7 +78,8 @@ GATEWAY_PORT=4433
 Use your Pi’s actual static/reserved LAN address. Make `VIEWER_HOST` resolve to
 that address on the viewer computer, or use the IP itself. It is a hostname or
 IP, **not a URL**. The bundle requires one explicit IPv4 bind address; wildcard
-binding and IPv6-only deployments are not supported by the setup validator.
+binding and IPv6-only deployments are rejected by the runtime validator before
+Chromium starts.
 
 ### Trust HTTPS and permit the two viewer ports
 

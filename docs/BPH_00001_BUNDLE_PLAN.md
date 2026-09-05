@@ -155,7 +155,8 @@ Implementation slices 1–4 are complete. Before publication, local ARM64 Linux
 containers on a Mac passed the following checks; hosted GitHub CI is a separate
 gate, not inferred from local success:
 
-- Strict pristine replay: 15 ordered patches, 816 source files, exact byte match.
+- Initial strict pristine replay before patch 0016: 15 ordered patches,
+  816 source files, exact byte match.
 - Wrapper/configuration/safety/source-packaging: 92 tests; frontend: 771 tests.
 - Native gateway: 532 passed, 1 intentionally ignored; host: 419 passed,
   20 intentionally ignored. Gateway integration suites passed. All seven private
@@ -174,6 +175,12 @@ gate, not inferred from local success:
   This is not a comprehensive vulnerability or security guarantee.
 - Screenshot captured from the synthetic demo through real WebTransport, with
   the visible field edited through real MCP. Original AI-assisted logo inspected.
+
+Follow-up patch 0016 has independent pristine replay of 16 patches and 817 source
+files. Its six real mock-CDP regressions reproduced three failures before the
+minimal cleanup fix and all passed afterward; the regenerated native Linux host
+suite passed 425 tests with 20 intentionally ignored. These tests establish the
+cleanup behavior, not the cause of every intermittent viewer connection failure.
 
 The existing Raspberry Pi deployment was not changed or benchmarked again.
 Historical Pi measurements remain explicitly labelled in docs/OPTIMIZATIONS.md.

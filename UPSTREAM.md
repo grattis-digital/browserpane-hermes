@@ -21,7 +21,8 @@ The audio worklet is copied unchanged alongside the bundle.
 
 The gateway uses its existing static_single runtime and in-memory state. Its
 other administration capabilities remain compiled but unused. There is no
-database, OIDC server, broker, workflow worker, recording service or admin UI.
+separate database service, OIDC server, broker, workflow worker, recording service
+or admin UI. Hermes maintains its own SQLite state in the agent volume.
 
 New administration code: single-session HTTP bootstrap, short-lived gateway
 certificate supervisor, persistent-profile lifecycle wrapper and simple viewer
@@ -35,6 +36,12 @@ controls. Patch `0014-client-display-controls.patch` adds live client display
 configuration and ownership reporting; it does not change the transport protocol,
 native capture pipeline or shared Chromium DPI. See
 `docs/DISPLAY.md` for the monitor policy and verification.
+
+Patch `0016-restore-window-state-after-resize-failure.patch` fixes host CDP resize
+cleanup: an intermediate bounds error no longer skips the attempt to restore a
+temporarily changed window state. Its native tests use a scripted WebSocket peer;
+it does not force maximization or change capture/transport protocols. Sixteen
+ordered patches now define the generated snapshot; see `docs/BACKPORTING.md`.
 
 Debian packaging includes a WirePlumber 0.4 override disabling its optional
 logind seat integration: there is no host system bus or Bluetooth device in

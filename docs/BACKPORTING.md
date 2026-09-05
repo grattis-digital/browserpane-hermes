@@ -29,6 +29,7 @@ Paths below are relative to upstream `code/`. Host means
 | 0013 exact dummy modes | Host `capture/ffmpeg.rs` | Validate and apply exact DUMMY0 geometry; acknowledge only verified applied size |
 | 0014 display control API | Client public/session/resize/surface APIs and option validators | Live explicit physical capture size and local density, locked-viewer authority, listener cleanup |
 | 0015 internal listener isolation | Gateway `app/builders/runtime.rs`, `config/gateway.rs`; upstream `deploy/start-host.sh` | Separate optional admin bind from transport bind; optional CDP proxy disable for colocated MCP |
+| 0016 failed-resize state restoration | Host `cdp_video.rs`, `cdp_video/resize_tests.rs` | Attempt restoration of the prior window state even when the intermediate numeric-bounds request fails |
 
 Patch names are descriptive; use the actual ordered filenames, not this table,
 as the application manifest. The bundle sets the 0015 gateway API bind to loopback
@@ -68,6 +69,12 @@ independent. Later patches refine earlier behavior and depend on its context.
 - 0014 is backward-compatible opt-in client configuration, not a new remote
   Chromium DPR protocol. Fixed capture sizes remain fixed when local CSS density
   changes. The wrapper controls and their tests are separate tracked files.
+- 0016 fixes cleanup after a CDP resize error, independently of the X11-mode
+  verification in 0013. It restores only the state this operation temporarily
+  changed; normal/minimized windows are not forced maximized. A failed bounds
+  request or failed restoration still returns failure. This is not a retry,
+  persistent window-state policy, or guarantee that a disconnected CDP peer can
+  be restored. The protocol and native resolution acknowledgement are unchanged.
 
 The video wire format still has no ownership generation identifier. Immediate
 re-entry into the same rectangle can admit an older in-flight frame within that
