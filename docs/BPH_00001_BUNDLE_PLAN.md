@@ -13,7 +13,7 @@
 A Raspberry Pi owner starts one persistent Chromium session and a Hermes agent
 with Docker Compose. They log in or intervene through the browser viewer; Hermes
 uses MCP against that same browser. The profile and shared downloads survive
-container recreation. No second browser, database, enterprise admin console or
+container recreation. No second browser, separate database service, enterprise admin console or
 Docker socket is required by this specialization.
 
 The agent must ask the human for consequential actions or MFA rather than
@@ -57,7 +57,7 @@ bundled-agent path.
 ## Contract changes
 
 - API/protocol: preserve existing single-browser gateway/bootstrap/MCP contract.
-- Database: none; do not ship upstream database or migration services.
+- Database: no separate service or upstream migrations; Hermes owns its persistent SQLite state.
 - Administration: single viewer and setup files, no upstream admin application.
 - CLI/SDK: setup/doctor and normal Compose commands where justified; no duplicate agent framework.
 - Deployment/configuration: remove hard-coded operator addresses, paths and identities.
@@ -181,6 +181,14 @@ files. Its six real mock-CDP regressions reproduced three failures before the
 minimal cleanup fix and all passed afterward; the regenerated native Linux host
 suite passed 425 tests with 20 intentionally ignored. These tests establish the
 cleanup behavior, not the cause of every intermittent viewer connection failure.
+
+Follow-up patches 0017–0018 have independent pristine replay of 18 patches and
+820 source files. The native host suite passes 429 tests (20 intentionally
+ignored), including browser-owned restoration after page-socket closure; the
+client suite passes 775 tests. Real Chromium reproduces the page-close lifetime
+failure and verifies browser-level restoration, and separate injected renderer
+failures verify a drawable Canvas2D fallback with exact pixels. These focused
+results are not a substitute for the hosted CI and full viewer integration gates.
 
 The existing Raspberry Pi deployment was not changed or benchmarked again.
 Historical Pi measurements remain explicitly labelled in docs/OPTIMIZATIONS.md.

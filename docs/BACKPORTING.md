@@ -30,6 +30,8 @@ Paths below are relative to upstream `code/`. Host means
 | 0014 display control API | Client public/session/resize/surface APIs and option validators | Live explicit physical capture size and local density, locked-viewer authority, listener cleanup |
 | 0015 internal listener isolation | Gateway `app/builders/runtime.rs`, `config/gateway.rs`; upstream `deploy/start-host.sh` | Separate optional admin bind from transport bind; optional CDP proxy disable for colocated MCP |
 | 0016 failed-resize state restoration | Host `cdp_video.rs`, `cdp_video/resize_tests.rs` | Attempt restoration of the prior window state even when the intermediate numeric-bounds request fails |
+| 0017 browser-owned window resize | Host `cdp_video.rs`, `cdp_video/{resize_tests,browser_resize_tests}.rs` | Keep top-level window commands on a browser-level CDP connection that survives the identifying tab closing |
+| 0018 drawable renderer fallback | Client `session-surface-runtime.ts`, `render/session-canvas-factory.ts` | Finalize renderer/context before mounting; replace rejected WebGL canvases with drawable Canvas2D, fail explicitly if neither exists |
 
 Patch names are descriptive; use the actual ordered filenames, not this table,
 as the application manifest. The bundle sets the 0015 gateway API bind to loopback
@@ -75,6 +77,19 @@ independent. Later patches refine earlier behavior and depend on its context.
   request or failed restoration still returns failure. This is not a retry,
   persistent window-state policy, or guarantee that a disconnected CDP peer can
   be restored. The protocol and native resolution acknowledgement are unchanged.
+- 0017 resolves the visible page's window ID and prior state before mutation,
+  then opens the browser-level `/json/version` WebSocket for window commands.
+  Page hints and device emulation remain page-scoped. Browser connection failure
+  aborts before normalization; a vanished window returns failure without
+  retargeting another window. Keep 0016's restoration-on-error behavior. This
+  protects tab closure during resize, not a Chromium-process crash or every
+  asynchronous window-manager transition.
+- 0018 preserves automatic hardware selection and the Canvas2D software policy.
+  A canvas cannot change context type after WebGL creation, even after losing
+  that context; all cursor/recording/video/resize consumers must receive the
+  final drawable canvas. Real-browser failure injection validates context
+  ownership and exact Fill/QOI/Zstd/cache/scroll pixels; it is not a GPU
+  performance claim.
 
 The video wire format still has no ownership generation identifier. Immediate
 re-entry into the same rectangle can admit an older in-flight frame within that

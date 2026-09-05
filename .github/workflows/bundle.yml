@@ -44,7 +44,7 @@ jobs:
             - < .github/workflows/bundle.yml
       - name: Install isolated test Chromium
         run: npx playwright install --with-deps chromium
-      - name: Real WebGL pixel correctness
+      - name: Real WebGL and Canvas2D fallback pixel correctness
         run: |
           BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
           export BPANE_TEST_BROWSER_PATH

@@ -19,6 +19,8 @@ maps them to upstream files and recovery contracts.
 | Video transitions | Reliable region ownership, fresh lossless exit repair, bounded decoder/bootstrap backlog | Stop stale video covering the newly lossless page |
 | Geometry | Optional 8×2 capture alignment and validated exact virtual-display modes | Keep the actual X11 dimensions and displayed bitmap consistent |
 | Resize error cleanup | Restore the saved Chrome window state after a failed intermediate CDP bounds request | Avoid leaving a temporarily normalized window in normal state after failure |
+| Window-control ownership | Resolve a visible page's window, then resize/restore it over the browser-level CDP connection | Keep closing that page from interrupting top-level window restoration |
+| Drawable fallback | Replace a rejected WebGL canvas before mounting the Canvas2D renderer; fail when neither renderer can draw | Avoid receiving tiles into a context-less, permanently blank surface |
 
 The browser remains at device scale 1 by default. Viewer density controls change
 local display/capture sizing, not Chromium's page/device scale. Auto uses a
@@ -35,6 +37,29 @@ failure. A failed operation still reports failure; there is no forced-maximize
 or global retry policy. This proves the cleanup defect, not that it triggered
 every observed geometry failure or an unrelated initial-viewer timeout. A peer
 that rejects restoration can still leave the window in normal state.
+
+Patch 0017 addresses a separately reproduced lifetime failure: closing the page
+while a resize had temporarily normalized its surviving browser window also
+closed the page-scoped control socket. A local Chromium 152 trace recorded tab
+destruction 84 ms after normalization, inside the host's 120 ms interval. A
+controlled real-browser check confirmed that restoration then failed over the
+closed page socket, but succeeded for the same window over a browser-level
+connection. Four additional native mock-CDP tests cover this closure, a vanished
+pinned window, and missing/rejected browser connections; the six earlier state
+regressions remain. This does not establish the cause of unrelated initial-viewer
+timeouts or make native window-manager transitions synchronous.
+
+Patch 0018 corrects a different fallback defect: after WebGL had claimed a
+canvas, rejecting that renderer and asking the same canvas for Canvas2D yielded
+no drawable context. Four unit regressions fail on the old path and pass with
+the replacement-canvas path; the full client suite passes 775 tests. Actual
+Chromium 146 tests injected software-renderer rejection, metadata-query failure
+and shader failure and compared exact Fill/QOI/Zstd/cache/scroll pixels with
+zero differing channels. Complete Canvas2D failure is explicit before mounting.
+Hosted diagnostics showed a ready transport receiving 595,258 bytes in 1,700
+frames while drawing counters stayed zero, but did not identify that runner's
+renderer hardware. The controlled checks prove the fallback defect without
+claiming every initial-viewer timeout has the same cause.
 
 ## Historical Raspberry Pi evidence
 

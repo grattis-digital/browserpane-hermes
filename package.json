@@ -9,7 +9,7 @@
     "test": "node --test test/*.test.mjs",
     "test:client": "node scripts/test-client.mjs",
     "test:linux": "bash scripts/test-pipeline-linux.sh",
-    "test:webgl": "node scripts/check-webgl-pixels.mjs",
+    "test:webgl": "node scripts/check-webgl-pixels.mjs && node scripts/check-renderer-fallback.mjs",
     "test:scroll": "node scripts/check-scroll-integrity.mjs",
     "test:display": "node scripts/check-display-controls.mjs",
     "test:runtime": "node scripts/test-runtime.mjs",

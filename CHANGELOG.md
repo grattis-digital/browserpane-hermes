@@ -17,6 +17,10 @@
   publishing, including native ARM64 and x86-64 build targets.
 - Adds bounded, redacted viewer-failure diagnostics and fixes window-state
   cleanup after failed CDP resize requests, covered by native regression tests.
+- Keeps window resize/restoration on browser-owned CDP so closing a page cannot
+  strand the window in its temporary state. Selects a fresh drawable Canvas2D
+  surface when WebGL is rejected or initialization fails, with real-context
+  pixel regressions and backend-specific scroll-copy assertions.
 - Adds setup/security/operations documentation, measured optimization evidence,
   backport guidance, an original AI-assisted mark and a real synthetic-session
   screenshot.

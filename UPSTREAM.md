@@ -40,8 +40,11 @@ native capture pipeline or shared Chromium DPI. See
 Patch `0016-restore-window-state-after-resize-failure.patch` fixes host CDP resize
 cleanup: an intermediate bounds error no longer skips the attempt to restore a
 temporarily changed window state. Its native tests use a scripted WebSocket peer;
-it does not force maximization or change capture/transport protocols. Sixteen
-ordered patches now define the generated snapshot; see `docs/BACKPORTING.md`.
+it does not force maximization or change capture/transport protocols. Patch 0017
+keeps those window commands on browser-level CDP so the identifying tab can
+close without losing restoration. Patch 0018 finalizes a drawable canvas before
+mounting, using a fresh Canvas2D canvas when WebGL is rejected. Eighteen ordered
+patches now define the generated snapshot; see `docs/BACKPORTING.md`.
 
 Debian packaging includes a WirePlumber 0.4 override disabling its optional
 logind seat integration: there is no host system bus or Bluetooth device in

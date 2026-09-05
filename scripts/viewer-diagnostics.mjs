@@ -58,11 +58,18 @@ export class ViewerDiagnostics {
     const state = await Promise.race([page.evaluate(() => {
       const session = window.browserpaneSession, canvas = document.querySelector('#screen canvas');
       const stats = session?.getSessionStats(), cache = session?.getTileCacheStats();
+      const renderer = session?.getRenderDiagnostics?.();
+      const render = renderer ? { backend: renderer.backend, reason: renderer.reason,
+        software: renderer.software, renderer: renderer.renderer, vendor: renderer.vendor } : null;
+      // A completed session already chose its context type. Check only that
+      // advertised type, never probe an uninitialized canvas into another mode.
+      const context = canvas && render ? canvas.getContext(render.backend === 'webgl2' ? 'webgl2' : '2d') : null;
       return { status: document.querySelector('#status')?.textContent, secureContext: isSecureContext,
         hasWebTransport: typeof WebTransport === 'function', visibility: document.visibilityState,
         hasSession: !!session, canvas: canvas ? { width: canvas.width, height: canvas.height } : null,
         counts: { rxBytes: stats?.transfer?.rxBytes, rxFrames: stats?.transfer?.rxFrames, txBytes: stats?.transfer?.txBytes,
           qoi: cache?.qoiDecodes, zstd: cache?.zstdDecodes, fills: cache?.fills, hits: cache?.hits },
+        render, hasAdvertisedContext: !!context,
         transport: window.__bpaneViewerConnectionDiagnostics ?? [] };
     }).catch(error => ({ unavailable: error.message })), timeout]);
     return { events: this.events, state: ViewerDiagnostics.clean(state) };

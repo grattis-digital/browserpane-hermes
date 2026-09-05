@@ -29,9 +29,12 @@ test('snapshot reads the session transfer and tile-cache public counter shapes',
     window: { browserpaneSession: {
       getSessionStats: () => ({ transfer: { rxBytes: 1200, rxFrames: 18, txBytes: 43 }, rxBytes: -1 }),
       getTileCacheStats: () => ({ qoiDecodes: 2, zstdDecodes: 7, fills: 11, hits: 13, solidFills: -1 }),
+      getRenderDiagnostics: () => ({ backend: 'canvas2d', reason: 'software-renderer',
+        software: true, renderer: 'SwiftShader', vendor: 'test' }),
     }, __bpaneViewerConnectionDiagnostics: [{ type: 'ready' }] },
     document: { visibilityState: 'visible', querySelector: selector => selector === '#status'
-      ? { textContent: 'Connected' } : { width: 1280, height: 720 } },
+      ? { textContent: 'Connected' } : { width: 1280, height: 720,
+        getContext: type => { assert.equal(type, '2d'); return {}; } } },
     isSecureContext: true, WebTransport: function WebTransport() {},
   };
   const snapshot = await new ViewerDiagnostics().snapshot({
@@ -41,6 +44,8 @@ test('snapshot reads the session transfer and tile-cache public counter shapes',
     qoi: 2, zstd: 7, fills: 11, hits: 13 });
   assert.deepEqual(snapshot.state.canvas, { width: 1280, height: 720 });
   assert.equal(snapshot.state.hasSession, true);
+  assert.equal(snapshot.state.hasAdvertisedContext, true);
+  assert.equal(snapshot.state.render.reason, 'software-renderer');
 });
 test('connection observer preserves constructor identity, arguments and ready/closed behavior', async () => {
   let install;

@@ -51,7 +51,10 @@ node scripts/test-compose.mjs browserpane-hermes:test browserpane-hermes-agent:t
 ```
 
 `test:webgl` starts its own browser/profile and checks real WebGL pixels, texture
-reuse and context loss. It is not a GPU speed benchmark. An existing Chrome can
+reuse and context loss. It also exercises the auto-renderer fallback with real
+canvas contexts: synthetic software metadata and initialization failures must
+produce exact Canvas2D Fill/QOI/Zstd/cache/scroll pixels; complete context failure
+must leave no mounted surface. It is not a GPU speed benchmark. An existing Chrome can
 instead be selected with `BPANE_TEST_BROWSER_CHANNEL=chrome`; it still launches
 a fresh isolated browser, never attaches to your active profile.
 
@@ -69,8 +72,10 @@ global Docker prune against a developer's machine.
 `test-viewer.mjs` owns a separate tmpfs-only container and fixed loopback ports
 18090/TCP and 24433/UDP. It refuses an existing `browserpane-pipeline-viewer`
 container. It checks complete settled RGBA against direct X11 capture, including
-scroll reversals, cache loss, decode faults and actual display geometry. The
-display check covers local density, fixed sizes, ownership, odd geometry and
+scroll reversals, cache loss, decode faults and actual display geometry. Retained
+copy coverage requires nonempty GPU blits for WebGL or nonempty main-canvas
+Canvas2D copies for the auto-selected backend; the separate WebGL gate remains.
+The display check covers local density, fixed sizes, ownership, odd geometry and
 keyboard input. Reports/screenshots contain synthetic fixtures and go into ignored
 `test-results/`. Neither script may target a production browser or shared profile.
 

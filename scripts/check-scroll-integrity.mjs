@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
+import { ScrollCopyDiagnostics } from './scroll-copy-diagnostics.mjs';
 
 // Deliberately fixed local-only targets with disposable storage and synthetic pages.
 const containerName = 'browserpane-pipeline-viewer';
@@ -114,6 +115,7 @@ async function viewerPixels() {
     let binary = '';
     for (let i=0; i<pixels.length; i+=32768) binary += String.fromCharCode(...pixels.subarray(i,i+32768));
     return { width, height, data:btoa(binary), cache:session.getTileCacheStats(), sessionStats:session.getSessionStats(),blits:window.__scrollOracleBlits,
+      canvasCopies:window.__scrollOracleCanvasCopies,
       grid:session.tileCompositor.getGridConfig(), render:session.getRenderDiagnostics() };
   });
 }
@@ -162,7 +164,8 @@ async function checkpoint(name) {
     }
     last={name,width:first.width,height:first.height,...compare(reference,Buffer.from(second.data,'base64'),first.width,first.height),
       physicalDisplay:displayAfter,geometryMatches:first.width===displayAfter.width&&first.height===displayAfter.height,
-      cache:second.cache,grid:second.grid,blits:second.blits,transfer:second.sessionStats.transfer,scrollHealth:second.sessionStats.tiles.scrollHealth};
+      cache:second.cache,grid:second.grid,blits:second.blits,canvasCopies:second.canvasCopies,render:second.render,
+      transfer:second.sessionStats.transfer,scrollHealth:second.sessionStats.tiles.scrollHealth};
     if(last.pixels===0&&last.geometryMatches) break;
     await delay(250);
   }
@@ -198,14 +201,7 @@ try {
   report.viewerVersion=browser.version();
   page=await browser.newPage({viewport:{width:1280,height:771},deviceScaleFactor:2});
   await diagnostics.observe(page, 'primary');
-  await page.addInitScript(()=>{
-    window.__scrollOracleBlits=0;
-    const original=WebGL2RenderingContext.prototype.blitFramebuffer;
-    WebGL2RenderingContext.prototype.blitFramebuffer=function(...args){
-      if(args[0]!==args[2]&&args[1]!==args[3]&&args[4]!==args[6]&&args[5]!==args[7]) window.__scrollOracleBlits++;
-      return original.apply(this,args);
-    };
-  });
+  await page.addInitScript(ScrollCopyDiagnostics.install);
   page.on('pageerror',error=>pageErrors.push(error.message));
   page.on('download',download=>{downloads.push(download.suggestedFilename());void download.cancel();});
   await page.goto(viewerUrl);
@@ -308,8 +304,7 @@ try {
   assert(checkpoints.some(c=>c.cache.scrollCopies>0),'No real scroll-copy commands observed');
   assert(checkpoints.some(c=>c.cache.hits>0),'No real content-cache reuse observed');
   const beforeRetained=checkpoints.find(c=>c.name==='half-tile-list-scroll'),afterRetained=checkpoints.find(c=>c.name==='retained-list-scroll');
-  assert(afterRetained.cache.scrollCopies-beforeRetained.cache.scrollCopies>=8,'Insufficient retained-scroll stress coverage');
-  assert(afterRetained.blits-beforeRetained.blits>=16,'Retained copies did not issue real nonempty GPU blits');
+  ScrollCopyDiagnostics.assertRetainedCoverage(beforeRetained,afterRetained);
   assert(checkpoints.find(c=>c.name==='irregular-down').document.y>0,'Viewer wheel input did not move the document');
   const beforeUp=checkpoints.find(c=>c.name==='fast-reversal'),afterUp=checkpoints.find(c=>c.name==='small-up');
   assert(afterUp.document.y<beforeUp.document.y,'Upward wheel input never moved the document upward');
