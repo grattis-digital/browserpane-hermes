@@ -190,6 +190,18 @@ failure and verifies browser-level restoration, and separate injected renderer
 failures verify a drawable Canvas2D fallback with exact pixels. These focused
 results are not a substitute for the hosted CI and full viewer integration gates.
 
+Viewer qualification also separates first-frame readiness from ordered input
+completion. A controlled disposable CPU/X11 test queued five same-size resizes
+before sending the original wheel group once: an early observation saw no wheel
+events or displacement; a matching host Pong arrived after 1,397 ms, followed by
+three trusted wheel events, 192 pixels of movement and an exact framebuffer.
+No additional mouse/wheel input or forced scrolling was used across the barrier.
+This reproduces the observation race under startup-style work; it is not a new
+latency improvement or definitive attribution of the earlier untimed CI trace.
+The harness adds a genuine focused content-click precondition, per-group host
+acknowledgements and independent oracle aggregation, without changing production
+resize policy or weakening movement/pixel assertions.
+
 The existing Raspberry Pi deployment was not changed or benchmarked again.
 Historical Pi measurements remain explicitly labelled in docs/OPTIMIZATIONS.md.
 Publish as a review branch/PR by default; do not infer a merge or release from

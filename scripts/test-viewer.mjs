@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
+import { ViewerOracleRunner } from './viewer-oracle-runner.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const name = 'browserpane-pipeline-viewer';
@@ -30,11 +31,8 @@ try {
   id = state.Id;
   if (result.error) throw result.error;
   assert.equal(result.status, 0, 'Disposable viewer failed startup');
-  for (const script of ['check-scroll-integrity.mjs', 'check-display-controls.mjs']) {
-    const test = spawnSync(process.execPath, [`scripts/${script}`], { cwd: root, stdio: 'inherit' });
-    if (test.error) throw test.error;
-    assert.equal(test.status, 0, `${script} failed`);
-  }
+  ViewerOracleRunner.run(['check-scroll-integrity.mjs', 'check-display-controls.mjs'],
+    script => spawnSync(process.execPath, [`scripts/${script}`], { cwd: root, stdio: 'inherit' }));
 } catch (error) {
   failed = true;
   throw error;

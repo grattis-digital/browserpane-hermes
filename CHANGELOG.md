@@ -21,6 +21,9 @@
   strand the window in its temporary state. Selects a fresh drawable Canvas2D
   surface when WebGL is rejected or initialization fails, with real-context
   pixel regressions and backend-specific scroll-copy assertions.
+- Makes viewer qualification verify genuine input readiness and ordered host
+  acknowledgements before measuring wheel results, while preserving pixel and
+  movement assertions. Collects both scroll and display oracle failures per run.
 - Adds setup/security/operations documentation, measured optimization evidence,
   backport guidance, an original AI-assisted mark and a real synthetic-session
   screenshot.

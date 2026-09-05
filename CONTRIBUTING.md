@@ -79,6 +79,16 @@ The display check covers local density, fixed sizes, ownership, odd geometry and
 keyboard input. Reports/screenshots contain synthetic fixtures and go into ignored
 `test-results/`. Neither script may target a production browser or shared profile.
 
+Scroll setup requires one genuine viewer click witnessed by the owned page, with
+content focus and no scroll displacement. Each wheel sequence then waits for its
+matching host Ping/Pong acknowledgement before the existing settled-pixel checks.
+Capture runs separately from input: a correct first frame does not mean startup
+resize work has drained from the host input queue. These bounded readiness checks
+do not replay gestures, force page scrolling, or replace the movement/pixel
+assertions. Their recorded wait times are diagnostics, not a latency benchmark.
+Both scroll and display child oracles run even if one fails; any failure still
+fails the overall job and retains its original cause.
+
 The Hermes integration uses a labelled no-WAN fixture network, real gateway and
 deterministic fake MCP service. It verifies discovery/tool exclusions and
 persistence without provider keys or paid model calls. MCP exclusions are a

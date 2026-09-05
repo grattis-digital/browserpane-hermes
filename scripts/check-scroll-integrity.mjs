@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
 import { ScrollCopyDiagnostics } from './scroll-copy-diagnostics.mjs';
+import { ViewerInputProbe } from './viewer-input-probe.mjs';
 
 // Deliberately fixed local-only targets with disposable storage and synthetic pages.
 const containerName = 'browserpane-pipeline-viewer';
@@ -67,7 +68,8 @@ try {
     const result = await call('Runtime.evaluate', { expression:task.expression, returnByValue:true, awaitPromise:true }, sessionId);
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     output = task.op === 'create' ? { targetId, result: result.result.value } : result.result.value;
-    await call('Page.bringToFront', {}, sessionId);
+    // Observation must not repair focus as a side effect of reading a checkpoint.
+    if (task.op === 'create') await call('Page.bringToFront', {}, sessionId);
   }
   process.stdout.write(JSON.stringify(output));
 } catch (error) {
@@ -170,7 +172,8 @@ async function checkpoint(name) {
     await delay(250);
   }
   assert(last,'X11 reference did not settle at '+name);
-  last.document = remote('eval',()=>({x:scrollX,y:scrollY,scrollHeight:document.documentElement.scrollHeight,innerHeight,nestedY:document.querySelector('#nested')?.scrollTop??null}));
+  last.document = remote('eval',()=>({x:scrollX,y:scrollY,scrollHeight:document.documentElement.scrollHeight,innerHeight,nestedY:document.querySelector('#nested')?.scrollTop??null,
+    focused:document.hasFocus(),input:window.__pipelineInputWitness}));
   checkpoints.push(last);
   console.log(JSON.stringify({stage:name,mismatchedPixels:last.pixels,tiles:last.tiles.length,geometryMatches:last.geometryMatches,scrollCopies:last.cache.scrollCopies,cacheHits:last.cache.hits,batches:last.cache.batchesQueued,document:last.document}));
   if(last.pixels) await page.screenshot({path:outputDir+'/'+label+'-'+name+'.png'});
@@ -179,6 +182,17 @@ async function checkpoint(name) {
 try {
   targetId=remote('create',fixtureToken=>{
     window.__pipelineFixtureToken=fixtureToken;
+    window.__pipelineInputWitness={clicks:0,last:null,wheelEvents:0,lastWheel:null};
+    document.addEventListener('click',event=>{
+      const witness=window.__pipelineInputWitness;
+      witness.clicks++;
+      witness.last={isTrusted:event.isTrusted,button:event.button,clientX:event.clientX,clientY:event.clientY};
+    },{capture:true});
+    document.addEventListener('wheel',event=>{
+      const witness=window.__pipelineInputWitness;
+      witness.wheelEvents++;
+      witness.lastWheel={isTrusted:event.isTrusted,deltaX:event.deltaX,deltaY:event.deltaY,clientX:event.clientX,clientY:event.clientY};
+    },{capture:true,passive:true});
     document.title='DISPOSABLE exact scroll pixel oracle';
     const style=document.createElement('style');
     style.textContent='*{box-sizing:border-box}html{scroll-behavior:auto}body{margin:0;background:#eee;font:17px monospace}section{height:61px;display:flex;width:1664px}section>div{flex:0 0 104px;border:1px solid #161d29;padding:8px 4px;color:#111}#fixed{position:fixed;left:0;top:0;right:0;height:35px;background:#ff269f;z-index:20;color:#121212}#footer{position:fixed;bottom:0;left:0;right:0;height:27px;background:#182838;color:white;z-index:20}.sticky{position:sticky;top:35px;height:29px;background:#d5ec21;color:#121212;z-index:10}#nested{position:fixed;right:15px;bottom:45px;width:277px;height:181px;overflow:auto;border:3px solid #123;background:white;z-index:22}#nested>div{width:600px;height:49px;white-space:nowrap;border-bottom:1px solid #121212}';
@@ -207,6 +221,11 @@ try {
   await page.goto(viewerUrl);
   await page.waitForFunction(()=>window.browserpaneSession?.getTileCacheStats().zstdDecodes>0,{},{timeout:45000});
   await checkpoint('initial');
+  // Pixels arrive on a separate path from host input. Establish content focus
+  // through one genuine viewer click, not CDP focus or a repeated scroll.
+  await page.mouse.click(600,400);
+  report.inputReady=remote('eval',ViewerInputProbe.waitForClick);
+  report.inputBarriers=[];
   // Non-tile-aligned scroll steps, pauses, exposed strips, direction reversals.
   await page.mouse.move(600,400);
   for(const [name,steps,pause] of [
@@ -218,6 +237,9 @@ try {
     ['small-up',[-1,-3,-9,-17,-31,-65,-129,-193],80],
   ]) {
     for(const dy of steps){await page.mouse.wheel(0,dy);await delay(pause);}
+    // A matching host Pong follows these inputs on the same ordered stream.
+    // Startup resize work can otherwise outlive an already correct framebuffer.
+    report.inputBarriers.push({stage:name,...await page.evaluate(ViewerInputProbe.flushHostInput,{timeoutMs:8000})});
     await checkpoint(name);
   }
   remote('eval',()=>{window.scrollTo(0,1376);return true;});
