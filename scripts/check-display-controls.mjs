@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
 
 // This qualification is local and disposable, with no operator browser/profile.
 const containerName = 'browserpane-pipeline-viewer';
@@ -52,9 +53,14 @@ try{
  }
  let output;
  if(task.op==='close')output=await call('Target.closeTarget',{targetId});
- else if(task.op==='metadata'){
+ else if(task.op==='metadata'||task.op==='geometry-metadata'){
   output={bounds:(await call('Browser.getWindowForTarget',{targetId})).bounds,
    browserProcess:(await call('SystemInfo.getProcessInfo')).processInfo.find(p=>p.type==='browser')};
+  if(task.op==='geometry-metadata'){
+   const metrics=await call('Runtime.evaluate',{expression:'({dpr:devicePixelRatio,innerWidth,innerHeight,outerWidth,outerHeight,screenWidth:screen.width,screenHeight:screen.height,visible:document.visibilityState,focused:document.hasFocus()})',returnByValue:true},sessionId);
+   if(metrics.exceptionDetails)throw new Error('Owned fixture geometry metrics unavailable');
+   output.metrics=metrics.result.value;output.browserVersion=endpoint.Browser;
+  }
   await call('Target.detachFromTarget',{sessionId});
  }else{
   const result=await call('Runtime.evaluate',{expression:task.expression,returnByValue:true,awaitPromise:true},sessionId);
@@ -90,6 +96,7 @@ function x11Pixels(width, height) {
   return pixels;
 }
 const stages = [], pageErrors = [], downloads = [], consoleErrors = [], httpErrors = [];
+const diagnostics = new ViewerDiagnostics();
 const report = { containerName, containerId, imageId: inspect.Image, image: inspect.Config.Image,
   viewerUrl, stages, pageErrors, downloads, consoleErrors, httpErrors };
 function observe(viewer, label) {
@@ -117,6 +124,7 @@ async function newViewer(viewport = { width: 1440, height: 1000 }) {
     };
   });
   observe(viewer, page ? 'secondary' : 'primary');
+  await diagnostics.observe(viewer, page ? 'secondary' : 'primary');
   return viewer;
 }
 async function ready(viewer = page) {
@@ -172,22 +180,40 @@ function assertLayout(result) {
   }
 }
 async function geometry(width, height, viewer = page) {
-  let latest;
+  let latest, native, chrome;
   for (let i = 0; i < 60; i++) {
     latest = await state(viewer);
     assert.notEqual(latest.hasSurface, false, `Viewer lost its rendering session during resize: ${JSON.stringify(latest)}`);
-    const physical = x11Size();
+    native = x11Size(); chrome = undefined;
     if (latest.physical.width === width && latest.physical.height === height
       && latest.display.width === width && latest.display.height === height
-      && physical.width === width && physical.height === height) {
-      const metadata = remote('metadata');
-      if (metadata.bounds.width === width && metadata.bounds.height === height) {
-        assertLayout(latest); return { ...latest, native: physical, chrome: metadata };
+      && native.width === width && native.height === height) {
+      chrome = remote('metadata');
+      if (chrome.bounds.width === width && chrome.bounds.height === height) {
+        assertLayout(latest); return { ...latest, native, chrome };
       }
     }
     await delay(150);
   }
-  assert.fail(`Physical/canvas geometry did not settle at ${width}×${height}: ${JSON.stringify(latest)}`);
+  report.geometryFailure = { expected: { width, height }, viewer: latest, native, chrome };
+  assert.fail(`Physical/canvas geometry did not settle at ${width}×${height}: ${JSON.stringify(report.geometryFailure)}`);
+}
+function failureGeometry() {
+  const result = {};
+  // Only failure diagnostics: no extra CDP requests in successful polling, no
+  // page activation, and no page content/URLs from the token-owned fixture.
+  try {
+    const output = execFileSync('docker', ['exec', containerId, 'xrandr', '--current'],
+      { encoding: 'utf8', timeout: 10000, maxBuffer: 64 * 1024 });
+    const match = output.match(/\bcurrent\s+(\d+)\s+x\s+(\d+)\b/);
+    result.native = match ? { width: Number(match[1]), height: Number(match[2]) } : null;
+    result.xrandr = output.slice(0, 16384);
+  } catch (error) { result.xrandrError = ViewerDiagnostics.redact(error.message); }
+  if (targetId) {
+    try { result.chrome = remote('geometry-metadata'); }
+    catch (error) { result.chromeError = ViewerDiagnostics.redact(error.message); }
+  }
+  return result;
 }
 async function viewerPixels(viewer = page) {
   return viewer.evaluate(async () => {
@@ -437,8 +463,10 @@ try {
   report.passed = true;
 } catch (error) {
   failure = error; report.passed = false; report.error = error.stack ?? String(error);
+  report.failureGeometry = failureGeometry();
   const active = secondPage && !secondPage.isClosed() ? secondPage : page;
   if (active && !active.isClosed()) {
+    report.connectionDiagnostics = await diagnostics.snapshot(active);
     report.failureState = await state(active).catch(() => null);
     await active.screenshot({ path: `${outputDir}/display-controls-failure.png` }).catch(() => {});
   }

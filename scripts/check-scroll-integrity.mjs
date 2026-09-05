@@ -4,6 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
 
 // Deliberately fixed local-only targets with disposable storage and synthetic pages.
 const containerName = 'browserpane-pipeline-viewer';
@@ -88,6 +89,7 @@ const label = process.argv[2] ?? 'scroll-integrity';
 assert(/^[a-z0-9-]{1,60}$/.test(label), 'Expected a short result label');
 assert.equal(inspect.Mounts.length, 0, 'No persistent data may be mounted');
 let browser, page;
+const diagnostics = new ViewerDiagnostics();
 const checkpoints = [], pageErrors = [], downloads = [];
 const report = {
   label, image: inspect.Image, containerId, date: new Date().toISOString(),
@@ -195,6 +197,7 @@ try {
       : {channel:process.env.BPANE_TEST_BROWSER_CHANNEL||'chrome'})});
   report.viewerVersion=browser.version();
   page=await browser.newPage({viewport:{width:1280,height:771},deviceScaleFactor:2});
+  await diagnostics.observe(page, 'primary');
   await page.addInitScript(()=>{
     window.__scrollOracleBlits=0;
     const original=WebGL2RenderingContext.prototype.blitFramebuffer;
@@ -317,6 +320,7 @@ try {
   if(!report.passed) process.exitCode=1;
 } catch(error) {
   report.passed=false;report.error=error.stack??String(error);process.exitCode=1;console.error(error);
+  if (page && !page.isClosed()) report.connectionDiagnostics = await diagnostics.snapshot(page);
 } finally {
   await writeFile(outputDir+'/'+label+'.json',JSON.stringify(report,null,2)+'\n');
   if(targetId) try{remote('close');}catch(error){console.error('Owned fixture cleanup failed:',error.message);process.exitCode=1;}

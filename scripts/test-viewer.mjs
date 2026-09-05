@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const name = 'browserpane-pipeline-viewer';
@@ -12,6 +15,7 @@ const execute = (args, options = {}) => execFileSync('docker', args, { encoding:
 assert(!execute(['container', 'ls', '--all', '--format', '{{.Names}}']).split('\n').includes(name),
   'Refusing existing viewer container; inspect it yourself before retrying');
 let id;
+let failed = false;
 try {
   // The launcher refuses an existing name and uses no mounts, only tmpfs.
   const result = spawnSync('bash', ['scripts/start-pipeline-probe.sh'], { cwd: root, stdio: 'inherit',
@@ -31,6 +35,9 @@ try {
     if (test.error) throw test.error;
     assert.equal(test.status, 0, `${script} failed`);
   }
+} catch (error) {
+  failed = true;
+  throw error;
 } finally {
   if (id) {
     const state = JSON.parse(execute(['inspect', id]))[0];
@@ -38,6 +45,16 @@ try {
     assert.equal(state.Config.Labels?.['browserpane.test'], 'pipeline');
     assert.equal(state.Config.Labels?.['browserpane.test.run'], token);
     assert.deepEqual(state.Mounts, []);
+    if (failed) {
+      // Read only the exact owned, synthetic container before removing it.
+      try {
+        const logs = spawnSync('docker', ['logs', '--tail', '100', id], { encoding: 'utf8', timeout: 10000, maxBuffer: 262144 });
+        const output = ViewerDiagnostics.redact(((logs.stdout ?? '') + (logs.stderr ?? '')).slice(-16384));
+        mkdirSync(join(root, 'test-results'), { recursive: true });
+        writeFileSync(join(root, 'test-results/viewer-container-failure.log'), output);
+        console.error(output);
+      } catch { console.error('Owned test-container diagnostics unavailable'); }
+    }
     execute(['stop', '--time', '45', id]);
     execute(['rm', id]);
   }
