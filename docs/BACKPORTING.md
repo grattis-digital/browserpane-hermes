@@ -8,8 +8,8 @@ license.
 
 ## Patch map
 
-The [compact MCP experiment](COMPACT_MCP.md) is original wrapper code, not patch
-0019. Its observation, replay and transport layers can be reviewed independently
+The [compact MCP experiment](COMPACT_MCP.md) is original wrapper code, not an
+upstream rendering patch. Its observation, replay and transport layers can be reviewed independently
 of these rendering patches. The pinned generic Playwright MCP settlement-timer
 issue is documented with measurements; this branch bypasses that orchestration,
 without modifying or claiming to fix all later upstream releases.
@@ -38,6 +38,9 @@ Paths below are relative to upstream `code/`. Host means
 | 0016 failed-resize state restoration | Host `cdp_video.rs`, `cdp_video/resize_tests.rs` | Attempt restoration of the prior window state even when the intermediate numeric-bounds request fails |
 | 0017 browser-owned window resize | Host `cdp_video.rs`, `cdp_video/{resize_tests,browser_resize_tests}.rs` | Keep top-level window commands on a browser-level CDP connection that survives the identifying tab closing |
 | 0018 drawable renderer fallback | Client `session-surface-runtime.ts`, `render/session-canvas-factory.ts` | Finalize renderer/context before mounting; replace rejected WebGL canvases with drawable Canvas2D, fail explicitly if neither exists |
+| 0019 opt-in virtual GPU display | Host `capture/ffmpeg.rs`, `capture/ffmpeg/xvnc_tests.rs` | Explicit VNC-0 backend with the same exact-root/sole-output geometry gate; default DUMMY0 behavior retained |
+| 0020 external X11 startup | Upstream `deploy/start-host.sh` | Opt-in DRI3 display readiness without deleting another server's socket or spawning dummy Xorg |
+| 0021 restore without extra tab | Upstream `deploy/start-host.sh` | Recheck saved session state on every supervised launch; keep initial URL only for a fresh shared profile |
 
 Patch names are descriptive; use the actual ordered filenames, not this table,
 as the application manifest. The bundle sets the 0015 gateway API bind to loopback
@@ -96,6 +99,22 @@ independent. Later patches refine earlier behavior and depend on its context.
   final drawable canvas. Real-browser failure injection validates context
   ownership and exact Fill/QOI/Zstd/cache/scroll pixels; it is not a GPU
   performance claim.
+- 0019/0020 travel with the GPU wrapper, Mesa/shim image, private X11 sidecar and
+  generation watcher. They do not enable GPU by themselves or weaken the exact
+  virtual-root gate. Keep physical outputs rejected and CPU defaults unchanged.
+  See [GPU configuration and qualification](GPU.md).
+- 0021 is independent of GPU mode. A positional startup URL is additional to
+  session restoration, so omit it when the bundle's `Default` profile has session
+  records larger than Chromium's eight-byte header. Preferences, empty files and
+  closed-tab-only records do not count. This is a conservative presence check,
+  not validation or repair of Chromium's session format; Chromium still owns
+  restoration. The header is two `int32_t` fields in Chromium's
+  [session storage implementation](https://chromium.googlesource.com/chromium/src.git/+/34e2627ec26ed07f0398ede339e323c4b39d44fe/components/sessions/core/command_storage_backend.cc).
+  Keep the check inside the restart loop and retain `--app=` behavior.
+  Never close existing tabs or rewrite session files. A backport supporting named
+  profiles must resolve its selected profile instead of assuming this bundle's
+  single `Default` profile. Executable shell regressions and the disposable
+  runtime's exact tab-list checks cover this wrapper contract.
 
 The video wire format still has no ownership generation identifier. Immediate
 re-entry into the same rectangle can admit an older in-flight frame within that

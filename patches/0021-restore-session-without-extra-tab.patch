@@ -1,0 +1,52 @@
+diff --git a/deploy/start-host.sh b/deploy/start-host.sh
+index f3b3af7..ae15036 100644
+--- a/deploy/start-host.sh
++++ b/deploy/start-host.sh
+@@ -461,14 +461,31 @@ chromium_log_filter() {
+     >&2
+ }
+ 
++chromium_has_saved_session() {
++  # Preferences alone are not session state: we write them before the first run.
++  # Chromium owns restoration/validation. Do not inspect or rewrite its records.
++  # Its eight-byte file header alone cannot restore any tabs.
++  local session_file
++  for session_file in \
++    "${PROFILE_DIR}/Default/Sessions"/Session_* \
++    "${PROFILE_DIR}/Default/Current Session" \
++    "${PROFILE_DIR}/Default/Last Session"; do
++    if [ -f "$session_file" ] && [ -r "$session_file" ] && \
++       [ "$(wc -c < "$session_file")" -gt 8 ]; then
++      return 0
++    fi
++  done
++  return 1
++}
++
+ launch_chromium() {
+   local url="$1"
+   local mode="${BPANE_CHROMIUM_SANDBOX_MODE:-auto}"
+   # When --app= is in the flags, skip the positional URL to avoid opening a second window.
+-  local url_args=("$url")
++  local app_mode=0
+   for flag in "${CHROMIUM_FLAGS[@]}"; do
+     if [[ "$flag" == --app=* ]]; then
+-      url_args=()
++      app_mode=1
+       break
+     fi
+   done
+@@ -498,6 +515,13 @@ launch_chromium() {
+ 
+   (
+     while true; do
++      # A positional URL is appended to --restore-last-session as another tab.
++      # Recheck on every retry: a fresh first run may have saved its session since
++      # the supervisor started. Never close, deduplicate or replace restored tabs.
++      local url_args=()
++      if [ "$app_mode" = 0 ] && ! chromium_has_saved_session; then
++        url_args=("$url")
++      fi
+       if run_chromium_once "$mode" "${CHROMIUM_FLAGS[@]}" "${url_args[@]}"; then
+         exit_code=0
+       else

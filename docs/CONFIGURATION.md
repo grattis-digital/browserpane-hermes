@@ -31,6 +31,17 @@ the browser service and reconnect Hermes; retain all volumes. Existing custom
 tool allowlists/instructions may need adjustment and are never automatically
 overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
 
+The shared browser uses the persistent `Default` Chromium profile. A fresh
+profile opens `BPANE_URL` (the bundle defaults to `about:blank`); later launches
+restore the saved session without adding that URL as another tab. The check also
+runs after a Chromium-process exit. Existing tabs are never automatically closed
+or deduplicated, and corrupt session files are not repaired. Custom named Chromium
+profiles are not part of this single-profile startup contract. Explicit `--app=`
+startup retains its existing behavior without an additional positional URL.
+
+For the separately opted-in V3D/X11 graphics configuration, see [GPU setup](GPU.md).
+The normal commands above do not enable GPU access.
+
 ## Managed ad blocking
 
 The browser image already includes BrowserPane's managed AdBlock policy:

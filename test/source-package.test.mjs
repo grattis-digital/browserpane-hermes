@@ -9,7 +9,7 @@ test('local source archive keeps public configuration but excludes nested operat
   const scratch = await mkdtemp(join(tmpdir(), 'bph-source-package-'));
   try {
     const files = ['.dockerignore', '.gitignore', '.gitattributes', '.env.example', 'AGENTS.md', 'Dockerfile',
-      'Dockerfile.pipeline-test', 'compose.yaml', 'package.json', 'package-lock.json',
+      'Dockerfile.pipeline-test', 'Dockerfile.gpu', 'Dockerfile.gpu-display', 'compose.yaml', 'compose.gpu.yaml', 'package.json', 'package-lock.json',
       'vitest.config.mjs', 'LICENSE', 'README.md', 'UPSTREAM.md', 'UPSTREAM_COMMIT',
       'NODEJS_STANDARDS.md', 'RUST_STANDARDS.md', 'upstream/Cargo.lock', 'config/Caddyfile'];
     const dirs = ['.github', 'client', 'config', 'docs', 'hermes', 'patches', 'runtime',

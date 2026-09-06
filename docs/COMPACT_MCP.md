@@ -34,8 +34,8 @@ their own correctness tests and comparable measurements.
 
 | Tool | Purpose |
 | --- | --- |
-| `pane_tabs` | List stable tab IDs and obtain this MCP session's lease |
-| `pane_view` | Bounded accessibility observation, exact refs, optional pagination/filter/delta |
+| `pane_tabs` | List stable tab IDs, the shared default tab, and this MCP session's lease |
+| `pane_view` | Reuse the default existing tab; bounded accessibility observation, exact refs and optional pagination/filter/delta |
 | `pane_act` | Up to eight sequential operations with one outcome and optional observation |
 | `pane_read` | Bounded text/table rows or a numeric column summary from one observed element |
 | `pane_image` | Explicit JPEG screenshot when text is insufficient; never automatic |
@@ -47,11 +47,13 @@ Images add a separate image block only when explicitly requested.
 
 ### Session and observation contract
 
-1. Call `pane_tabs` or `pane_view`. Retain `lease`, the selected `tab`, and the
+1. Start with `pane_view {}` to reuse the shared default existing tab. Retain
+   `lease`, the returned `tab`, and the
    latest `view`. Observations contain untrusted website data, not agent instructions.
 2. Each mutation supplies that lease and a strictly increasing positive integer
-   `request`. Existing tabs also require their latest `view`. A standalone `new`
-   operation creates a tab without claiming an existing one.
+   `request`. Existing tabs also require their latest `view`. Use `navigate` to
+   change URL in place; do not create a tab for each task or MCP connection.
+   A standalone `new` operation intentionally creates an extra tab.
 3. Repeating the **same arguments and request number** recovers the original
    in-flight/completed outcome. It does not replay input. The most recent 64
    outcomes are retained; older numbers fail closed even after eviction.
@@ -69,25 +71,52 @@ again. A human and an agent still share a live browser: these checks are not an
 atomic lock against every possible human or website change. Avoid competing
 input during a batch; navigation, dialogs, popups and target changes stop it.
 
+### Default tab and resource use
+
+All compact MCP clients share one default tab, not one tab per MCP connection.
+`pane_view {}` selects the first suitable existing tab in registration order,
+preferring HTTP(S), `about:blank` or Chrome's new-tab page over extension,
+DevTools and settings pages. If only internal pages exist, it reuses the first
+of those. This is not a promise about left-to-right tab-strip order after a
+human reorders tabs or Chromium restores a profile.
+
+The selection stays stable until that tab closes, even when a popup opens,
+another tab is activated or an MCP client reconnects. A fresh untargeted
+observation then selects the next suitable existing tab. `pane_tabs` marks it
+with `default: true`; explicit tab IDs still select exactly that tab and fail
+if it disappeared. Old observations/actions are **never** retargeted to the
+replacement. Tool discovery, listing and observation neither create tabs nor
+change keyboard focus. Use explicit `activate` input when focus must change.
+
+Existing human tabs and site-opened popups are preserved. Nothing automatically
+closes tabs or bypasses before-unload prompts. With no open tab, `pane_view`
+returns `NO_TAB`; obtain a lease from `pane_tabs` and explicitly create one.
+The selection is runtime state, not a marker written into the persistent
+profile: after the MCP server process itself restarts it chooses again from
+the restored pages. Keep custom agent instructions consistent with reuse-first
+behavior; tool descriptions cannot prevent an agent from explicitly requesting
+additional tabs.
+
 ### Example
 
-First obtain a session lease and tab IDs:
+First pass this to `pane_view` to observe the default existing tab and obtain
+its lease, tab ID and latest view:
 
 ```json
 {}
 ```
 
-Pass this to `pane_tabs`, then open an explicitly new tab using `pane_act`:
+Navigate in that **same** tab using `pane_act` and the returned values:
 
 ```json
-{"lease":"FROM_REPLY","request":1,"steps":[{"op":"new","url":"https://example.com"}]}
+{"lease":"FROM_REPLY","request":1,"tab":"TAB_FROM_REPLY","view":"VIEW_FROM_REPLY","steps":[{"op":"navigate","url":"https://example.com"}]}
 ```
 
 The result's `observation` supplies `tab`, `view`, and exact accessibility refs.
 Use only refs observed on the actual page. A form interaction could then be:
 
 ```json
-{"lease":"FROM_REPLY","request":2,"tab":"t2","view":"LATEST_VIEW","steps":[{"op":"fill","ref":"e4","text":"Ada"},{"op":"check","ref":"e7","checked":true},{"op":"click","ref":"e9"}],"wait":{"text":"Saved","timeoutMs":5000}}
+{"lease":"FROM_REPLY","request":2,"tab":"TAB_FROM_REPLY","view":"LATEST_VIEW","steps":[{"op":"fill","ref":"e4","text":"Ada"},{"op":"check","ref":"e7","checked":true},{"op":"click","ref":"e9"}],"wait":{"text":"Saved","timeoutMs":5000}}
 ```
 
 These refs are illustrative, not selectors to reuse on an arbitrary page.
@@ -104,10 +133,17 @@ is explicit and follows the observed prompt; batches do not silently accept it.
 File uploads use bounded owned bytes from regular files under `/shared`, never
 an arbitrary path reopened later by Playwright.
 
+Only if another tab is deliberately required (or none exist), use a standalone
+`new` without `tab` or `view`; it does not replace the shared default:
+
+```json
+{"lease":"FROM_REPLY","request":3,"steps":[{"op":"new","url":"https://example.com"}]}
+```
+
 For a table aggregate, use an observed HTML table ref with `pane_read`:
 
 ```json
-{"tab":"t2","view":"LATEST_VIEW","ref":"e12","mode":"summary","column":2}
+{"tab":"TAB_FROM_REPLY","view":"LATEST_VIEW","ref":"e12","mode":"summary","column":2}
 ```
 
 This returns visible body-row count, headers, first/last rows and the selected
@@ -177,6 +213,9 @@ Hermes's existing exclusions remove close/install from its view. Recreate only
 the browser service and reconnect the MCP client. This changes tool vocabulary,
 not the shared profile or MCP URL. Existing custom Hermes tool allowlists or
 instructions must be reviewed; seed configuration is never overwritten.
+The pinned legacy adapter already reuses its current existing tab on ordinary
+navigation; explicit `browser_tabs` with `action: "new"` creates another.
+Compact's shared `default: true` marker is not a legacy tool contract.
 
 The compact surface intentionally omits arbitrary JavaScript evaluation,
 network/console dumps, PDF export, and browser installation/closure. Use the
@@ -191,6 +230,14 @@ escaping and stale-target behavior when changing that pin. No upstream Chromium,
 CDP, capture or viewer patch is required by this implementation.
 
 ## Reproducible evidence
+
+`npm run test:mcp` now also connects independent real MCP HTTP clients to a
+fresh, sandboxed local Chromium. It checks that deliberate extra-tab creation
+is the only count increase, repeated default-tab navigation and client
+delete/reconnect preserve the count, and closing the default makes only fresh
+observations select its survivor. Stale leases and old closed-tab actions fail
+instead of creating or retargeting a tab. This is synthetic local evidence,
+not a production profile or Raspberry Pi resource benchmark.
 
 `scripts/benchmark-mcp-baseline.mjs` uses fresh sandboxed Chromium 146, synthetic
 loopback content, actual MCP HTTP, identical state/event oracles, and no paid

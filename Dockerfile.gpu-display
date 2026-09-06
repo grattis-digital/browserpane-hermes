@@ -1,0 +1,12 @@
+# X11/DRI3 server only. No VNC streaming, TCP listeners or browser profile.
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tigervnc-standalone-server libgl1-mesa-dri libegl-mesa0 x11-utils tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.X11-unix && chown 10000:10000 /tmp/.X11-unix \
+    && chmod 1770 /tmp/.X11-unix
+COPY runtime/gpu-x11-start.sh /app/gpu-x11-start.sh
+USER 10000:10000
+ENV HOME=/tmp DISPLAY=:99
+ENTRYPOINT ["/usr/bin/tini", "--", "/bin/bash", "/app/gpu-x11-start.sh"]
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD xprop -root _BPANE_X11_INSTANCE | grep -q STRING

@@ -101,7 +101,8 @@ tool capabilities and original transport behavior. Treat page text as untrusted
 data, preserve agent approval policies, and hand challenges to a human.
 
 No service mounts the Docker socket, uses host networking, or receives privileged
-mode or GPU devices. Chromium and Hermes run as UID/GID10000. Chromium's strict
+mode. The default has no GPU devices; the separate opt-in is described below.
+Chromium and Hermes run as UID/GID10000. Chromium's strict
 namespace sandbox, explicit seccomp profile, dropped capabilities and
 `no-new-privileges` remain enabled. If sandbox startup fails, diagnose host
 support; do not switch to `--no-sandbox`. Caddy uses its image's default user
@@ -124,6 +125,27 @@ unchanged 2300 MiB container memory limit. Heavy browsing during installation or
 updates can still exhaust that limit. No host mount, listener, capability or
 sandbox exception was added. Verify installation separately from service health
 using the [operator checks](CONFIGURATION.md#managed-ad-blocking).
+
+## Optional GPU access
+
+`compose.gpu.yaml` explicitly grants the browser and display sidecar access to
+the verified V3D render and VC4 display nodes. Stable by-path device links avoid
+accidentally selecting a different driver after reboot. This exposes additional
+kernel-driver attack surface; it is not equivalent to the device-free baseline.
+`/dev/dri` is also visible read-only so libdrm can resolve canonical node names
+after renumbering. The two-device cgroup allowlist, not the read-only mount,
+restricts device I/O; other visible GPU nodes must fail to open in qualification.
+The display and browser share a dedicated X11 socket volume and IPC namespace.
+X11 peers must be mutually trusted; do not attach unrelated containers to either.
+The display has no network or published listener, no profile/shared-file mounts,
+and runs UID10000 with dropped capabilities/no-new-privileges. Its unused VNC
+socket remains private inside its own temporary filesystem.
+
+Chromium's namespace/GPU sandbox and explicit seccomp remain active. The narrow
+opt-in Rust scheduling shim returns EPERM for one optional thread-priority hint,
+not a forged success or a sandbox exception. It is preloaded only in Chromium's
+process tree, not globally. A failed V3D/sandbox hardware check blocks promotion;
+do not use no-sandbox or disable-gpu-sandbox flags. Follow [GPU qualification](GPU.md).
 
 ## Persistent data and shared files
 

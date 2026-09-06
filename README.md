@@ -29,9 +29,12 @@ The page is a synthetic demo; no private browsing data or live model response is
 
 - **Human and agent see the same browser.** No second browser hidden behind MCP.
 - **Persistent by default.** Separate volumes hold the browser profile, Hermes
-  configuration/memory, and shared downloads.
+  configuration/memory, and shared downloads. Restart restores the saved browser
+  session without appending another startup tab.
 - **Compact agent control.** This experimental branch adds five focused MCP
-  tools, bounded observations and guarded action batches. The original Playwright
+  tools, bounded observations and guarded action batches. Untargeted observations
+  reuse one shared default tab; normal navigation stays in that tab, while extra
+  tabs require an explicit request. The original Playwright
   MCP remains selectable; see the [protocol and limits](docs/COMPACT_MCP.md).
 - **Managed ad blocking.** Upstream AdBlock with EasyPrivacy uses the persistent
   browser profile. See [installation, defaults and checks](docs/CONFIGURATION.md#managed-ad-blocking);
@@ -55,6 +58,9 @@ Pi 4/5 with 8 GB RAM is the practical target; the measured reference was a Pi 4B
 8 GB. An SSD, active cooling, and wired Ethernet are sensible for sustained use.
 ARM64 and x86-64 images are build targets; the supported rendering baseline is
 CPU Chromium on X11, not an experimental GPU path.
+
+This branch also provides an explicit [V3D GPU/X11 configuration](docs/GPU.md)
+with its own hardware qualification gates; it is not silently enabled by setup.
 
 ```sh
 git clone https://github.com/grattis-digital/browserpane-hermes.git

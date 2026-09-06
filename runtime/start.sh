@@ -35,6 +35,18 @@ for attempt in $(seq 1 150); do
 done
 test -S "$BPANE_SOCKET_PATH"
 curl -fsS http://127.0.0.1:9222/json/version >/dev/null
+if [ "${BPANE_X11_BACKEND:-dummy}" = xvnc ]; then
+  gpu_ready=0
+  for attempt in $(seq 1 10); do
+    if node /app/server/check-gpu.mjs; then gpu_ready=1; break; fi
+    sleep 1
+  done
+  [ "$gpu_ready" = 1 ] || exit 1
+  bash /app/runtime/watch-x11.sh &
+  children+=("$!")
+  bash /app/runtime/watch-gpu.sh &
+  children+=("$!")
+fi
 node /app/server/gateway-process.mjs &
 children+=("$!")
 node /app/server/mcp-process.mjs &
