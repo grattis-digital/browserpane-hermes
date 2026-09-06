@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")/.."
 test -f upstream/Cargo.lock || { echo 'Run scripts/fetch-upstream.sh first.' >&2; exit 1; }
 set -- .dockerignore .gitignore .gitattributes .env.example .github AGENTS.md Dockerfile \
-  Dockerfile.pipeline-test compose.yaml package.json package-lock.json \
+  Dockerfile.pipeline-test Dockerfile.gpu Dockerfile.gpu-display compose.yaml compose.gpu.yaml package.json package-lock.json \
   vitest.config.mjs LICENSE README.md UPSTREAM.md UPSTREAM_COMMIT \
   NODEJS_STANDARDS.md RUST_STANDARDS.md client config docs hermes patches \
   runtime scripts server test upstream

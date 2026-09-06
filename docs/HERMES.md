@@ -120,14 +120,30 @@ Compact MCP is the default. It advertises exactly five tools:
 | `pane_read` | Read bounded text, table rows or a numeric summary from an observed element |
 | `pane_image` | Request a viewport or observed-element screenshot when text is insufficient |
 
-Select a tab from `pane_tabs`, then call `pane_view` for its latest `view` and refs.
+Start with `pane_view {}`: it reuses the shared default existing tab, including
+after an MCP client reconnects. Use `navigate` in that tab instead of opening
+another for each task. `pane_tabs` marks the default with `default: true`; pass
+an explicit tab ID to observe another existing tab. Listing and observing never
+create a tab or steal focus. A closed default is replaced only for a fresh
+untargeted observation, never by retargeting an old action.
+
 Existing-tab actions require that exact `tab`, `view`, session `lease`, and a
-strictly increasing `request` number. Creating a new tab uses the lease/request
-without a prior tab/view. An exact retry with the same request and arguments
+strictly increasing `request` number. Intentionally creating an extra tab (or
+the first if none exist) uses standalone `new` with lease/request but no
+tab/view. Existing tabs are never automatically closed. See the
+[default-selection contract](COMPACT_MCP.md#default-tab-and-resource-use).
+An exact retry with the same request and arguments
 recovers its recorded outcome; never retry uncertain input with a new number.
 Old leases cannot authorize mutations after reconnect. Another client's input,
 navigation or changed targets can require a fresh observation. All clients and
 the viewer still share one browser; this is not tenant isolation.
+
+After upgrading an existing Hermes installation, run `/reload-mcp` and start a
+new chat so the model receives the current reuse-first tool descriptions. In
+the pinned Hermes version, the normal per-turn refresh compares tool names;
+unchanged names can leave old descriptions cached. MCP reconnect alone does
+not replace the instructions already present in an ongoing conversation.
+Existing custom instructions and seeded configuration are not overwritten.
 
 Observations have explicit pagination/truncation. Request the next slice when
 `next` is returned, and do not act on a target absent from the returned slice.

@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { TabState } from './tab-state.mjs';
 import { PaneError } from './errors.mjs';
 
@@ -10,6 +11,7 @@ export class SharedBrowser {
   #forward;
   #directory;
   #pageHandler;
+  #defaultTab;
 
   constructor(browser, context, forwardDownload, downloadDirectory) {
     this.#browser = browser; this.#context = context;
@@ -24,7 +26,7 @@ export class SharedBrowser {
 
   #register(page) {
     for (const tab of this.#tabs.values()) if (tab.page === page) return tab;
-    if (this.#tabs.size >= 64) return undefined;
+    if (page.isClosed() || this.#tabs.size >= 64) return undefined;
     const tab = new TabState(`t${++this.#counter}`, page);
     this.#tabs.set(tab.id, tab);
     tab.attach(this.#forward, this.#directory);
@@ -35,20 +37,54 @@ export class SharedBrowser {
   get popupVersion() { return this.#popupVersion; }
   get connected() { return this.#browser.isConnected(); }
 
+  #default() {
+    const current = this.#tabs.get(this.#defaultTab);
+    if (current && !current.page.isClosed()) return current;
+    const tabs = [...this.#tabs.values()].filter(tab => !tab.page.isClosed());
+    // Prefer a web/new-tab page to extension or DevTools UI on first selection.
+    // Registration order is stable, but is not the visual Chrome tab-strip order.
+    const tab = tabs.find(candidate => /^(?:https?:|about:blank(?:[#?]|$)|chrome:\/\/(?:newtab|new-tab-page)\/?$)/.test(candidate.page.url())) ?? tabs[0];
+    this.#defaultTab = tab?.id;
+    return tab;
+  }
+
   tab(id) {
-    if (!this.connected) throw new PaneError('DISCONNECTED', 'Browser disconnected. Reconnect after service recovery.');
-    if (id === undefined && this.#tabs.size === 1) return this.#tabs.values().next().value;
-    const tab = this.#tabs.get(id);
+    this.#assertConnected();
+    const tab = id === undefined ? this.#default() : this.#tabs.get(id);
+    if (id === undefined && !tab) throw new PaneError('NO_TAB', 'No open shared tab. Call pane_tabs for a lease, then explicitly create one with pane_act new.');
     if (!tab || tab.page.isClosed()) throw new PaneError('UNKNOWN_TAB', 'Call pane_tabs and select an existing tab ID.');
     return tab;
   }
 
   async list() {
-    return Promise.all([...this.#tabs.values()].map(async tab => ({
+    this.#assertConnected();
+    const records = await Promise.all([...this.#tabs.values()].map(async tab => ({ tab, title: await this.#title(tab) })));
+    this.#assertConnected();
+    // Reconcile after all title requests: a close can happen during any await.
+    // Select/mark the surviving default now, not the one from before the await.
+    const defaultTab = this.#default();
+    return records.filter(({ tab, title }) => title !== undefined && !tab.page.isClosed()).map(({ tab, title }) => ({
       tab: tab.id, url: tab.page.url().slice(0, 4096),
-      title: tab.dialog ? '' : (await tab.page.title()).slice(0, 300),
+      title,
+      ...(tab === defaultTab ? { default: true } : {}),
       ...tab.metadata(),
-    })));
+    }));
+  }
+
+  #assertConnected() {
+    if (!this.connected) throw new PaneError('DISCONNECTED', 'Browser disconnected. Reconnect after service recovery.');
+  }
+
+  async #title(tab) {
+    if (tab.page.isClosed()) return undefined;
+    try { return tab.dialog ? '' : (await tab.page.title()).slice(0, 300); }
+    catch (error) {
+      // The closing target's rejection may precede its close event by one turn.
+      // No retries/message matching: only confirmed closure permits omission.
+      if (!tab.page.isClosed()) await nextTurn();
+      if (!tab.page.isClosed()) throw error;
+      return undefined;
+    }
   }
 
   async create() {

@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { CompactEngineFixture as Fixture } from './compact-engine-fixture.mjs';
+import { CompactTabChecks } from './compact-tab-checks.mjs';
 
 const fixture = new Fixture(), checks = [];
 const check = (name, result) => { assert(!result?.isError, `${name}: ${JSON.stringify(result)}`); checks.push(name); };
 try {
   await fixture.start();
+  await CompactTabChecks.run(fixture);
+  check('actual MCP HTTP clients reuse the default across navigation/reconnect and reject stale closed-tab input');
   const session = fixture.session(), observer = fixture.session();
   let page = await fixture.reset(`<label>Name<input id="name"></label><label>Agree<input id="agree" type="checkbox"></label>
     <button id="save">Save</button><p role="status" id="status"></p><script>window.events=[];
@@ -131,4 +134,4 @@ try {
   await fixture.assertOwnership(); check('session teardown and CDP disconnect preserve the existing browser');
 } finally { await fixture.close(); }
 console.log(JSON.stringify({ passed: true, checks, paidModelCalls: 0, cleanup: 'Owned Chromium and disposable profile removed',
-  scope: 'Fresh local headless Chromium, direct compact engine over CDP; not HTTP, Pi, or production.' }, null, 2));
+  scope: 'Fresh local headless Chromium over CDP; tab reuse also tested through actual MCP HTTP clients. Not Pi or production.' }, null, 2));

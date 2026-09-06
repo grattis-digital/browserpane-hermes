@@ -1,0 +1,49 @@
+diff --git a/deploy/start-host.sh b/deploy/start-host.sh
+index 6cae6ae..f3b3af7 100644
+--- a/deploy/start-host.sh
++++ b/deploy/start-host.sh
+@@ -118,22 +118,29 @@ fi
+ 
+ validate_browser_local_file_policy "$BPANE_CHROMIUM_POLICY_FILE"
+ 
+-# Clean stale lock files
+-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+-
+-# Start Xorg with dummy video driver (supports proper xrandr mode switching).
+-# -nocursor hides the hardware cursor; we draw the remote cursor in the client.
+-# Redirect Xorg stderr to suppress harmless xkbcomp keysym warnings and
+-# the _XSERVTransmkdir notice (non-root can't create /tmp/.X11-unix).
+-Xorg :99 -noreset -config /etc/X11/xorg-dummy.conf -nocursor 2>/dev/null &
+-sleep 1
+-
+ export DISPLAY=:99
+-
+-# Set initial resolution via xrandr
+-xrandr --newmode "1280x720_60.00" 74.48 1280 1344 1472 1664 720 723 728 748 -hsync +vsync 2>/dev/null || true
+-xrandr --addmode DUMMY0 "1280x720_60.00" 2>/dev/null || true
+-xrandr --output DUMMY0 --mode "1280x720_60.00" 2>/dev/null || true
++case "${BPANE_X11_BACKEND:-dummy}" in
++  dummy)
++    # Only this backend owns these locks and the Xorg process.
++    rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
++    Xorg :99 -noreset -config /etc/X11/xorg-dummy.conf -nocursor 2>/dev/null &
++    sleep 1
++    xrandr --newmode "1280x720_60.00" 74.48 1280 1344 1472 1664 720 723 728 748 -hsync +vsync 2>/dev/null || true
++    xrandr --addmode DUMMY0 "1280x720_60.00" 2>/dev/null || true
++    xrandr --output DUMMY0 --mode "1280x720_60.00" 2>/dev/null || true
++    ;;
++  xvnc)
++    # The dedicated GPU display sidecar owns its socket, lock and lifetime.
++    # Never remove those files or launch a second server on its display.
++    ready=0
++    for attempt in $(seq 1 150); do
++      if xdpyinfo -queryExtensions 2>/dev/null | grep -q 'DRI3'; then ready=1; break; fi
++      sleep 0.2
++    done
++    [ "$ready" = 1 ] || { echo 'GPU X11 display is unavailable or lacks DRI3' >&2; exit 1; }
++    ;;
++  *) echo 'BPANE_X11_BACKEND must be dummy or xvnc' >&2; exit 64 ;;
++esac
+ # Apply DPI scaling for larger UI (Chromium chrome + web content)
+ BPANE_DPI=${BPANE_DPI:-144}
+ xrandr --dpi "$BPANE_DPI" 2>/dev/null || true

@@ -60,7 +60,7 @@ COPY --from=source-builder /source/upstream/deploy/bpane-ext /home/bpane/bpane-e
 COPY --from=source-builder /source/upstream/deploy/chromium-policies/managed /etc/chromium/policies/managed
 COPY runtime/chromium-policy.json /etc/chromium/policies/managed/browserpane-hermes.json
 COPY runtime/wireplumber-headless.lua /etc/wireplumber/bluetooth.lua.d/51-headless.lua
-COPY runtime/start.sh runtime/healthcheck.sh /app/runtime/
+COPY runtime/start.sh runtime/healthcheck.sh runtime/watch-x11.sh runtime/watch-gpu.sh /app/runtime/
 COPY runtime/chromium-wrapper.sh /usr/local/bin/chromium
 COPY server server
 COPY LICENSE UPSTREAM.md /app/

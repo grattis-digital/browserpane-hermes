@@ -1,0 +1,16 @@
+# Opt-in derivative: build the current application image first, never an old probe.
+ARG BPANE_GPU_BASE=browserpane-hermes-browser:local
+FROM rust:1.93-bookworm AS gpu-shim
+WORKDIR /build
+COPY runtime/gpu-sched-compat.rs ./
+RUN rustc --edition=2021 --test gpu-sched-compat.rs -o shim-test && ./shim-test \
+    && rustc --edition=2021 --crate-type=cdylib -C opt-level=2 -C panic=abort \
+       gpu-sched-compat.rs -o libbpane_gpu_sched.so
+FROM ${BPANE_GPU_BASE}
+USER root
+COPY runtime/gpu-backports.sources /etc/apt/sources.list.d/browserpane-gpu.sources
+RUN apt-get update && apt-get install -y --no-install-recommends -t bookworm-backports \
+    libgl1-mesa-dri libegl-mesa0 libglx-mesa0 libgbm1 mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=gpu-shim /build/libbpane_gpu_sched.so /opt/browserpane/libbpane_gpu_sched.so
+USER 10000:10000

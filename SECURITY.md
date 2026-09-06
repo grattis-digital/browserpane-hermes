@@ -11,6 +11,8 @@ to disclose secrets, change instructions or bypass site access restrictions.
 The inherited, automatically updated AdBlock extension is also trusted browser
 code, not a substitute for sandboxing or access control; see its
 [trust and resource boundary](docs/SECURITY.md#managed-extension-and-temporary-storage).
+The optional GPU configuration grants narrowly mapped driver access and a shared
+private X11/IPC boundary; see [GPU access](docs/SECURITY.md#optional-gpu-access).
 
 For a suspected vulnerability, use GitHub's
 [private vulnerability report](https://github.com/grattis-digital/browserpane-hermes/security/advisories/new).

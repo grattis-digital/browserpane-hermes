@@ -39,7 +39,8 @@ try {
   console.log(script(profile, ['verify']));
   console.log(script(smoke));
   console.log(JSON.stringify({ image: run.image, runtime: true, mcp: true, mcpMode: run.mcpMode,
-    profileAfterReconnect: true, profileAfterRestart: true, profileAfterRecreate: true, paidModelCalls: 0 }));
+    profileAfterReconnect: true, profileAfterRestart: true, profileAfterRecreate: true,
+    exactTabsAfterReconnectRestartRecreate: 2, paidModelCalls: 0 }));
 } finally {
   process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm);
   if (!interrupted) run.cleanup();

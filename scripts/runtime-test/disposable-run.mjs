@@ -66,7 +66,7 @@ export class DisposableRun {
       '-e', 'VIEWER_ORIGIN=https://viewer.test', '-e', 'GATEWAY_URL=https://viewer.test:4433',
       '-e', 'BPANE_PIPELINE_TEST=1', '-e', `BPANE_RUNTIME_TEST_ID=${this.token}`,
       '-e', `BPANE_MCP_MODE=${this.mcpMode}`,
-      '-e', 'BPANE_URL=about:blank', '-e', 'BPANE_DEVICE_SCALE=1',
+      '-e', `BPANE_URL=http://fixture:9130/${this.token}#startup`, '-e', 'BPANE_DEVICE_SCALE=1',
       '-e', 'BPANE_CHROMIUM_SANDBOX_MODE=strict', '-e', 'BPANE_CHROMIUM_EXTRA_FLAGS=--disable-setuid-sandbox',
       '-e', 'BPANE_CHROMIUM_DEBUG_ADDRESS=127.0.0.1', '-e', 'RUST_LOG=warn', this.image]);
     await this.ready();
