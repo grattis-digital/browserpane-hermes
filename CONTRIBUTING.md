@@ -134,6 +134,16 @@ The compact branch adds real MCP engine regressions and paired one-sample fixtur
 smokes before native builds; both native jobs test compact default and explicitly
 selected legacy runtime modes. CI gates correctness, not a noisy timing threshold.
 
+The MCP fixtures require Chromium's sandbox. Ubuntu 24.04 restricts user namespaces
+for downloaded binaries, so the ephemeral GitHub-hosted JavaScript runner grants
+`userns` to its exact installed test-Chromium path with a temporary AppArmor profile.
+Both MCP launchers use the same full Chromium executable. The CI helper refuses
+ordinary developer/self-hosted machines; it does not change global sysctls, install
+a persistent system policy or pass `--no-sandbox`. Cleanup removes only the owned
+profile. See [Chromium's AppArmor guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
+Local Linux contributors must provide a sandbox-capable environment deliberately;
+the benchmark will fail instead of silently weakening its browser configuration.
+
 A weekly scheduled run rebuilds and checks the pinned source with the current
 distribution packages/base tags; schedules never publish. The production npm
 dependency audit rejects high/critical reported issues, but is not a comprehensive

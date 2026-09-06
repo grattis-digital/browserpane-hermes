@@ -46,7 +46,7 @@ complete. The protocol has five tools, including a targeted read/aggregate tool
 added after the benchmark exposed the cost of sending entire tables for tiny
 summaries. See [measured results and tradeoffs](benchmarks/README.md).
 
-Local qualification: 190 wrapper tests; 22 real-browser compact checks; compact
+Local qualification: 195 wrapper/CI-guard tests; 22 real-browser compact checks; compact
 and legacy runtime/download checks; original tab, cookie, local storage and shared
 file persistence through reconnect/restart/recreation; lean Hermes and actual
 three-service Compose discovery; 16 scroll-pixel checkpoints and 27 display

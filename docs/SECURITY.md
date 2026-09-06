@@ -147,6 +147,15 @@ Disposable tests may explicitly set `BPANE_PIPELINE_TEST=1` to permit a loopback
 HTTP viewer origin (a browser secure-context exception). Compose never enables
 this flag; it cannot authorize a non-loopback HTTP origin or an HTTP gateway.
 
+Hosted MCP tests install a temporary AppArmor user-namespace exception for one
+exact test-Chromium executable on their ephemeral GitHub-hosted Ubuntu runner.
+This is CI setup, not a product policy or a local setup command. The helper refuses
+developer/self-hosted environments, retains Chromium sandboxing and does not
+disable Ubuntu's global user-namespace restriction. As with any path-based policy,
+code able to replace that exact runner binary can reuse the exception; CI runs
+untrusted repository code only on disposable runners without deployment secrets.
+The profile is removed by owned cleanup; no policy is installed on the Raspberry.
+
 Report suspected vulnerabilities using the repository's [security reporting
 guidance](../SECURITY.md). Remove secrets, browser content and personal identifiers
 from diagnostics; do not upload raw profiles, `.env` files or operator histories.

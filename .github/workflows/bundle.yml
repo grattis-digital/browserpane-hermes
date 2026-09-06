@@ -44,6 +44,8 @@ jobs:
             - < .github/workflows/bundle.yml
       - name: Install isolated test Chromium
         run: npx playwright install --with-deps chromium
+      - name: Allow sandbox user namespaces for the exact isolated Chromium binary
+        run: node scripts/ci-chromium-sandbox.mjs install
       - name: Real compact MCP input, references and replay correctness
         run: npm run test:mcp
       - name: Paired MCP performance fixture smoke (no timing threshold or paid model)
@@ -63,6 +65,9 @@ jobs:
           BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
           export BPANE_TEST_BROWSER_PATH
           npm run test:webgl
+      - name: Remove owned temporary Chromium AppArmor profile
+        if: always()
+        run: node scripts/ci-chromium-sandbox.mjs remove
 
   linux:
     needs: javascript

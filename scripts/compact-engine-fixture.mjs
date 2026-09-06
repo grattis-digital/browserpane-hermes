@@ -30,7 +30,8 @@ export class CompactEngineFixture {
     this.#identity = await realpath(this.#temporary);
     const profile = join(this.#temporary, 'profile');
     await mkdir(join(this.#temporary, 'shared'));
-    this.#context = await chromium.launchPersistentContext(profile, { headless: true, chromiumSandbox: true,
+    this.#context = await chromium.launchPersistentContext(profile, { executablePath: chromium.executablePath(),
+      headless: true, chromiumSandbox: true,
       viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, serviceWorkers: 'block',
       args: ['--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--disable-background-networking'] });
     // The launcher connection is only an oracle: don't let its default dialog
