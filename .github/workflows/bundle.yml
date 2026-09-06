@@ -44,11 +44,30 @@ jobs:
             - < .github/workflows/bundle.yml
       - name: Install isolated test Chromium
         run: npx playwright install --with-deps chromium
+      - name: Allow sandbox user namespaces for the exact isolated Chromium binary
+        run: node scripts/ci-chromium-sandbox.mjs install
+      - name: Real compact MCP input, references and replay correctness
+        run: npm run test:mcp
+      - name: Paired MCP performance fixture smoke (no timing threshold or paid model)
+        run: |
+          node scripts/benchmark-mcp-baseline.mjs ci-playwright 1 0 batched playwright
+          node scripts/benchmark-mcp-baseline.mjs ci-compact 1 0 batched compact
+      - name: Synthetic MCP reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-mcp-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Real WebGL and Canvas2D fallback pixel correctness
         run: |
           BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
           export BPANE_TEST_BROWSER_PATH
           npm run test:webgl
+      - name: Remove owned temporary Chromium AppArmor profile
+        if: always()
+        run: node scripts/ci-chromium-sandbox.mjs remove
 
   linux:
     needs: javascript
@@ -100,6 +119,8 @@ jobs:
         run: docker build --build-arg VCS_REF="$GITHUB_SHA" --tag browserpane-hermes:test .
       - name: Real MCP, downloads and persistent profile across restart/recreate
         run: npm run test:runtime
+      - name: Explicit legacy MCP fallback and profile compatibility
+        run: node scripts/test-runtime.mjs browserpane-hermes:test playwright
       - name: Build lean Hermes image natively
         run: docker build --tag browserpane-hermes-agent:test ./hermes
       - name: Assert both image architectures match the native runner

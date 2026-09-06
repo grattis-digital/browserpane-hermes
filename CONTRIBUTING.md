@@ -44,6 +44,8 @@ export BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium}
 npm run test:webgl
 docker build --tag browserpane-hermes:test .
 npm run test:runtime
+node scripts/test-runtime.mjs browserpane-hermes:test playwright
+npm run test:mcp
 node scripts/test-viewer.mjs browserpane-hermes:test
 docker build --tag browserpane-hermes-agent:test ./hermes
 python3 hermes/check-container.py --image browserpane-hermes-agent:test
@@ -68,6 +70,26 @@ commands for diagnosing a live deployment. Cleanup verifies exact IDs and labels
 before removing only these test resources. Interrupted/killed jobs may leave
 labelled test resources; inspect them before deliberate cleanup, never run a
 global Docker prune against a developer's machine.
+
+`test:mcp` starts fresh sandboxed Chromium and tests the compact engine's actual
+input, stale references, cross-client epochs, replay protection, navigation,
+dialogs, uploads and browser ownership. HTTP admission/session/cancellation and
+pure observation/reader tests also run in `npm test`. Neither uses paid models.
+
+For latency and context-size evidence, run the same synthetic workflow through
+both separate-process MCP backends (samples and warmups are explicit):
+
+```sh
+node scripts/benchmark-mcp-baseline.mjs playwright-separate 12 2 separate playwright
+node scripts/benchmark-mcp-baseline.mjs playwright-batched 12 2 batched playwright
+node scripts/benchmark-mcp-baseline.mjs compact-separate 12 2 separate compact
+node scripts/benchmark-mcp-baseline.mjs compact-batched 12 2 batched compact
+```
+
+Do not run competing builds during performance samples. All-row observation
+includes every pagination response; targeted table summaries are measured
+separately. Reports contain exact bytes and a labelled chars/4 token heuristic,
+not billed-token counts or Pi hardware results. See [Pane MCP v1](docs/COMPACT_MCP.md).
 
 `test-viewer.mjs` owns a separate tmpfs-only container and fixed loopback ports
 18090/TCP and 24433/UDP. It refuses an existing `browserpane-pipeline-viewer`
@@ -108,6 +130,19 @@ Compose configuration, real WebGL pixels and Hermes configuration. Native
 images and run browser/MCP/profile and Hermes integrations. The amd64 job also
 runs the full local viewer oracles. ARM64 hosted CI does not prove Pi thermal or
 GPU behavior; the [evidence guide](docs/OPTIMIZATIONS.md) separates those claims.
+The compact branch adds real MCP engine regressions and paired one-sample fixture
+smokes before native builds; both native jobs test compact default and explicitly
+selected legacy runtime modes. CI gates correctness, not a noisy timing threshold.
+
+The MCP fixtures require Chromium's sandbox. Ubuntu 24.04 restricts user namespaces
+for downloaded binaries, so the ephemeral GitHub-hosted JavaScript runner grants
+`userns` to its exact installed test-Chromium path with a temporary AppArmor profile.
+Both MCP launchers use the same full Chromium executable. The CI helper refuses
+ordinary developer/self-hosted machines; it does not change global sysctls, install
+a persistent system policy or pass `--no-sandbox`. Cleanup removes only the owned
+profile. See [Chromium's AppArmor guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
+Local Linux contributors must provide a sandbox-capable environment deliberately;
+the benchmark will fail instead of silently weakening its browser configuration.
 
 A weekly scheduled run rebuilds and checks the pinned source with the current
 distribution packages/base tags; schedules never publish. The production npm

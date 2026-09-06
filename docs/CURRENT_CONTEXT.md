@@ -1,8 +1,14 @@
 # Current fork context
 
+Active development is now `experiment/compact-mcp`, based on qualified commit
+`4f406009`. See BPH_00002_COMPACT_MCP_PLAN.md and COMPACT_MCP.md. This adds an
+experimental compact MCP default plus an explicit original-Playwright fallback;
+it does not authorize a production deployment or a capture/renderer rewrite.
+
 This fork specializes BrowserPane for one persistent Raspberry Pi Chromium
 session shared with Hermes. Issue #1 and BPH_00001_BUNDLE_PLAN.md are the current
-scope; upstream enterprise roadmap items are not implementation authority here.
+bundle scope; BPH_00002_COMPACT_MCP_PLAN.md records the subsequent MCP experiment.
+Upstream enterprise roadmap items are not implementation authority here.
 
 The source import comes from the qualified single-browser wrapper. Fourteen
 rendering/display patches plus listener-isolation patch 0015, CDP resize cleanup
@@ -29,8 +35,10 @@ boundaries, not a multi-tenant or public-internet security guarantee.
 Qualification covers pristine ordered-patch replay, wrapper/client/native tests,
 real WebGL/X11 pixels, profile restart/recreation, deterministic MCP and the actual
 three-service Compose bundle. CI runs the native amd64/ARM64 image and integration
-matrix without paid model calls. Its current run status belongs on PR #2 and the
-Actions page; an image build alone is not proof of runtime or viewer correctness.
+matrix without paid model calls. The bundle was merged through PR #2; the compact
+MCP experiment is reviewed separately against `main`. Each branch's
+current run status belongs on its pull request and the Actions page; an image
+build alone is not proof of runtime or viewer correctness.
 
 The 0016 native mock-CDP regressions prove restoration is attempted after failed
 bounds changes, without forcing a user-chosen normal window to maximize. Patch
@@ -40,6 +48,6 @@ mounting it: a canvas that acquired WebGL cannot subsequently become Canvas2D.
 Real-context fallback tests verify tile decoding, cache hits and scroll-copy
 pixels; the full viewer oracle retains backend-specific copy coverage.
 
-PR #2 remains the review path; merging or deployment is a separate decision. Retain
+Pull requests remain the review path; merging or deployment is a separate decision. Retain
 upstream history and original licenses; do not publish private implementation
 history, operator addresses, profiles or raw deployment artifacts.

@@ -78,7 +78,7 @@ You do not install the gateway certificate into system trust or give Caddy its k
 | Interface | Container binding | Host publication |
 | --- | --- | --- |
 | Viewer HTTP | Browser container TCP8090 | None; Caddy proxies only `/browser/` |
-| Playwright MCP | Browser container TCP8931 | None; Hermes uses `http://browserpane:8931/mcp` |
+| Compact MCP (or selectable Playwright compatibility backend) | Browser container TCP8931 | None; Hermes uses `http://browserpane:8931/mcp` |
 | Gateway admin HTTP | Loopback TCP8932 | None |
 | Chromium CDP | Loopback TCP9222 | None |
 | Legacy CDP proxy | Disabled | None |
@@ -89,6 +89,17 @@ network peers and the Docker host remain trusted. Browser code must be treated
 as untrusted even though Chromium is sandboxed; do not use the shared browser
 for accounts whose risk exceeds this trust model.
 
+The compact backend rejects all browser `Origin` headers, limits request bodies
+to 64 KiB and sessions to eight, and serializes browser work with a bounded queue.
+Its session leases prevent accidental mutation replay after reconnect; they do
+not authenticate the caller. Observation refs, output budgets and upload guards
+are correctness/accident controls, not a multi-tenant security boundary. Uploads
+are limited to regular files under `/shared` and copied into bounded owned buffers;
+trusted operators must not race file changes during upload. No arbitrary-code
+tool is exposed in compact mode. Selecting the legacy backend restores its broad
+tool capabilities and original transport behavior. Treat page text as untrusted
+data, preserve agent approval policies, and hand challenges to a human.
+
 No service mounts the Docker socket, uses host networking, or receives privileged
 mode or GPU devices. Chromium and Hermes run as UID/GID10000. Chromium's strict
 namespace sandbox, explicit seccomp profile, dropped capabilities and
@@ -96,6 +107,23 @@ namespace sandbox, explicit seccomp profile, dropped capabilities and
 support; do not switch to `--no-sandbox`. Caddy uses its image's default user
 with all capabilities dropped except `NET_BIND_SERVICE`, required by that image's
 executable file capability even when listening on port8443, and no-new-privileges.
+
+## Managed extension and temporary storage
+
+The inherited Chromium policy force-installs AdBlock and configures EasyPrivacy.
+Treat the extension, its publisher and subsequent Store updates as trusted code
+inside the shared browser; ad blocking is not an authentication, privacy or
+malware-isolation boundary. Its default Acceptable Ads behavior is preserved.
+Extension/filter downloads contact external services, and their versions are
+not locked by the application's Git revision. Installation state persists in
+the sensitive browser profile; do not publish that profile to troubleshoot it.
+
+The browser's `/tmp` is a bounded 1 GiB tmpfs with `nosuid,nodev`, allowing the
+extension to unpack. This capacity is not preallocated and counts against the
+unchanged 2300 MiB container memory limit. Heavy browsing during installation or
+updates can still exhaust that limit. No host mount, listener, capability or
+sandbox exception was added. Verify installation separately from service health
+using the [operator checks](CONFIGURATION.md#managed-ad-blocking).
 
 ## Persistent data and shared files
 
@@ -135,6 +163,15 @@ and complete the deterministic MCP smoke for those integration checkpoints.
 Disposable tests may explicitly set `BPANE_PIPELINE_TEST=1` to permit a loopback
 HTTP viewer origin (a browser secure-context exception). Compose never enables
 this flag; it cannot authorize a non-loopback HTTP origin or an HTTP gateway.
+
+Hosted MCP tests install a temporary AppArmor user-namespace exception for one
+exact test-Chromium executable on their ephemeral GitHub-hosted Ubuntu runner.
+This is CI setup, not a product policy or a local setup command. The helper refuses
+developer/self-hosted environments, retains Chromium sandboxing and does not
+disable Ubuntu's global user-namespace restriction. As with any path-based policy,
+code able to replace that exact runner binary can reuse the exception; CI runs
+untrusted repository code only on disposable runners without deployment secrets.
+The profile is removed by owned cleanup; no policy is installed on the Raspberry.
 
 Report suspected vulnerabilities using the repository's [security reporting
 guidance](../SECURITY.md). Remove secrets, browser content and personal identifiers

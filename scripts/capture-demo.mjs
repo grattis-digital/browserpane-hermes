@@ -11,6 +11,8 @@ const info = JSON.parse(execFileSync('docker', ['inspect', 'browserpane-pipeline
 assert.equal(info.Config.Labels?.['browserpane.test'], 'pipeline');
 assert(info.Config.Env.includes('BPANE_PIPELINE_TEST=1'));
 assert.equal(info.State.Running, true);
+assert(!info.Config.Env.some(value => value.startsWith('BPANE_MCP_MODE=') && value !== 'BPANE_MCP_MODE=compact'),
+  'The public demo qualifies compact MCP, not the optional legacy toolset');
 assert.deepEqual(info.Mounts, [], 'No persistent volumes or host mounts in the demo');
 for (const entries of Object.values(info.HostConfig.PortBindings ?? {})) {
   for (const binding of entries ?? []) assert.equal(binding.HostIp, '127.0.0.1');
@@ -29,25 +31,46 @@ const serving = `require('node:http').createServer((req,res)=>{
 docker(['exec', '-d', id, 'node', '-e', serving]);
 const mcp = `
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 assert.equal(process.env.BPANE_PIPELINE_TEST,'1');
-const require=createRequire('/app/package.json');
-const {Client,StreamableHTTPClientTransport}=require('playwright-core/lib/mcpBundle');
 const client=new Client({name:'public-demo-capture',version:'1.0'});
 const transport=new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8931/mcp'));
+async function call(name,args={}) {
+ const result=await client.callTool({name,arguments:args});
+ assert(!result.isError,JSON.stringify(result));
+ return JSON.parse(result.content.find(part=>part.type==='text').text);
+}
 try {
  await client.connect(transport);
- const result=await client.callTool({name:'browser_run_code',arguments:{code:process.env.BPANE_DEMO_CODE}});
- assert(!result.isError,'Demo MCP operation failed');
+ assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name).sort(),['pane_act','pane_image','pane_read','pane_tabs','pane_view']);
+ const initial=await call('pane_tabs');
+ if(process.env.BPANE_DEMO_STAGE==='setup') {
+  const opened=await call('pane_act',{lease:initial.lease,request:1,steps:[{op:'new',url:'http://127.0.0.1:8765/'}],observe:'full'});
+  assert.equal(opened.completed,1);
+  const view=await call('pane_view',{tab:opened.tab});
+  const ref=(role,name)=>{
+   const line=view.text.split('\\n').filter(line=>line.trimStart().startsWith('- '+role+' '+JSON.stringify(name)+' ['));
+   assert.equal(line.length,1);const value=line[0].match(/\\[ref=([a-zA-Z0-9]+)\\]/)?.[1];assert(value);return value;
+  };
+  const edited=await call('pane_act',{lease:initial.lease,request:2,tab:opened.tab,view:view.view,observe:'none',steps:[
+   {op:'fill',ref:ref('textbox','Handoff note'),text:'Ready for your review · edited through MCP'},
+   {op:'click',ref:ref('heading','One browser. Shared control.')},{op:'activate'}]});
+  assert.equal(edited.completed,3);
+ } else {
+  assert.equal(process.env.BPANE_DEMO_STAGE,'cleanup');let request=0;
+  for(const tab of initial.tabs.filter(tab=>tab.url==='http://127.0.0.1:8765/')) {
+   const view=await call('pane_view',{tab:tab.tab});
+   const closed=await call('pane_act',{lease:initial.lease,request:++request,tab:tab.tab,view:view.view,steps:[{op:'close'}],observe:'none'});
+   assert.equal(closed.completed,1);
+  }
+ }
 } finally {await transport.terminateSession().catch(()=>{});await client.close();}
 `;
-function call(code) { docker(['exec', '-i', '-e', `BPANE_DEMO_CODE=${code}`, id, 'node', '--input-type=module', '-'], mcp); }
-const url = 'http://127.0.0.1:8765/';
+function call(stage) { docker(['exec', '-i', '-e', `BPANE_DEMO_STAGE=${stage}`, id, 'node', '--input-type=module', '-'], mcp); }
 let browser;
 try {
-  call(`async(page)=>{const target=await page.context().newPage();await target.goto('${url}');
-    await target.locator('#handoff').fill('Ready for your review · edited through MCP');
-    await target.locator('h1').click();await target.bringToFront();}`);
+  call('setup');
   browser = await chromium.launch({ headless: true,
     args: ['--host-resolver-rules=MAP localhost 127.0.0.1'],
     ...(process.env.BPANE_TEST_BROWSER_PATH ? { executablePath: process.env.BPANE_TEST_BROWSER_PATH }
@@ -77,5 +100,5 @@ try {
   console.log('Captured docs/images/shared-session.png from the real streamed demo.');
 } finally {
   await browser?.close();
-  call(`async(page)=>{for(const target of page.context().pages())if(target.url()==='${url}')await target.close();}`);
+  call('cleanup');
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — compact MCP experiment
+
+- Adds Pane MCP v1: five focused tools over standard private MCP HTTP, retaining
+  the pinned Playwright/CDP engine and the shared persistent browser.
+- Removes the pinned generic MCP orchestration's unconditional settlement waits,
+  per-step snapshots and diagnostic/code output; supports explicit postconditions,
+  bounded pagination, client-scoped deltas and on-demand screenshots.
+- Adds sequential bounded input, observation-scoped refs, pinned target handles,
+  session leases and monotonic request replay protection with partial outcomes.
+- Keeps original Playwright MCP selectable with `BPANE_MCP_MODE=playwright`, on
+  the same endpoint without changing browser profiles or published ports.
+- Adds deterministic paired latency/output-size benchmarks and real-browser
+  correctness gates. No stealth, anti-bot bypass or production deployment.
+
 ## Unreleased — initial Raspberry Pi/Hermes specialization
 
 - Replaces the upstream platform tree with a focused single-browser wrapper,
