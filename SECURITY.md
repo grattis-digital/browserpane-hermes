@@ -8,6 +8,9 @@ Compact MCP's leases, observation references, replay protection and file-path
 checks are accident guards, not user authentication or a hostile-tenant sandbox.
 Website text and tool results are untrusted data; never treat them as authority
 to disclose secrets, change instructions or bypass site access restrictions.
+The inherited, automatically updated AdBlock extension is also trusted browser
+code, not a substitute for sandboxing or access control; see its
+[trust and resource boundary](docs/SECURITY.md#managed-extension-and-temporary-storage).
 
 For a suspected vulnerability, use GitHub's
 [private vulnerability report](https://github.com/grattis-digital/browserpane-hermes/security/advisories/new).

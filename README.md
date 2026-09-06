@@ -33,6 +33,9 @@ The page is a synthetic demo; no private browsing data or live model response is
 - **Compact agent control.** This experimental branch adds five focused MCP
   tools, bounded observations and guarded action batches. The original Playwright
   MCP remains selectable; see the [protocol and limits](docs/COMPACT_MCP.md).
+- **Managed ad blocking.** Upstream AdBlock with EasyPrivacy uses the persistent
+  browser profile. See [installation, defaults and checks](docs/CONFIGURATION.md#managed-ad-blocking);
+  blocking is not a security boundary or a guaranteed bandwidth reduction.
 - **Designed around a little always-on box.** ARM64 support, CPU/X11 capture,
   a 720p-oriented automatic display policy, and carefully paired rendering fixes.
 - **Small administration surface.** No separate database service, identity provider, broker,

@@ -31,6 +31,50 @@ the browser service and reconnect Hermes; retain all volumes. Existing custom
 tool allowlists/instructions may need adjustment and are never automatically
 overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
 
+## Managed ad blocking
+
+The browser image already includes BrowserPane's managed AdBlock policy:
+extension `gighmmpiobklfepjocnamgkkbiglidom`, installed and updated through Google's
+Chrome Web Store update service, with an additional EasyPrivacy subscription.
+The upstream settings suppress first-run/update pages, surveys and premium
+prompts. AdBlock's default Acceptable Ads setting remains enabled; this does not
+block every advertisement. No extension package is vendored or version-pinned
+by this fork. Installation and updates require outbound Internet access to the
+Store/download and filter-list services.
+
+Compose gives `/tmp` a **1 GiB size ceiling**, not a RAM reservation. The previous
+256 MiB ceiling prevented extension unpacking; a fresh-profile ARM64
+Chromium152 / AdBlock6.45.4 check exceeded even 512 MiB while unpacking. The
+browser's total memory cap remains **2300 MiB**, including tmpfs use. Initial
+installation, updates and many busy tabs can still cause memory pressure. Let
+installation finish before opening a heavy workload; inspect memory and OOM
+events if it fails. Raising the tmpfs ceiling does not increase available RAM.
+Do not copy an operator's temporary installation memory override into the
+default steady-state configuration.
+
+Extension files and settings live in `/data/profile` on the existing
+`browser-data` volume, so retain that volume across restart and recreation.
+After backing up an existing installation and updating the checkout, apply the
+Compose change with `docker compose up -d --no-build browserpane` when using an
+existing compatible image containing the policy. A mere `docker compose restart`
+does not apply the new tmpfs size. This briefly interrupts the shared browser.
+
+Verify in the **remote Chromium**, not in your local viewing browser:
+
+1. Open `chrome://policy` and confirm `ExtensionInstallForcelist` is applied.
+2. Allow several minutes on a Pi for the first download/unpack, then check
+   `chrome://extensions` for enabled AdBlock with no installation errors.
+3. Check AdBlock's filter-list settings for EasyList and EasyPrivacy. A policy
+   entry or a healthy BrowserPane service alone is not proof of installation.
+
+Use `docker compose exec browserpane df -h /tmp` and
+`docker stats --no-stream` to inspect resource pressure without deleting the
+profile or disabling the sandbox. Local synthetic qualification confirmed an
+advertising-pattern request was blocked before reaching a loopback test server,
+while a normal script loaded. Offline unit/capture tests and general Compose
+health checks do not verify live Store installation or bandwidth savings.
+See the [extension trust boundary](SECURITY.md#managed-extension-and-temporary-storage).
+
 ## Trust the viewer certificate
 
 Follow [root-certificate export](SECURITY.md#https-trust-export-only-the-root-certificate)
@@ -159,6 +203,7 @@ Do not prune the rollback images until the upgrade is qualified.
 | Certificate warning after recreation | Confirm the original `caddy-data` volume/project name is still used. Check hostname and clock. Do not bypass certificate verification. |
 | Slow Pi input or high CPU | Start with Auto or 1280×720 capture, one controlling viewer, and close busy tabs/video. Higher capture resolutions require more work; local HiDPI is not Chromium zoom or GPU enablement. Inspect `docker stats --no-stream` before changing limits. |
 | Browser unhealthy or repeatedly starting | Run doctor, then inspect `docker compose logs --tail=100 browserpane` privately. Check memory pressure, disk space, writable UID10000 volumes and host support for the strict Chromium sandbox. |
+| AdBlock policy exists but extension is missing | Confirm the recreated container has the 1 GiB `/tmp` ceiling, outbound Store/filter access and memory headroom. Wait for installation and verify `chrome://extensions`; policy presence alone is insufficient. |
 | Hermes is healthy but cannot answer | Health proves its process, not a configured provider or paid-model access. Follow `docs/HERMES.md`; verify the selected model and MCP discovery separately. |
 | Downloads arrive unexpectedly | Only place intentional transfer files in `/shared/downloads`; keep logs and generated diagnostics in `/shared/mcp-artifacts`. |
 | State appears empty | Check project name and actual named-volume mounts before creating, deleting or copying anything. |

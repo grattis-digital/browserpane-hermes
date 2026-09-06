@@ -108,6 +108,23 @@ support; do not switch to `--no-sandbox`. Caddy uses its image's default user
 with all capabilities dropped except `NET_BIND_SERVICE`, required by that image's
 executable file capability even when listening on port8443, and no-new-privileges.
 
+## Managed extension and temporary storage
+
+The inherited Chromium policy force-installs AdBlock and configures EasyPrivacy.
+Treat the extension, its publisher and subsequent Store updates as trusted code
+inside the shared browser; ad blocking is not an authentication, privacy or
+malware-isolation boundary. Its default Acceptable Ads behavior is preserved.
+Extension/filter downloads contact external services, and their versions are
+not locked by the application's Git revision. Installation state persists in
+the sensitive browser profile; do not publish that profile to troubleshoot it.
+
+The browser's `/tmp` is a bounded 1 GiB tmpfs with `nosuid,nodev`, allowing the
+extension to unpack. This capacity is not preallocated and counts against the
+unchanged 2300 MiB container memory limit. Heavy browsing during installation or
+updates can still exhaust that limit. No host mount, listener, capability or
+sandbox exception was added. Verify installation separately from service health
+using the [operator checks](CONFIGURATION.md#managed-ad-blocking).
+
 ## Persistent data and shared files
 
 - `browser-data` mounts only into Chromium's container at `/data`; the profile
