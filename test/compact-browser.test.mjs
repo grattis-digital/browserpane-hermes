@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { CompactBrowserFixture as Fixture } from './compact-browser-fixture.mjs';
 import { CompactHttpFixture } from './compact-http-fixture.mjs';
 import { PaneSchemas } from '../server/compact/schemas.mjs';
+import { PaneMetrics } from '../server/compact/metrics.mjs';
 
 const fixture = (t, urls) => { const f = new Fixture(urls); t.after(() => f.close()); return f; };
 const navigation = (view, request = 1) => ({ lease: view.lease, request, tab: view.tab, view: view.view,
@@ -17,6 +18,32 @@ test('omitted tab reuses the first existing tab without creation, navigation or 
   }
   assert.equal(f.creations, 0);
   assert(f.pages.every(page => page.navigations.length === 0 && page.activations === 0));
+});
+
+test('state pagination and semantic query reuse one immutable Chromium snapshot', async t => {
+  const f = fixture(t), session = f.session();
+  f.pages[0].snapshotText = '- main [ref=e1]:\n  - button "Save" [ref=e2]\n  - button "Save draft" [ref=e3]';
+  const first = await f.call(session, 'pane_view', { limit: 2 });
+  const next = await f.call(session, 'pane_view', { state: first.state, offset: first.next, limit: 2 });
+  assert.equal(next.state, first.state); assert.match(next.text, /Save draft/); assert.equal(f.pages[0].snapshotCalls, 1);
+  const found = await f.call(session, 'pane_view', { state: first.state,
+    query: { role: 'button', name: 'save', exact: true } });
+  assert.equal(found.matches, 1); assert.match(found.text, /"Save"/); assert.doesNotMatch(found.text, /Save draft/);
+  assert.equal(f.pages[0].snapshotCalls, 1);
+  await f.pages[0].goto('https://fixture.test/changed');
+  assert.equal((await f.call(session, 'pane_view', { state: first.state })).error.code, 'STALE_VIEW');
+});
+
+test('session timings distinguish fresh snapshots from state cache hits without content', async t => {
+  const f = fixture(t), lines = [];
+  const session = f.session({ metrics: new PaneMetrics({ enabled: true, sink: line => lines.push(line) }) });
+  f.pages[0].snapshotText = '- button "Private label must not be logged" [ref=e1]';
+  const first = await f.call(session, 'pane_view');
+  await f.call(session, 'pane_view', { state: first.state, query: { role: 'button' } });
+  const [fresh, cached] = lines.map(JSON.parse);
+  assert.equal(fresh.snapshots, 1); assert.equal(fresh.stateHits, undefined);
+  assert.equal(cached.snapshots, undefined); assert.equal(cached.stateHits, 1);
+  assert(lines.every(line => !line.includes('Private label')));
 });
 
 test('default prefers web/new-tab pages over internal UI but does not hide any existing tab', async t => {
@@ -120,5 +147,6 @@ test('model-facing guidance leads with existing-tab reuse and leaves intentional
   assert.match(view.description, /Start with \{\}.*reuse/);
   assert.match(act.description, /navigate\(url\) in place/);
   assert.match(act.description, /new creates an extra tab/);
+  assert.match(view.description, /state reprojects/);
   assert.equal(act.inputSchema.properties.steps.items.properties.op.enum.at(-1), 'new');
 });

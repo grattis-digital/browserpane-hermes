@@ -100,6 +100,13 @@ tool is exposed in compact mode. Selecting the legacy backend restores its broad
 tool capabilities and original transport behavior. Treat page text as untrusted
 data, preserve agent approval policies, and hand challenges to a human.
 
+Optional `BPANE_MCP_TIMINGS=1` records only tool/phase names, monotonic durations,
+counts, result size and stable error code in the already bounded container log.
+It deliberately omits URLs, page text, accessible names, selectors and input
+values. Diagnostics are best-effort and cannot change a browser outcome. This is
+not a promise that unrelated Chromium, Hermes or site logs contain no sensitive
+data; retain and share complete container logs accordingly.
+
 No service mounts the Docker socket, uses host networking, or receives privileged
 mode. The default has no GPU devices; the separate opt-in is described below.
 Chromium and Hermes run as UID/GID10000. Chromium's strict

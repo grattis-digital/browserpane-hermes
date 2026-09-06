@@ -1,7 +1,10 @@
 # Current fork context
 
-Active development is now `experiment/pi-runtime-recovery`, based on compact-MCP
-and AdBlock branch commit `4bfef255`. See BPH_00004_GPU_RUNTIME_PLAN.md and GPU.md
+Active development is now `experiment/semantic-fast-path`, based on merged main
+commit `70129e2c`. See BPH_00006_SEMANTIC_FAST_PATH_PLAN.md for immutable MCP
+states, targeted semantic projections, content-free timing and bounded verified
+flows. Model routing is intentionally deferred until deterministic protocol
+effects are measured. See BPH_00004_GPU_RUNTIME_PLAN.md and GPU.md
 for the explicit V3D/X11 integration and bounded hardware qualification. The
 ordinary Compose configuration remains CPU/Xorg; GPU access requires a separate
 opt-in. Compact MCP now reuses a shared default existing tab for untargeted
@@ -13,7 +16,8 @@ This fork specializes BrowserPane for one persistent Raspberry Pi Chromium
 session shared with Hermes. Issue #1 and BPH_00001_BUNDLE_PLAN.md are the current
 bundle scope; BPH_00002_COMPACT_MCP_PLAN.md records the subsequent MCP experiment,
 BPH_00003_ADBLOCK_INSTALL_PLAN.md its managed-extension resource follow-up, and
-BPH_00004_GPU_RUNTIME_PLAN.md the later GPU integration request.
+BPH_00004_GPU_RUNTIME_PLAN.md the later GPU integration request, and
+BPH_00006_SEMANTIC_FAST_PATH_PLAN.md the current MCP performance follow-up.
 Upstream enterprise roadmap items are not implementation authority here.
 
 The source import comes from the qualified single-browser wrapper. Fourteen

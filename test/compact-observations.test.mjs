@@ -42,6 +42,36 @@ test('pagination retains parent context but no refs from unreturned siblings', (
   assert.deepEqual([...store.inspect(view.view).refs.keys()], ['e1', 'e2', 'e4']);
 });
 
+test('immutable state reprojects pagination without recapturing raw snapshot bytes', () => {
+  const store = make(), snapshot = list(12), first = capture(store, { snapshot, limit: 3 });
+  const second = store.reproject(first.state, { offset: first.next, limit: 3 });
+  assert.equal(second.state, first.state); assert.notEqual(second.view, first.view);
+  assert.equal(second.offset, 3); assert.match(second.text, /Action 3/);
+  assert.equal(store.inspect(second.view).snapshot, snapshot);
+  assert.deepEqual(store.source(first.state), { state: first.state, tab: 't1', document: 1,
+    mutation: 0, url: 'https://fixture.invalid/', title: 'Synthetic fixture' });
+  assert.throws(() => store.reproject('missing', {}), { code: 'unknown_state' });
+});
+
+test('raw state cache is a four-entry LRU independent of rendered-view eviction', () => {
+  const store = make(), states = Array.from({ length: 4 }, () => capture(store).state);
+  store.reproject(states[0], { limit: 1 }); // Touch the oldest raw state while creating a fifth rendered view.
+  const newest = capture(store).state;
+  assert.equal(store.source(states[1]), undefined);
+  assert(store.source(states[0])); assert(store.source(newest));
+});
+
+test('semantic query matches only ref-bearing role/name targets and reports ambiguity', () => {
+  const store = make(), snapshot = '- main [ref=e1]:\n  - button "Save" [ref=e2]\n' +
+    '  - button "Save draft" [ref=e3]\n  - paragraph: Save';
+  const first = capture(store, { snapshot });
+  const exact = store.reproject(first.state, { query: { role: 'button', name: 'save', exact: true } });
+  assert.equal(exact.matches, 1); assert.equal(exact.text, '- main [ref=e1]:\n  - button "Save" [ref=e2]');
+  const partial = store.reproject(first.state, { query: { role: 'button', name: 'save', exact: false } });
+  assert.equal(partial.matches, 2); assert.match(partial.text, /Save draft/);
+  assert.equal(store.reproject(first.state, { query: { role: 'link' } }).matches, 0);
+});
+
 test('controls/filter are explicit projections with structural ancestor context', () => {
   const store = make(), snapshot = '- main [ref=e1]:\n  - paragraph [ref=e2]: Other content\n  - button "SAVE" [ref=e3]\n  - link "Other" [ref=e4]';
   const full = capture(store, { snapshot }), filtered = capture(store, { snapshot, detail: 'controls', filter: 'save' });
@@ -125,9 +155,11 @@ test('raw oversized/too-many-line snapshots are rejected, not silently clipped',
 });
 
 test('inspection is defensive, invalidation scoped, and history remains four views', () => {
-  const store = make(), first = capture(store), other = capture(store, { tab: 't2' });
-  const observed = store.inspect(first.view); observed.refs.clear(); observed.projection.limit = 1; observed.text = 'changed';
+  const store = make(), first = capture(store, { query: { role: 'button' } }), other = capture(store, { tab: 't2' });
+  const observed = store.inspect(first.view); observed.refs.clear(); observed.projection.limit = 1;
+  observed.projection.query.role = 'link'; observed.text = 'changed';
   assert.equal(store.inspect(first.view).refs.size, 1); assert.equal(store.inspect(first.view).projection.limit, 120);
+  assert.equal(store.inspect(first.view).projection.query.role, 'button');
   store.invalidateTab('t1'); assert.equal(store.inspect(first.view), undefined); assert(store.inspect(other.view));
   const views = Array.from({ length: 8 }, () => capture(store));
   assert.equal(views.filter(view => store.inspect(view.view)).length, 4);
@@ -136,7 +168,8 @@ test('inspection is defensive, invalidation scoped, and history remains four vie
 
 test('invalid inputs and broken ID factories fail with stable codes', () => {
   for (const extra of [{ document: 0 }, { document: NaN }, { tab: '' }, { url: null }, { title: {} },
-    { snapshot: null }, { detail: 'summary' }, { filter: 2 }, { offset: -1 }, { limit: 501 }, { maxChars: 63 }, { since: '' }])
+    { snapshot: null }, { detail: 'summary' }, { filter: 2 }, { query: {} }, { query: { role: 'Button' } },
+    { query: { name: '' } }, { offset: -1 }, { limit: 501 }, { maxChars: 63 }, { since: '' }])
     assert.throws(() => capture(make(), extra), error => typeof error.code === 'string');
   assert.throws(() => new ObservationStore({ idFactory: false }), { code: 'invalid_id_factory' });
   assert.throws(() => capture(new ObservationStore({ idFactory: () => '../bad' })), { code: 'invalid_view_id' });

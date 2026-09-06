@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ActionRunner } from '../server/compact/action-runner.mjs';
+import { FlowRunner } from '../server/compact/flow-runner.mjs';
 import { PaneError } from '../server/compact/errors.mjs';
 import { RequestLedger } from '../server/compact/request-ledger.mjs';
 import { SerialExecutor } from '../server/compact/executor.mjs';
@@ -110,4 +111,39 @@ test('leases, latest observations and shared mutation epochs prevent stale or cr
   const stale = await fixture.invoke(b, 'pane_act', { ...args, view: viewB.view, lease: 'lease-b' });
   assert.equal(stale.error.code, 'STALE_VIEW'); assert.equal(fixture.actions(), 1);
   await a.close(); assert.equal((await fixture.invoke(a, 'pane_tabs', {})).error.code, 'SESSION_CLOSED'); fixture.executor.close();
+});
+
+test('semantic flow resolves unique targets per verified stage and replays one recorded outcome', async () => {
+  const executor = new SerialExecutor(); let ids = 0, calls = 0;
+  const tab = { id: 't1', document: 1, mutation: 0, dialog: undefined,
+    snapshotText: '- textbox "Email" [ref=e1]\n- button "Continue" [ref=e2]',
+    snapshot: async function() { return this.snapshotText; },
+    page: { url: () => 'https://fixture.invalid/', title: async () => 'Fixture', isClosed: () => false },
+    metadata: () => ({}), consume() { this.mutation++; },
+    assert(document, mutation) { if (document !== this.document || mutation !== this.mutation) throw new PaneError('STALE_VIEW', 'Changed'); } };
+  const actions = { run: async (_tab, args, observation) => {
+    calls++; assert.equal(observation.refs.size, args.steps.length);
+    if (calls === 1) {
+      assert.deepEqual(args.steps.map(step => [step.op, step.ref]), [['fill', 'e1'], ['click', 'e2']]);
+      tab.snapshotText = '- button "Finish" [ref=e3]';
+    } else assert.deepEqual(args.steps, [{ op: 'click', ref: 'e3' }]);
+    return { completed: args.steps.length };
+  } };
+  const browser = { tab: () => tab };
+  const observations = new ObservationStore({ idFactory: () => `v${++ids}` });
+  const session = new PaneSession({ browser, executor, actions, lease: 'lease',
+    flow: new FlowRunner({ browser, actions, observations }), ledger: new RequestLedger(), observations });
+  const args = { lease: 'lease', request: 1, observe: 'none', stages: [{ steps: [
+    { op: 'fill', target: { role: 'textbox', name: 'Email' }, text: 'user@example.invalid' },
+    { op: 'click', target: { role: 'button', name: 'Continue' } },
+  ], wait: { text: 'next' } }, { steps: [{ op: 'click', target: { role: 'button', name: 'Finish' } }] }] };
+  const invoke = async value => JSON.parse((await session.callTool('pane_flow', value)).content[0].text);
+  const result = await invoke(args);
+  assert.equal(result.completed, 3); assert.equal(result.stages, 2); assert.equal(calls, 2);
+  assert.deepEqual(await invoke(args), result); assert.equal(calls, 2);
+  tab.snapshotText = '- button "Save" [ref=e4]\n- button "Save" [ref=e5]';
+  const ambiguous = await invoke({ lease: 'lease', request: 2, observe: 'none',
+    stages: [{ steps: [{ op: 'click', target: { role: 'button', name: 'Save' } }] }] });
+  assert.equal(ambiguous.error.code, 'AMBIGUOUS_TARGET'); assert.equal(calls, 2);
+  executor.close();
 });

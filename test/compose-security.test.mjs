@@ -36,6 +36,7 @@ test('rendered default Compose publishes only loopback HTTPS and direct QUIC', {
   assert.equal(config.services.browserpane.environment.BPANE_PIPELINE_TEST, undefined);
   assert.equal(config.services.browserpane.environment.BPANE_CHROMIUM_SANDBOX_MODE, 'strict');
   assert.equal(config.services.browserpane.environment.BPANE_CDP_PROXY_ENABLE, '0');
+  assert.equal(config.services.browserpane.environment.BPANE_MCP_TIMINGS, '0');
 });
 
 test('tracked capture defaults match pinned upstream without copying its initial browsing URL', async () => {

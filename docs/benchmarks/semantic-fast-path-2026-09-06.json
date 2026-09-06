@@ -1,0 +1,54 @@
+{
+  "date": "2026-09-06",
+  "branch": "experiment/semantic-fast-path",
+  "base": "70129e2c2b506bba8d6a3153e99131ef5d6888ca",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpuModel": "Apple M4 Pro",
+    "node": "v26.7.0",
+    "chromium": "146.0.7680.0"
+  },
+  "scope": "Fresh sandboxed synthetic Chromium over separate-process MCP/HTTP/CDP. Five measured trials after one warmup. No paid model, Raspberry Pi, production profile, X11 viewer or model-latency measurement.",
+  "stateReusePages": {
+    "samples": 20,
+    "latencyMs": { "median": 0.772, "p95": 1.056, "min": 0.573, "max": 1.184 }
+  },
+  "freshFirstPages": {
+    "samples": 5,
+    "latencyMs": { "median": 24.044, "p95": 45.818, "min": 9.847, "max": 45.818 }
+  },
+  "complete120RowObservation": {
+    "calls": 5,
+    "latencyMs": { "median": 27.685, "p95": 49.438, "min": 12.740, "max": 49.438 },
+    "resultJsonBytes": { "median": 29044 },
+    "estimatedOutputTextTokensCharsDiv4": { "median": 6548 },
+    "historicalBaseMedianMs": 47.335,
+    "historicalBaseP95Ms": 64.851,
+    "medianReductionPercentVersusHistoricalRun": 41.51
+  },
+  "wholeMixedWorkflow": {
+    "toolLatencySumMs": { "median": 193.065, "p95": 227.795 },
+    "historicalBaseMedianMs": 212.596,
+    "resultJsonBytes": { "median": 39875 },
+    "estimatedOutputTextTokensCharsDiv4": { "median": 8947 }
+  },
+  "schema": {
+    "tools": 6,
+    "descriptorJsonBytes": 7558,
+    "estimatedDescriptorTokensCharsDiv4": 1890,
+    "historicalBaseTools": 5,
+    "historicalBaseDescriptorJsonBytes": 5114,
+    "historicalBaseEstimatedDescriptorTokensCharsDiv4": 1279
+  },
+  "flowQualification": {
+    "browserCallsInsteadOfManualFourCallSequence": 1,
+    "actions": 3,
+    "verifiedStages": 2,
+    "duplicateReplayExtraInputs": 0,
+    "ambiguousTargetInputs": 0,
+    "note": "Correctness/call-count qualification, not an LLM wall-time or token benchmark."
+  },
+  "command": "node scripts/benchmark-mcp-baseline.mjs semantic-fast-path-final 5 1 batched compact",
+  "raw": "Full synthetic run output remains in ignored test-results; this curated summary contains no operator data."
+}

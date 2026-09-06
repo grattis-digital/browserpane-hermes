@@ -8,6 +8,7 @@ import { ObservationRefs } from './observation-refs.mjs';
 export class ObservationStore {
   #idFactory;
   #views = new Map();
+  #states = new Map();
 
   constructor({ idFactory = () => randomBytes(12).toString('base64url') } = {}) {
     if (typeof idFactory !== 'function') throw new ObservationError('invalid_id_factory', 'View ID factory must be callable.');
@@ -18,9 +19,34 @@ export class ObservationStore {
   capture(input) {
     const capture = ObservationInput.capture(input);
     ObservationRefs.from(capture.snapshot); // Validate all raw refs, including off-page duplicates.
-    const projected = ObservationProjection.create(capture.lines, capture.projection);
     const view = this.#nextId();
-    const stored = { view, tab: capture.tab, document: capture.document, url: capture.url, title: capture.title,
+    const state = view;
+    this.#states.set(state, { state, tab: capture.tab, document: capture.document, mutation: capture.mutation,
+      url: capture.url, title: capture.title, snapshot: capture.snapshot });
+    while (this.#states.size > 4) this.#states.delete(this.#states.keys().next().value);
+    return this.#project(capture, state, view);
+  }
+
+  /** Reprojects an immutable raw snapshot without asking Chromium to serialize it again. */
+  reproject(state, options = {}) {
+    const source = this.#states.get(state);
+    if (!source) throw new ObservationError('unknown_state', 'Observation state expired; capture a fresh pane_view.');
+    this.#states.delete(state); this.#states.set(state, source); // Bounded LRU touch.
+    const capture = ObservationInput.capture({ ...source, ...options, tab: source.tab, document: source.document,
+      mutation: source.mutation, url: source.url, title: source.title, snapshot: source.snapshot });
+    return this.#project(capture, state, this.#nextId());
+  }
+
+  source(state) {
+    if (typeof state !== 'string') return undefined;
+    const source = this.#states.get(state);
+    return source ? { state: source.state, tab: source.tab, document: source.document,
+      mutation: source.mutation, url: source.url, title: source.title } : undefined;
+  }
+
+  #project(capture, state, view) {
+    const projected = ObservationProjection.create(capture.lines, capture.projection);
+    const stored = { view, state, tab: capture.tab, document: capture.document, url: capture.url, title: capture.title,
       snapshot: capture.snapshot, projection: capture.projection, ...projected };
     const wire = this.#wire(stored, capture.since);
     this.#views.set(view, stored);
@@ -32,30 +58,34 @@ export class ObservationStore {
   inspect(view) {
     if (typeof view !== 'string') return undefined;
     const stored = this.#views.get(view);
-    return stored ? { ...stored, projection: { ...stored.projection }, refs: new Map(stored.refs),
+    return stored ? { ...stored, projection: structuredClone(stored.projection), refs: new Map(stored.refs),
       truncatedLines: [...stored.truncatedLines] } : undefined;
   }
 
   invalidateTab(tab) {
     if (typeof tab !== 'string') throw new ObservationError('invalid_observation', 'Invalid tab.');
     for (const [view, stored] of this.#views) if (stored.tab === tab) this.#views.delete(view);
+    for (const [state, stored] of this.#states) if (stored.tab === tab) this.#states.delete(state);
   }
+
+  clear() { this.#views.clear(); this.#states.clear(); }
 
   #nextId() {
     for (let attempt = 0; attempt < 4; attempt++) {
       const view = this.#idFactory();
       if (typeof view !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(view))
         throw new ObservationError('invalid_view_id', 'View ID factory returned an invalid ID.');
-      if (!this.#views.has(view)) return view;
+      if (!this.#views.has(view) && !this.#states.has(view)) return view;
     }
     throw new ObservationError('view_id_collision', 'View ID factory repeatedly returned a live ID.');
   }
 
   #wire(stored, since) {
-    const { view, tab, document, url, title, projection, total, next, truncated, truncatedLines, text } = stored;
-    const wire = { view, tab, document, url, title, total, mode: 'full', text };
+    const { view, state, tab, document, url, title, projection, total, matches, next, truncated, truncatedLines, text } = stored;
+    const wire = { view, state, tab, document, url, title, total, mode: 'full', text };
     if (projection.detail !== 'full') wire.detail = projection.detail;
     if (projection.filter) wire.filter = projection.filter;
+    if (matches !== undefined) wire.matches = matches;
     if (projection.offset) wire.offset = projection.offset;
     if (projection.limit !== 120) wire.limit = projection.limit;
     if (projection.maxChars !== 6000) wire.maxChars = projection.maxChars;

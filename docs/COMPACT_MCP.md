@@ -1,6 +1,6 @@
 # Pane MCP v1: fewer round trips, bounded context
 
-Experimental default on `experiment/compact-mcp`. This is an original, small
+Compact mode is the bundle default. This is an original, small
 model-facing protocol **inside standard MCP Streamable HTTP**, not a replacement
 for MCP or the viewer's binary transport. It controls the same persistent Chromium
 through the pinned Playwright/CDP engine; it never launches an agent-only browser.
@@ -30,13 +30,14 @@ avoids a second bridge into the existing engine. A native rewrite is not justifi
 by the measured orchestration bottleneck; future CDP/native changes must have
 their own correctness tests and comparable measurements.
 
-## Five tools
+## Six tools
 
 | Tool | Purpose |
 | --- | --- |
 | `pane_tabs` | List stable tab IDs, the shared default tab, and this MCP session's lease |
 | `pane_view` | Reuse the default existing tab; bounded accessibility observation, exact refs and optional pagination/filter/delta |
 | `pane_act` | Up to eight sequential operations with one outcome and optional observation |
+| `pane_flow` | Up to four semantic stages/eight inputs with verified transitions |
 | `pane_read` | Bounded text/table rows or a numeric column summary from one observed element |
 | `pane_image` | Explicit JPEG screenshot when text is insufficient; never automatic |
 
@@ -64,6 +65,9 @@ Images add a separate image block only when explicitly requested.
    invalidates every client's older view for that tab. Frame navigation/attachment
    invalidates document references. Replaced or renamed targets fail preflight;
    input uses pinned DOM handles, never a guessed replacement.
+6. Each fresh view also returns a `state` handle. It names one immutable raw
+   snapshot retained only in that MCP session. Reuse it for pagination or a
+   targeted semantic projection; it never authorizes input after the tab changes.
 
 Only refs actually included in an untruncated observation may be used. Four
 observations per client are retained. An evicted/stale view requires observation
@@ -97,6 +101,34 @@ the restored pages. Keep custom agent instructions consistent with reuse-first
 behavior; tool descriptions cannot prevent an agent from explicitly requesting
 additional tabs.
 
+### Immutable state and semantic queries
+
+When a view returns `next`, pass its `state` and the next offset rather than
+recapturing the page:
+
+```json
+{"state":"STATE_FROM_REPLY","offset":120}
+```
+
+The server reprojects the same validated raw accessibility snapshot, so pages
+cannot be swallowed or duplicated by a dynamic DOM changing between pagination
+calls. Four raw states per client are retained with LRU eviction. An unknown,
+cross-tab, navigated or locally mutated state fails closed; capture a fresh view.
+Do not combine `state` with `since`: state selects an immutable source, while
+since describes a delta against a retained rendered slice.
+
+For a narrow lookup, add a closed semantic query:
+
+```json
+{"state":"STATE_FROM_REPLY","query":{"role":"button","name":"Save","exact":true},"limit":10}
+```
+
+Role and accessible name are matched case-insensitively against ref-bearing
+accessibility records. `exact` defaults to true; false permits a substring. The
+result reports `matches` and includes structural ancestors. No CSS selector,
+regular expression, script or hidden DOM query is accepted. A query is a smaller
+observation, not permission to guess a ref that was not returned.
+
 ### Example
 
 First pass this to `pane_view` to observe the default existing tab and obtain
@@ -125,6 +157,22 @@ input. `press` uses normal key combinations. `select`, `check`, `hover`, `scroll
 `drag`, and `upload` use browser automation primitives, not injected DOM clicks.
 Select/file input events have the semantics of the corresponding Playwright API;
 not every event is identical to a physical mouse/keyboard event.
+
+When role/name targets and the expected transition are already known, one
+`pane_flow` can cross several verified page states without returning to the model
+after every input:
+
+```json
+{"lease":"FROM_REPLY","request":3,"stages":[{"steps":[{"op":"fill","target":{"role":"textbox","name":"Email"},"text":"ada@example.com"},{"op":"click","target":{"role":"button","name":"Continue"}}],"wait":{"text":"Review","timeoutMs":5000}},{"steps":[{"op":"click","target":{"role":"button","name":"Confirm"}}],"wait":{"url":"https://example.com/done","timeoutMs":5000}}]}
+```
+
+Every stage captures current accessibility state, requires each target to match
+exactly one ref, retains ordinary Playwright actionability and target-change
+guards, and verifies its wait before continuing. Non-final stages require a wait.
+The whole flow is covered by the same lease/request replay ledger as `pane_act`.
+Missing or ambiguous targets cause no input; partial input, dialogs, popups and
+unexpected transitions stop the flow with an exact completed prefix. Flow does
+not open tabs, force clicks, inject code or bypass site challenges.
 
 `navigate`, `back`, `activate`, `close`, `new`, and `dialog` must be standalone.
 Navigation accepts HTTP(S) and `about:blank`, not executable URLs, file URLs or
@@ -162,6 +210,8 @@ a partial aggregate is complete; ARIA-only grids require ordinary observations.
 `mayHaveActed`, `error`, and `observationError` explain partial/uncertain outcomes.
 A failed wait does **not** mean a click or submission was undone. Inspect current
 state before creating a new request number. There is no automatic retry of input.
+`pane_flow` additionally reports completed stages and the failing stage when
+available; an exact replay recovers the recorded result without repeating input.
 
 `wait` supports visible literal text or an exact URL, with a bounded timeout.
 It expresses application readiness; action completion alone does not prove all
@@ -190,10 +240,15 @@ with `offset: next`. `limit` is at most 500, `maxChars` at most 24,576 with a
 silently masquerading as complete. Very long lines are marked and cannot grant
 actionable refs. If ancestor context fills a tiny budget, increase the budget.
 
-`detail: "controls"` and literal `filter` are opt-in projections, not complete
+`detail: "controls"`, literal `filter` and role/name `query` are opt-in projections, not complete
 page extraction. Structural ancestor context is preserved. Full-page comparisons
 must include all continuation responses, not compare a truncated slice with an
 unbounded baseline.
+
+Use `state` for continuation over the same raw snapshot. This avoids another
+Chromium `_snapshotForAI()` call and makes the slices consistent. It does not
+observe later DOM changes. A new `pane_view` without state is required before
+acting on changed content or when fresh state matters.
 
 Supply `since` only if the client retains that exact base observation. A compatible
 smaller delta returns `base` and `splice: {start, deleteCount, lines}`. Apply the
@@ -238,6 +293,9 @@ delete/reconnect preserve the count, and closing the default makes only fresh
 observations select its survivor. Stale leases and old closed-tab actions fail
 instead of creating or retargeting a tab. This is synthetic local evidence,
 not a production profile or Raspberry Pi resource benchmark.
+It also runs a two-stage semantic flow through a real DOM transition, checks the
+exact three-input result, proves request replay adds no input, and proves an
+ambiguous role/name target causes no input.
 
 `scripts/benchmark-mcp-baseline.mjs` uses fresh sandboxed Chromium 146, synthetic
 loopback content, actual MCP HTTP, identical state/event oracles, and no paid
@@ -250,3 +308,6 @@ targeted reads avoid sending the entire table when the task only needs a summary
 Estimates are not provider-token counts, billed costs, network wire bytes,
 model success rates or Raspberry Pi hardware measurements. Optimizations are
 accepted only after equivalent final states and input behavior pass.
+The [semantic fast-path follow-up](benchmarks/README.md#semantic-fast-path-follow-up)
+records immutable-state timing and the added descriptor cost separately from
+these original baseline claims.

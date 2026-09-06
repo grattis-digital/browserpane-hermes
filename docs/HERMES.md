@@ -110,13 +110,14 @@ tool names are prefixed `mcp__browserpane__`; the exclusion list uses the origin
 unprefixed names. Native Hermes browser tools are disabled. Parallel tool calls
 and server-initiated model sampling are not enabled for this shared browser.
 
-Compact MCP is the default. It advertises exactly five tools:
+Compact MCP is the default. It advertises exactly six tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `pane_tabs` | List the human's shared tabs and obtain the current session lease |
 | `pane_view` | Read bounded accessibility text with observed element references |
 | `pane_act` | Run up to eight ordered browser actions with explicit outcomes |
+| `pane_flow` | Run bounded multi-stage role/name actions with verified transitions |
 | `pane_read` | Read bounded text, table rows or a numeric summary from an observed element |
 | `pane_image` | Request a viewport or observed-element screenshot when text is insufficient |
 
@@ -146,10 +147,16 @@ not replace the instructions already present in an ongoing conversation.
 Existing custom instructions and seeded configuration are not overwritten.
 
 Observations have explicit pagination/truncation. Request the next slice when
-`next` is returned, and do not act on a target absent from the returned slice.
+`next` is returned. Reuse the returned `state` with the next `offset` to avoid a
+new Chromium snapshot and keep pagination internally consistent. Use `query`
+with a role and/or accessible name when the goal needs only a few controls. Do
+not act on a target absent from the returned slice.
 Deltas are opt-in: only pass `since` while retaining that exact base; otherwise
 read a complete slice. A completed action is not rolled back if a later action or
 postcondition fails. Inspect the reported completion/error before proceeding.
+Use `pane_flow` only when every stage's semantic targets and transition
+postconditions are known. It fails before input on missing or ambiguous targets;
+an unexpected popup, dialog, partial stage or failed postcondition stops the flow.
 There is no default arbitrary-JavaScript tool, automatic console dump, model
 sampling, stealth patch or CAPTCHA bypass. Use the viewer for challenges and MFA.
 
@@ -271,7 +278,7 @@ docker compose exec hermes python /opt/hermes-bundle/verify.py --mcp
 ```
 
 This checks the pinned revision, native imports, linked SQLite/FTS5, MCP
-connectivity and the exact five compact tools, including the absence of legacy
+connectivity and the exact six compact tools, including the absence of legacy
 close/install tools. For an intentionally configured legacy server, use
 `--mcp --mcp-mode playwright`; that option changes only verification expectations,
 not the server or saved config. The verifier lists tools but does not navigate a page,

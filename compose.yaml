@@ -22,6 +22,7 @@ services:
       BPANE_CHROMIUM_DEBUG_ADDRESS: 127.0.0.1
       BPANE_CDP_PROXY_ENABLE: "0"
       BPANE_MCP_MODE: ${BPANE_MCP_MODE:-compact}
+      BPANE_MCP_TIMINGS: ${BPANE_MCP_TIMINGS:-0}
       RUST_LOG: warn
     ports:
       - target: 4433

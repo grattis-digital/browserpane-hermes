@@ -93,7 +93,7 @@ try {
   browser = await RuntimeCdp.browser(); originalPid = await pid();
   await client.connect(transport);
   const { tools } = await client.listTools();
-  if (mode === 'compact') assert.deepEqual(tools.map(tool => tool.name).sort(), ['pane_act', 'pane_image', 'pane_read', 'pane_tabs', 'pane_view']);
+  if (mode === 'compact') assert.deepEqual(tools.map(tool => tool.name).sort(), ['pane_act', 'pane_flow', 'pane_image', 'pane_read', 'pane_tabs', 'pane_view']);
   else assert(tools.some(tool => tool.name === 'browser_run_code'));
   const before = await inventory();
   await driver.open(); opened = true;
