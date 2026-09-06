@@ -1,0 +1,349 @@
+diff --git a/code/apps/bpane-host/src/cdp_video.rs b/code/apps/bpane-host/src/cdp_video.rs
+index a20c72f9..c7293e81 100644
+--- a/code/apps/bpane-host/src/cdp_video.rs
++++ b/code/apps/bpane-host/src/cdp_video.rs
+@@ -15,6 +15,10 @@ use crate::capture::ffmpeg::CaptureRegion;
+ #[path = "cdp_video/resize_tests.rs"]
+ mod resize_tests;
+ 
++#[cfg(test)]
++#[path = "cdp_video/browser_resize_tests.rs"]
++mod browser_resize_tests;
++
+ const DEFAULT_DEBUG_PORT: u16 = 9222;
+ const DEFAULT_POLL_MS: u64 = 80;
+ const EVAL_TIMEOUT_MS: u64 = 450;
+@@ -253,8 +257,13 @@ pub async fn resize_visible_target_window(width: u16, height: u16) -> bool {
+         return false;
+     };
+ 
+-    let resized = resize_window_via_stream(
+-        &mut stream,
++    let Some(window) = cdp_window_info(&mut stream, &mut request_id).await else {
++        return false;
++    };
++    let resized = resize_window_via_browser(
++        &http,
++        debug_port,
++        window,
+         u32::from(width),
+         u32::from(height),
+         hint.device_scale_factor_milli,
+@@ -278,6 +287,51 @@ pub async fn resize_visible_target_window(width: u16, height: u16) -> bool {
+     resized
+ }
+ 
++async fn resize_window_via_browser(
++    http: &reqwest::Client,
++    port: u16,
++    window: CdpWindowInfo,
++    width: u32,
++    height: u32,
++    scale_milli: u16,
++    request_id: &mut u64,
++) -> bool {
++    // A page target can close while its top-level window remains alive. Do not
++    // normalize that window until a page-independent control stream is ready.
++    let Some(mut stream) = connect_browser_stream(http, port).await else {
++        return false;
++    };
++    resize_window_via_stream(
++        &mut stream,
++        window,
++        width,
++        height,
++        scale_milli,
++        request_id,
++    )
++    .await
++}
++
++async fn connect_browser_stream(http: &reqwest::Client, port: u16) -> Option<CdpWsStream> {
++    let endpoint = format!("http://127.0.0.1:{port}/json/version");
++    let metadata = http
++        .get(endpoint)
++        .send()
++        .await
++        .ok()?
++        .error_for_status()
++        .ok()?
++        .json::<Value>()
++        .await
++        .ok()?;
++    let url = metadata.get("webSocketDebuggerUrl")?.as_str()?;
++    let (stream, _) = tokio::time::timeout(Duration::from_millis(1200), connect_async(url))
++        .await
++        .ok()?
++        .ok()?;
++    Some(stream)
++}
++
+ const VIDEO_PROBE_JS_TEMPLATE: &str = r#"(() => {
+   try {
+     const ctlKey = "__bpaneVideoCtl";
+@@ -1298,15 +1352,12 @@ fn reject_pending_text_commands(text_rx: &mut mpsc::Receiver<TextCommand>) {
+ 
+ async fn resize_window_via_stream(
+     stream: &mut CdpWsStream,
++    window: CdpWindowInfo,
+     width: u32,
+     height: u32,
+     scale_milli: u16,
+     request_id: &mut u64,
+ ) -> bool {
+-    let Some(window) = cdp_window_info(stream, request_id).await else {
+-        return false;
+-    };
+-
+     let dip_width = screen_px_to_window_dips(width, scale_milli);
+     let dip_height = screen_px_to_window_dips(height, scale_milli);
+     let restore_state = window
+diff --git a/code/apps/bpane-host/src/cdp_video/resize_tests.rs b/code/apps/bpane-host/src/cdp_video/resize_tests.rs
+index 85fed0c7..9debcc94 100644
+--- a/code/apps/bpane-host/src/cdp_video/resize_tests.rs
++++ b/code/apps/bpane-host/src/cdp_video/resize_tests.rs
+@@ -66,7 +66,10 @@ async fn scripted_resize(
+     let mut results = Vec::new();
+     let mut request_id = 1;
+     for _ in 0..resize_count {
+-        results.push(resize_window_via_stream(&mut stream, 1200, 766, 1000, &mut request_id).await);
++        let window = cdp_window_info(&mut stream, &mut request_id).await.unwrap();
++        results.push(
++            resize_window_via_stream(&mut stream, window, 1200, 766, 1000, &mut request_id).await,
++        );
+     }
+     stream.close(None).await.unwrap();
+     (results, peer.await.unwrap())
+diff --git a/code/apps/bpane-host/src/cdp_video/browser_resize_tests.rs b/code/apps/bpane-host/src/cdp_video/browser_resize_tests.rs
+new file mode 100644
+index 00000000..2404a8dd
+--- /dev/null
++++ b/code/apps/bpane-host/src/cdp_video/browser_resize_tests.rs
+@@ -0,0 +1,227 @@
++//! Window control must outlive the page used to identify that window.
++
++use super::*;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::net::TcpListener;
++
++async fn version_peer(metadata: Value) -> (u16, JoinHandle<()>) {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let port = listener.local_addr().unwrap().port();
++    let task = tokio::spawn(async move {
++        let (mut socket, _) = listener.accept().await.unwrap();
++        let mut request = Vec::new();
++        while !request.ends_with(b"\r\n\r\n") {
++            assert!(request.len() < 8192, "oversized private HTTP request");
++            request.push(socket.read_u8().await.unwrap());
++        }
++        assert!(request.starts_with(b"GET /json/version HTTP/1.1\r\n"));
++        let body = metadata.to_string();
++        let response = format!(
++            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++            body.len()
++        );
++        socket.write_all(response.as_bytes()).await.unwrap();
++    });
++    (port, task)
++}
++
++async fn browser_peer(
++    window_exists: bool,
++    close_page: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
++) -> (String, JoinHandle<Vec<Value>>) {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let task = tokio::spawn(async move {
++        let (socket, _) = listener.accept().await.unwrap();
++        let mut stream = tokio_tungstenite::accept_async(socket).await.unwrap();
++        let mut commands = Vec::new();
++        let mut close_page = close_page;
++        for _ in 0..3 {
++            let message = stream.next().await.unwrap().unwrap();
++            let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
++            // Browser.getWindowForTarget without an explicit target is not
++            // valid on the browser endpoint: identification belongs to page CDP.
++            assert_eq!(command["method"], "Browser.setWindowBounds");
++            assert_eq!(command["params"]["windowId"], 42);
++            let response = if window_exists {
++                json!({ "id": command["id"], "result": {} })
++            } else {
++                json!({ "id": command["id"], "error": {
++                    "code": -32000, "message": "Browser window not found"
++                }})
++            };
++            commands.push(command["params"]["bounds"].clone());
++            stream
++                .send(Message::Text(response.to_string().into()))
++                .await
++                .unwrap();
++            if let Some((close, closed)) = close_page.take() {
++                assert_eq!(commands[0], json!({ "windowState": "normal" }));
++                close.send(()).unwrap();
++                closed.await.unwrap();
++            }
++        }
++        commands
++    });
++    (
++        format!("ws://{address}/devtools/browser/private-test"),
++        task,
++    )
++}
++
++fn http_client() -> reqwest::Client {
++    reqwest::Client::builder()
++        .timeout(Duration::from_secs(2))
++        .build()
++        .unwrap()
++}
++
++fn pinned_window() -> CdpWindowInfo {
++    CdpWindowInfo {
++        window_id: 42,
++        window_state: Some("maximized".to_owned()),
++    }
++}
++
++#[tokio::test]
++async fn page_closure_after_normal_does_not_interrupt_browser_owned_restore() {
++    tokio::time::timeout(Duration::from_secs(5), async {
++        let page_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let page_address = page_listener.local_addr().unwrap();
++        let (close_tx, close_rx) = oneshot::channel();
++        let (closed_tx, closed_rx) = oneshot::channel();
++        let page_peer = tokio::spawn(async move {
++            let (socket, _) = page_listener.accept().await.unwrap();
++            let mut page = tokio_tungstenite::accept_async(socket).await.unwrap();
++            let message = page.next().await.unwrap().unwrap();
++            let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
++            assert_eq!(command["method"], "Browser.getWindowForTarget");
++            let reply = json!({ "id": command["id"], "result": {
++                "windowId": 42, "bounds": { "windowState": "maximized" }
++            }});
++            page.send(Message::Text(reply.to_string().into()))
++                .await
++                .unwrap();
++            close_rx.await.unwrap();
++            page.close(None).await.unwrap();
++            closed_tx.send(()).unwrap();
++        });
++        let (mut page, _) =
++            connect_async(format!("ws://{page_address}/devtools/page/private-test"))
++                .await
++                .unwrap();
++        let mut request_id = 1;
++        let window = cdp_window_info(&mut page, &mut request_id).await.unwrap();
++        let (browser_url, browser_peer) = browser_peer(true, Some((close_tx, closed_rx))).await;
++        let (port, version_peer) =
++            version_peer(json!({ "webSocketDebuggerUrl": browser_url })).await;
++        assert!(
++            resize_window_via_browser(
++                &http_client(),
++                port,
++                window,
++                1280,
++                720,
++                1000,
++                &mut request_id
++            )
++            .await
++        );
++        let closed = page.next().await;
++        assert!(matches!(
++            closed,
++            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
++        ));
++        assert_eq!(
++            browser_peer.await.unwrap(),
++            [
++                json!({ "windowState": "normal" }),
++                json!({ "left": 0, "top": 0, "width": 1280, "height": 720 }),
++                json!({ "windowState": "maximized" }),
++            ]
++        );
++        page_peer.await.unwrap();
++        version_peer.await.unwrap();
++    })
++    .await
++    .expect("private page-closure exchange timed out");
++}
++
++#[tokio::test]
++async fn closed_window_is_not_retargeted_or_reported_as_success() {
++    let (browser_url, peer) = browser_peer(false, None).await;
++    let (port, version) = version_peer(json!({ "webSocketDebuggerUrl": browser_url })).await;
++    assert!(
++        !resize_window_via_browser(
++            &http_client(),
++            port,
++            pinned_window(),
++            1280,
++            720,
++            1000,
++            &mut 1
++        )
++        .await
++    );
++    assert_eq!(peer.await.unwrap().len(), 3); // All attempts kept window_id 42.
++    version.await.unwrap();
++}
++
++#[tokio::test]
++async fn missing_browser_endpoint_aborts_before_window_mutation() {
++    for metadata in [json!({}), json!({ "webSocketDebuggerUrl": null })] {
++        let (port, version) = version_peer(metadata).await;
++        assert!(
++            !resize_window_via_browser(
++                &http_client(),
++                port,
++                pinned_window(),
++                1280,
++                720,
++                1000,
++                &mut 1
++            )
++            .await
++        );
++        version.await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn rejected_browser_connection_aborts_before_window_mutation() {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let reject = tokio::spawn(async move {
++        let (mut socket, _) = listener.accept().await.unwrap();
++        let mut request = Vec::new();
++        while !request.ends_with(b"\r\n\r\n") {
++            assert!(request.len() < 8192);
++            request.push(socket.read_u8().await.unwrap());
++        }
++        assert!(request.starts_with(b"GET /devtools/browser/private-test HTTP/1.1\r\n"));
++        socket
++            .write_all(
++                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
++            )
++            .await
++            .unwrap();
++    });
++    let (port, version) = version_peer(
++        json!({ "webSocketDebuggerUrl": format!("ws://{address}/devtools/browser/private-test") }),
++    )
++    .await;
++    assert!(
++        !resize_window_via_browser(
++            &http_client(),
++            port,
++            pinned_window(),
++            1280,
++            720,
++            1000,
++            &mut 1
++        )
++        .await
++    );
++    reject.await.unwrap();
++    version.await.unwrap();
++}

@@ -1,0 +1,175 @@
+name: Bundle correctness and images
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  javascript:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: sh scripts/fetch-upstream.sh
+      - run: node scripts/audit-upstream.mjs
+      - run: npm test
+      - run: npm run test:client
+      - run: npm run build
+      - run: python3 -m unittest discover -s hermes -p 'test_*.py' -v
+      - run: docker compose --env-file .env.example config --quiet
+      - name: Validate workflow syntax and embedded shell
+        run: |
+          docker run --rm --network none -i \
+            rhysd/actionlint:1.7.11@sha256:6f03470d0152251d7f07f7c4dc019dbe7024c72cd952f839544c7798843efa8f \
+            - < .github/workflows/bundle.yml
+      - name: Install isolated test Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Real WebGL and Canvas2D fallback pixel correctness
+        run: |
+          BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
+          export BPANE_TEST_BROWSER_PATH
+          npm run test:webgl
+
+  linux:
+    needs: javascript
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # Only the guarded post-test step uses this. Fork PR tokens stay read-only.
+      packages: write
+    env:
+      ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: sh scripts/fetch-upstream.sh
+      - name: Native host/gateway and private X11 regressions
+        run: |
+          set -euo pipefail
+          native_run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCHITECTURE"
+          export BPANE_PIPELINE_TEST_REGISTRY_VOLUME="browserpane-pipeline-ci-$native_run-cargo"
+          export BPANE_PIPELINE_TEST_TARGET_VOLUME="browserpane-pipeline-ci-$native_run-target"
+          for volume in "$BPANE_PIPELINE_TEST_REGISTRY_VOLUME" "$BPANE_PIPELINE_TEST_TARGET_VOLUME"; do
+            if docker volume inspect "$volume" >/dev/null 2>&1; then exit 1; fi
+            docker volume create --label "browserpane.test.run=$native_run" "$volume"
+          done
+          cleanup_native() {
+            for volume in "$BPANE_PIPELINE_TEST_REGISTRY_VOLUME" "$BPANE_PIPELINE_TEST_TARGET_VOLUME"; do
+              test "$(docker volume inspect "$volume" --format '{{index .Labels "browserpane.test.run"}}')" = "$native_run"
+              docker volume rm "$volume"
+            done
+          }
+          trap cleanup_native EXIT
+          npm run test:linux
+      - name: Build the actual browser image natively
+        run: docker build --build-arg VCS_REF="$GITHUB_SHA" --tag browserpane-hermes:test .
+      - name: Real MCP, downloads and persistent profile across restart/recreate
+        run: npm run test:runtime
+      - name: Build lean Hermes image natively
+        run: docker build --tag browserpane-hermes-agent:test ./hermes
+      - name: Assert both image architectures match the native runner
+        run: |
+          test "$(docker image inspect browserpane-hermes:test --format '{{.Architecture}}')" = "$ARCHITECTURE"
+          test "$(docker image inspect browserpane-hermes-agent:test --format '{{.Architecture}}')" = "$ARCHITECTURE"
+      - name: Real Hermes gateway/MCP and persistence, no paid model
+        run: python3 hermes/check-container.py --image browserpane-hermes-agent:test
+      - name: Actual three-service Compose ingress and shared Hermes MCP
+        run: node scripts/test-compose.mjs browserpane-hermes:test browserpane-hermes-agent:test
+      - name: Install isolated test Chromium
+        if: matrix.architecture == 'amd64'
+        run: npx playwright install --with-deps chromium
+      - name: Full viewer, scroll and display geometry against real X11 pixels
+        if: matrix.architecture == 'amd64'
+        run: |
+          BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
+          export BPANE_TEST_BROWSER_PATH
+          node scripts/test-viewer.mjs browserpane-hermes:test
+      - name: Synthetic failure/checkpoint reports
+        if: always() && matrix.architecture == 'amd64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-viewer-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Publish run-scoped tested architecture images only
+        if: >-
+          github.event_name == 'push' && github.repository == 'grattis-digital/browserpane-hermes' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; fi
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null' EXIT
+          for image in browserpane-hermes browserpane-hermes-agent; do
+            destination="ghcr.io/grattis-digital/$image:ci-$GITHUB_RUN_ID-$GITHUB_SHA-$ARCHITECTURE"
+            docker tag "$image:test" "$destination"
+            docker push "$destination"
+          done
+
+  publish-manifests:
+    needs: [javascript, linux]
+    if: >-
+      github.event_name == 'push' && github.repository == 'grattis-digital/browserpane-hermes' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      # No checkout or PR artifact execution in the final privileged job.
+      - name: Combine only the two images qualified by this successful run
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then public_tag=main
+          else
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
+            public_tag="$GITHUB_REF_NAME"
+          fi
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null' EXIT
+          for image in browserpane-hermes browserpane-hermes-agent; do
+            repository="ghcr.io/grattis-digital/$image"
+            docker buildx imagetools create --tag "$repository:$public_tag" --tag "$repository:sha-$GITHUB_SHA" \
+              "$repository:ci-$GITHUB_RUN_ID-$GITHUB_SHA-amd64" \
+              "$repository:ci-$GITHUB_RUN_ID-$GITHUB_SHA-arm64"
+          done

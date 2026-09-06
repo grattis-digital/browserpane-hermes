@@ -1,0 +1,116 @@
+diff --git a/code/apps/bpane-gateway/src/app/builders/runtime.rs b/code/apps/bpane-gateway/src/app/builders/runtime.rs
+index d31087d..9094ab9 100644
+--- a/code/apps/bpane-gateway/src/app/builders/runtime.rs
++++ b/code/apps/bpane-gateway/src/app/builders/runtime.rs
+@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail};
+ use tracing::{info, warn};
+ use wtransport::Identity;
+ 
+-use crate::config::Config;
++use crate::config::{Config, GatewayConfig};
+ use crate::session_control::SessionStore;
+ use crate::session_manager::{
+     SessionManager, SessionManagerBrokerConfig, SessionManagerConfig, SessionManagerDockerConfig,
+@@ -20,13 +20,7 @@ use super::{
+ 
+ impl RuntimeServices {
+     pub(in crate::app) async fn build(config: &Config) -> anyhow::Result<Self> {
+-        let bind_addr =
+-            parse_socket_addr(&config.gateway.bind, config.gateway.port, "gateway bind")?;
+-        let api_bind_addr = parse_socket_addr(
+-            &config.gateway.bind,
+-            config.gateway.api_port,
+-            "gateway API bind",
+-        )?;
++        let (bind_addr, api_bind_addr) = gateway_bind_addresses(&config.gateway)?;
+         let identity = build_identity(config).await?;
+         let registry = Arc::new(SessionRegistry::new(
+             config.gateway.max_viewers,
+@@ -62,12 +56,57 @@ async fn build_identity(config: &Config) -> anyhow::Result<Identity> {
+     }
+ }
+ 
++fn gateway_bind_addresses(config: &GatewayConfig) -> anyhow::Result<(SocketAddr, SocketAddr)> {
++    let transport = parse_socket_addr(&config.bind, config.port, "gateway bind")?;
++    let api = parse_socket_addr(
++        config.api_bind.as_deref().unwrap_or(&config.bind),
++        config.api_port,
++        "gateway API bind",
++    )?;
++    Ok((transport, api))
++}
++
+ fn parse_socket_addr(bind: &str, port: u16, label: &str) -> anyhow::Result<SocketAddr> {
+     format!("{bind}:{port}")
+         .parse()
+         .map_err(|error| anyhow!("invalid {label} address '{bind}:{port}': {error}"))
+ }
+ 
++#[cfg(test)]
++mod listener_tests {
++    use super::gateway_bind_addresses;
++    use crate::config::Config;
++    use clap::Parser;
++
++    #[test]
++    fn omitted_api_bind_preserves_existing_bind_contract() {
++        let config = Config::parse_from(["bpane-gateway", "--bind", "192.0.2.1"]);
++        let (transport, api) = gateway_bind_addresses(&config.gateway).unwrap();
++        assert_eq!(transport.to_string(), "192.0.2.1:4433");
++        assert_eq!(api.to_string(), "192.0.2.1:8932");
++    }
++
++    #[test]
++    fn private_api_bind_does_not_move_public_transport() {
++        let config = Config::parse_from([
++            "bpane-gateway",
++            "--bind",
++            "0.0.0.0",
++            "--api-bind",
++            "127.0.0.1",
++        ]);
++        let (transport, api) = gateway_bind_addresses(&config.gateway).unwrap();
++        assert_eq!(transport.to_string(), "0.0.0.0:4433");
++        assert_eq!(api.to_string(), "127.0.0.1:8932");
++    }
++
++    #[test]
++    fn invalid_api_bind_fails_without_falling_back_to_public() {
++        let config = Config::parse_from(["bpane-gateway", "--api-bind", "not-an-address"]);
++        assert!(gateway_bind_addresses(&config.gateway).is_err());
++    }
++}
++
+ pub(in crate::app) fn build_session_manager_config(
+     config: &Config,
+ ) -> anyhow::Result<SessionManagerConfig> {
+diff --git a/code/apps/bpane-gateway/src/config/gateway.rs b/code/apps/bpane-gateway/src/config/gateway.rs
+index bf3cf97..3591f39 100644
+--- a/code/apps/bpane-gateway/src/config/gateway.rs
++++ b/code/apps/bpane-gateway/src/config/gateway.rs
+@@ -24,6 +24,10 @@ pub struct GatewayConfig {
+     #[arg(long, default_value_t = 8932)]
+     pub api_port: u16,
+ 
++    /// HTTP API bind address; defaults to --bind for backward compatibility.
++    #[arg(long)]
++    pub api_bind: Option<String>,
++
+     /// Public browser-facing gateway URL returned in session connect metadata.
+     #[arg(long, default_value = "https://localhost:4433")]
+     pub public_gateway_url: String,
+diff --git a/deploy/start-host.sh b/deploy/start-host.sh
+index 9ec7e5e..6cae6ae 100644
+--- a/deploy/start-host.sh
++++ b/deploy/start-host.sh
+@@ -539,7 +539,8 @@ sleep 5
+ # Chromium ignores --remote-debugging-address on newer versions and binds CDP
+ # to 127.0.0.1 only. Proxy it on a separate port (default 9223) bound to all
+ # interfaces so the MCP bridge container can reach it via the Docker network.
+-if [ "${BPANE_CHROMIUM_DEBUG_ENABLE:-1}" != "0" ]; then
++# Colocated MCP deployments disable this otherwise unauthenticated extra listener.
++if [ "${BPANE_CHROMIUM_DEBUG_ENABLE:-1}" != "0" ] && [ "${BPANE_CDP_PROXY_ENABLE:-1}" != "0" ]; then
+   CDP_PORT="${BPANE_CHROMIUM_DEBUG_PORT:-9222}"
+   CDP_PROXY_PORT="${BPANE_CDP_PROXY_PORT:-9223}"
+   socat TCP-LISTEN:"${CDP_PROXY_PORT}",fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:"${CDP_PORT}" &
+

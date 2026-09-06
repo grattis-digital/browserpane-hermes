@@ -1,0 +1,1206 @@
+diff --git a/code/apps/bpane-gateway/src/session_hub.rs b/code/apps/bpane-gateway/src/session_hub.rs
+--- a/code/apps/bpane-gateway/src/session_hub.rs
++++ b/code/apps/bpane-gateway/src/session_hub.rs
+@@ -48,7 +48,7 @@
+     owner_id: AtomicU64,
+     active: Arc<AtomicBool>,
+     cached_session_ready: Arc<Mutex<Option<Arc<Frame>>>>,
+-    cached_keyframe: Arc<Mutex<Option<Arc<Frame>>>>,
++    cached_keyframe: Arc<Mutex<Option<Vec<Arc<Frame>>>>>,
+     cached_grid_config: Arc<Mutex<Option<Arc<Frame>>>>,
+     /// When true, MCP automation is active for the session.
+     mcp_is_owner: AtomicBool,
+@@ -104,7 +104,7 @@
+         let (broadcast_tx, _) = broadcast::channel::<Arc<Frame>>(BROADCAST_CAPACITY);
+         let current_resolution = Arc::new(Mutex::new((0u16, 0u16)));
+         let cached_session_ready: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
+-        let cached_keyframe: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
++        let cached_keyframe = Arc::new(Mutex::new(None));
+         let cached_grid_config: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
+         let active = Arc::new(AtomicBool::new(true));
+ 
+diff --git a/code/apps/bpane-gateway/src/session_hub/membership.rs b/code/apps/bpane-gateway/src/session_hub/membership.rs
+--- a/code/apps/bpane-gateway/src/session_hub/membership.rs
++++ b/code/apps/bpane-gateway/src/session_hub/membership.rs
+@@ -2,6 +2,7 @@
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
++use bpane_protocol::channel::ChannelId;
+ use bpane_protocol::frame::Frame;
+ use bpane_protocol::ControlMessage;
+ use tokio::sync::{mpsc, oneshot};
+@@ -80,7 +81,8 @@
+         .insert(client_id, termination_tx);
+ 
+     let from_host = hub.broadcast_tx.subscribe();
+-    let initial_frames = gather_initial_frames(hub).await;
++    let mut initial_frames = gather_initial_frames(hub).await;
++    retain_ordered_video_bootstrap(&mut initial_frames, &from_host);
+     let initial_access_state = super::policy::initial_access_state(hub, client_id).await;
+ 
+     if should_request_join_repaint(hub, client_role, prev_count).await {
+@@ -198,7 +200,74 @@
+         initial_frames.push(gc.clone());
+     }
+     if let Some(kf) = hub.cached_keyframe.lock().await.as_ref() {
+-        initial_frames.push(kf.clone());
++        initial_frames.extend(kf.iter().cloned());
+     }
+     initial_frames
+ }
++
++fn retain_ordered_video_bootstrap(
++    initial_frames: &mut Vec<Arc<Frame>>,
++    from_host: &tokio::sync::broadcast::Receiver<Arc<Frame>>,
++) {
++    // subscribe() precedes async cache gathering. A newer IDR may be cached
++    // while older P frames are already queued for this viewer; prepending it
++    // would replay those old deltas against the wrong reference picture.
++    // Without an atomic GOP snapshot, only an empty queue proves the optional
++    // bootstrap bundle can safely precede all future live video frames.
++    if !from_host.is_empty() {
++        initial_frames.retain(|frame| frame.channel != ChannelId::Video);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn initial_frames() -> Vec<Arc<Frame>> {
++        vec![
++            Arc::new(Frame::new(ChannelId::Control, vec![0x03, 1, 0])),
++            Arc::new(Frame::new(ChannelId::Tiles, vec![0x01])),
++            Arc::new(Frame::new(ChannelId::Video, vec![7])),
++            Arc::new(Frame::new(ChannelId::Video, vec![8])),
++            Arc::new(Frame::new(ChannelId::Video, vec![5])),
++        ]
++    }
++
++    #[test]
++    fn newer_cached_idr_is_not_prepended_to_already_queued_old_p_frames() {
++        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
++        let old_delta = Arc::new(Frame::new(ChannelId::Video, vec![1]));
++        tx.send(old_delta.clone()).unwrap();
++        // Model the pump completing/caching a newer IDR while gather awaits.
++        let mut frames = initial_frames();
++        tx.send(frames.last().unwrap().clone()).unwrap();
++        retain_ordered_video_bootstrap(&mut frames, &rx);
++        assert_eq!(
++            frames.iter().map(|frame| frame.channel).collect::<Vec<_>>(),
++            [ChannelId::Control, ChannelId::Tiles]
++        );
++        assert_eq!(
++            rx.try_recv().unwrap(),
++            old_delta,
++            "live ordering and nonvideo bootstrap remain untouched"
++        );
++    }
++
++    #[test]
++    fn empty_live_queue_preserves_complete_bootstrap_before_future_deltas() {
++        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
++        let mut frames = initial_frames();
++        retain_ordered_video_bootstrap(&mut frames, &rx);
++        assert_eq!(frames.len(), 5);
++        assert_eq!(
++            frames[2..]
++                .iter()
++                .map(|frame| frame.payload[0])
++                .collect::<Vec<_>>(),
++            [7, 8, 5]
++        );
++        let future_delta = Arc::new(Frame::new(ChannelId::Video, vec![1]));
++        tx.send(future_delta.clone()).unwrap();
++        assert_eq!(rx.try_recv().unwrap(), future_delta);
++    }
++}
+diff --git a/code/apps/bpane-gateway/src/session_hub/pump.rs b/code/apps/bpane-gateway/src/session_hub/pump.rs
+--- a/code/apps/bpane-gateway/src/session_hub/pump.rs
++++ b/code/apps/bpane-gateway/src/session_hub/pump.rs
+@@ -3,6 +3,7 @@
+ 
+ use bpane_protocol::channel::ChannelId;
+ use bpane_protocol::frame::Frame;
++use bpane_protocol::{ControlMessage, TileMessage, VideoDatagram, VideoTileInfo};
+ use tokio::sync::{broadcast, mpsc, Mutex};
+ use tracing::{info, warn};
+ 
+@@ -11,11 +12,181 @@
+ pub(super) struct PumpState {
+     pub(super) active: Arc<AtomicBool>,
+     pub(super) cached_grid_config: Arc<Mutex<Option<Arc<Frame>>>>,
+-    pub(super) cached_keyframe: Arc<Mutex<Option<Arc<Frame>>>>,
++    pub(super) cached_keyframe: Arc<Mutex<Option<Vec<Arc<Frame>>>>>,
+     pub(super) cached_session_ready: Arc<Mutex<Option<Arc<Frame>>>>,
+     pub(super) current_resolution: Arc<Mutex<(u16, u16)>>,
+ }
+ 
++#[derive(Default)]
++struct BootstrapVideoState {
++    tile_screen: Option<(u16, u16)>,
++    region: Option<VideoTileInfo>,
++    pending_keyframe: Option<PendingKeyframe>,
++    sps: Option<ParameterSet>,
++    pps: Option<ParameterSet>,
++    invalidated: bool,
++}
++
++// Bootstrap is an optional latency optimization, not a second video stream.
++// Keep at most one bounded in-progress NAL, two parameter sets, and the last
++// complete three-frame SPS/PPS/IDR bootstrap bundle.
++const MAX_BOOTSTRAP_KEYFRAME_BYTES: usize = 4 * 1024 * 1024;
++const MAX_BOOTSTRAP_KEYFRAME_FRAGMENTS: u16 = 4096;
++const MAX_BOOTSTRAP_PARAMETER_BYTES: usize = 64 * 1024;
++
++struct ParameterSet {
++    frame: Arc<Frame>,
++    nal_id: u32,
++    pts_us: u64,
++}
++
++struct PendingKeyframe {
++    video: VideoDatagram,
++    next_fragment: u16,
++}
++
++impl BootstrapVideoState {
++    fn invalidate(&mut self) {
++        self.pending_keyframe = None;
++        self.sps = None;
++        self.pps = None;
++        self.invalidated = true;
++    }
++
++    fn bundle(&mut self, complete: Frame) -> Option<Vec<Arc<Frame>>> {
++        let video = VideoDatagram::decode(&complete.payload).ok()?;
++        let follows = |previous: &ParameterSet| {
++            let delta = video.nal_id.wrapping_sub(previous.nal_id);
++            delta > 0 && delta < 0x8000_0000 && video.pts_us >= previous.pts_us
++        };
++        let nal_type = annex_b_nal_type(&video.data);
++        if matches!(nal_type, Some(7 | 8)) {
++            // Parameters can change before the next IDR. Never replay an old
++            // IDR with new parameters, or retain arbitrary SEI/user payloads.
++            self.invalidated = true;
++            if video.data.len() > MAX_BOOTSTRAP_PARAMETER_BYTES {
++                self.invalidate();
++                return None;
++            }
++            let parameter = ParameterSet {
++                frame: Arc::new(complete),
++                nal_id: video.nal_id,
++                pts_us: video.pts_us,
++            };
++            if nal_type == Some(7) {
++                self.sps = Some(parameter);
++                self.pps = None;
++            } else if self.sps.as_ref().is_some_and(follows) {
++                self.pps = Some(parameter);
++            } else {
++                self.invalidate();
++            }
++            return None;
++        }
++        if nal_type != Some(5) {
++            return None;
++        }
++        let (sps, pps) = (self.sps.as_ref()?, self.pps.as_ref()?);
++        if !follows(pps) {
++            self.invalidate();
++            return None;
++        }
++        Some(vec![
++            sps.frame.clone(),
++            pps.frame.clone(),
++            Arc::new(complete),
++        ])
++    }
++
++    fn owns(&self, video: &VideoDatagram) -> bool {
++        match self.tile_screen {
++            Some(_) => self.region.is_some() && video.tile_info == self.region,
++            None => video.tile_info.is_none(),
++        }
++    }
++
++    fn observe_video(&mut self, frame: &Frame) -> Option<Frame> {
++        // Reject before decoding a malicious/oversized encoded fragment. Live
++        // forwarding is unaffected; this is only the optional bootstrap cache.
++        if frame.payload.len() > MAX_BOOTSTRAP_KEYFRAME_BYTES + 34 {
++            self.invalidate();
++            return None;
++        }
++        let Ok(video) = VideoDatagram::decode(&frame.payload) else {
++            self.invalidate();
++            return None;
++        };
++        if !video.is_keyframe
++            || !self.owns(&video)
++            || video.fragment_total == 0
++            || video.fragment_total > MAX_BOOTSTRAP_KEYFRAME_FRAGMENTS
++            || video.fragment_seq >= video.fragment_total
++            || video.data.len() > MAX_BOOTSTRAP_KEYFRAME_BYTES
++        {
++            self.invalidate();
++            return None;
++        }
++        if video.fragment_total == 1 {
++            self.pending_keyframe = None;
++            return Some(frame.clone());
++        }
++        if video.fragment_seq == 0 {
++            self.pending_keyframe = Some(PendingKeyframe {
++                video,
++                next_fragment: 1,
++            });
++            return None;
++        }
++        let pending = self.pending_keyframe.as_mut()?;
++        if video.fragment_seq != pending.next_fragment
++            || video.nal_id != pending.video.nal_id
++            || video.pts_us != pending.video.pts_us
++            || video.fragment_total != pending.video.fragment_total
++            || video.tile_info != pending.video.tile_info
++            || pending.video.data.len() + video.data.len() > MAX_BOOTSTRAP_KEYFRAME_BYTES
++        {
++            self.invalidate();
++            return None;
++        }
++        let next_len = pending.video.data.len() + video.data.len();
++        if next_len > pending.video.data.capacity() {
++            let capacity = pending
++                .video
++                .data
++                .capacity()
++                .saturating_mul(2)
++                .max(next_len)
++                .min(MAX_BOOTSTRAP_KEYFRAME_BYTES);
++            pending
++                .video
++                .data
++                .reserve_exact(capacity - pending.video.data.len());
++        }
++        pending.video.data.extend_from_slice(&video.data);
++        pending.next_fragment += 1;
++        if pending.next_fragment != pending.video.fragment_total {
++            return None;
++        }
++        let mut complete = self.pending_keyframe.take()?.video;
++        complete.fragment_seq = 0;
++        complete.fragment_total = 1;
++        // Reliable bootstrap frames need not fit the datagram MTU. Repacking
++        // the complete NAL keeps each bundle member one-frame/bounded and lets
++        // the existing client decoder consume parameters and IDR in order.
++        Some(Frame::new(ChannelId::Video, complete.encode()))
++    }
++}
++
++fn annex_b_nal_type(data: &[u8]) -> Option<u8> {
++    if data.starts_with(&[0, 0, 0, 1]) {
++        data.get(4).map(|byte| byte & 0x1F)
++    } else if data.starts_with(&[0, 0, 1]) {
++        data.get(3).map(|byte| byte & 0x1F)
++    } else {
++        None
++    }
++}
++
+ pub(super) fn spawn(
+     mut from_agent: mpsc::Receiver<Frame>,
+     broadcast_tx: broadcast::Sender<Arc<Frame>>,
+@@ -24,6 +195,7 @@
+ ) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+         let mut active_file_transfers = new_active_transfer_map();
++        let mut video_state = BootstrapVideoState::default();
+         while let Some(frame) = from_agent.recv().await {
+             if let Some(recorder) = &file_recorder {
+                 if let Err(error) = recorder
+@@ -33,7 +205,7 @@
+                     warn!("session file download metadata recording failed: {error}");
+                 }
+             }
+-            cache_frame(&state, &frame).await;
++            cache_frame(&state, &frame, &mut video_state).await;
+ 
+             let arc_frame = Arc::new(frame);
+             let _ = broadcast_tx.send(arc_frame);
+@@ -44,26 +216,488 @@
+     })
+ }
+ 
+-async fn cache_frame(state: &PumpState, frame: &Frame) {
+-    if frame.channel == ChannelId::Control && !frame.payload.is_empty() {
+-        match frame.payload[0] {
+-            0x02 if frame.payload.len() >= 5 => {
+-                let w = u16::from_le_bytes([frame.payload[1], frame.payload[2]]);
+-                let h = u16::from_le_bytes([frame.payload[3], frame.payload[4]]);
+-                *state.current_resolution.lock().await = (w, h);
++async fn cache_frame(state: &PumpState, frame: &Frame, video_state: &mut BootstrapVideoState) {
++    if frame.channel == ChannelId::Control {
++        match ControlMessage::decode(&frame.payload) {
++            Ok(ControlMessage::ResolutionAck { width, height }) => {
++                let mut resolution = state.current_resolution.lock().await;
++                if *resolution != (width, height) {
++                    video_state.region = None;
++                    video_state.invalidate();
++                    *state.cached_keyframe.lock().await = None;
++                }
++                *resolution = (width, height);
+             }
+-            0x03 => {
++            Ok(ControlMessage::SessionReady { .. }) => {
+                 *state.cached_session_ready.lock().await = Some(Arc::new(frame.clone()));
+             }
+             _ => {}
+         }
+     }
+ 
+-    if frame.channel == ChannelId::Tiles && !frame.payload.is_empty() && frame.payload[0] == 0x01 {
+-        *state.cached_grid_config.lock().await = Some(Arc::new(frame.clone()));
++    if frame.channel == ChannelId::Tiles && matches!(frame.payload.first(), Some(0x01 | 0x05)) {
++        match TileMessage::decode(&frame.payload) {
++            Ok(TileMessage::GridConfig {
++                screen_w, screen_h, ..
++            }) => {
++                // GridConfig also starts an independent snapshot at unchanged
++                // dimensions. Old ROI ownership must not survive that reset.
++                video_state.tile_screen = Some((screen_w, screen_h));
++                video_state.region = None;
++                video_state.invalidate();
++                *state.cached_keyframe.lock().await = None;
++                *state.cached_grid_config.lock().await = Some(Arc::new(frame.clone()));
++            }
++            Ok(TileMessage::VideoRegion { x, y, w, h }) => {
++                let next = video_state.tile_screen.and_then(|(screen_w, screen_h)| {
++                    (w > 0
++                        && h > 0
++                        && u32::from(x) + u32::from(w) <= u32::from(screen_w)
++                        && u32::from(y) + u32::from(h) <= u32::from(screen_h))
++                    .then_some(VideoTileInfo {
++                        tile_x: x,
++                        tile_y: y,
++                        tile_w: w,
++                        tile_h: h,
++                        screen_w,
++                        screen_h,
++                    })
++                });
++                if next != video_state.region || next.is_none() {
++                    video_state.invalidate();
++                    *state.cached_keyframe.lock().await = None;
++                }
++                video_state.region = next;
++            }
++            _ => {}
++        }
+     }
+ 
+-    if frame.channel == ChannelId::Video && frame.payload.len() > 8 && frame.payload[8] != 0 {
+-        *state.cached_keyframe.lock().await = Some(Arc::new(frame.clone()));
++    if frame.channel == ChannelId::Video {
++        video_state.invalidated = false;
++        // Ordinary delta packets never become bootstrap candidates; avoid
++        // parsing/copying their encoded data on this hot forwarding path.
++        if frame.payload.len() > 8 && frame.payload[8] == 0 {
++            // Replaying an old IDR followed by mid-GOP live P frames omits
++            // required reference frames. Bootstrap reuse is opportunistic at
++            // a fresh IDR boundary only, never a substitute for a GOP cache.
++            // This runs before broadcast; subscribe-before-gather guarantees
++            // any later delta is queued behind the accepted bootstrap bundle.
++            *state.cached_keyframe.lock().await = None;
++            if video_state.pending_keyframe.is_some() {
++                video_state.invalidate();
++            }
++        } else if let Some(complete) = video_state.observe_video(frame) {
++            let bundle = video_state.bundle(complete);
++            if bundle.is_some() || video_state.invalidated {
++                *state.cached_keyframe.lock().await = bundle;
++            }
++        }
++        if video_state.invalidated {
++            *state.cached_keyframe.lock().await = None;
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn state() -> PumpState {
++        PumpState {
++            active: Arc::new(AtomicBool::new(true)),
++            cached_grid_config: Arc::new(Mutex::new(None)),
++            cached_keyframe: Arc::new(Mutex::new(None)),
++            cached_session_ready: Arc::new(Mutex::new(None)),
++            current_resolution: Arc::new(Mutex::new((0, 0))),
++        }
++    }
++
++    fn grid(width: u16, height: u16) -> Frame {
++        TileMessage::GridConfig {
++            tile_size: 64,
++            cols: width.div_ceil(64),
++            rows: height.div_ceil(64),
++            screen_w: width,
++            screen_h: height,
++        }
++        .to_frame()
++    }
++
++    fn region(x: u16) -> Frame {
++        TileMessage::VideoRegion {
++            x,
++            y: 64,
++            w: 128,
++            h: 128,
++        }
++        .to_frame()
++    }
++
++    fn keyframe(tile_info: Option<VideoTileInfo>, fragment_seq: u16, fragment_total: u16) -> Frame {
++        Frame::new(
++            ChannelId::Video,
++            VideoDatagram {
++                nal_id: 1,
++                fragment_seq,
++                fragment_total,
++                is_keyframe: true,
++                pts_us: 100,
++                data: vec![0, 0, 1, 0x65],
++                tile_info,
++            }
++            .encode(),
++        )
++    }
++
++    async fn seed_parameters(state: &PumpState, ownership: &mut BootstrapVideoState) {
++        for (nal_type, nal_id) in [(7, u32::MAX - 1), (8, u32::MAX)] {
++            let mut video =
++                VideoDatagram::decode(&keyframe(ownership.region, 0, 1).payload).unwrap();
++            video.data = vec![0, 0, 1, nal_type];
++            video.nal_id = nal_id;
++            video.pts_us = 99;
++            cache_frame(
++                state,
++                &Frame::new(ChannelId::Video, video.encode()),
++                ownership,
++            )
++            .await;
++        }
++    }
++
++    async fn cached_idr(state: &PumpState) -> Option<Arc<Frame>> {
++        state
++            .cached_keyframe
++            .lock()
++            .await
++            .as_ref()
++            .and_then(|bundle| bundle.last().cloned())
+     }
++
++    #[tokio::test]
++    async fn cleared_video_ownership_cannot_be_repopulated_by_late_keyframes() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &region(0), &mut ownership).await;
++        seed_parameters(&state, &mut ownership).await;
++        let old = keyframe(ownership.region, 0, 1);
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_some());
++
++        cache_frame(
++            &state,
++            &TileMessage::VideoRegion {
++                x: 0,
++                y: 0,
++                w: 0,
++                h: 0,
++            }
++            .to_frame(),
++            &mut ownership,
++        )
++        .await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        assert!(ownership.sps.is_none() && ownership.pps.is_none());
++        cache_frame(&state, &old, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "late cropped/fullscreen encoder output must not revive cleared ownership"
++        );
++    }
++
++    #[tokio::test]
++    async fn changing_roi_retires_old_keyframe_and_rejects_old_geometry() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &region(0), &mut ownership).await;
++        seed_parameters(&state, &mut ownership).await;
++        let old = keyframe(ownership.region, 0, 1);
++        cache_frame(&state, &old, &mut ownership).await;
++        cache_frame(&state, &region(192), &mut ownership).await;
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        seed_parameters(&state, &mut ownership).await;
++        let current = keyframe(ownership.region, 0, 1);
++        cache_frame(&state, &current, &mut ownership).await;
++        assert_eq!(cached_idr(&state).await.as_deref(), Some(&current));
++    }
++
++    #[tokio::test]
++    async fn snapshot_and_resize_retire_video_even_at_unchanged_grid_dimensions() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &region(0), &mut ownership).await;
++        seed_parameters(&state, &mut ownership).await;
++        let old = keyframe(ownership.region, 0, 1);
++        cache_frame(&state, &old, &mut ownership).await;
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        cache_frame(&state, &region(0), &mut ownership).await;
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_some());
++
++        cache_frame(
++            &state,
++            &ControlMessage::ResolutionAck {
++                width: 800,
++                height: 600,
++            }
++            .to_frame(),
++            &mut ownership,
++        )
++        .await;
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        cache_frame(&state, &grid(800, 600), &mut ownership).await;
++        cache_frame(&state, &region(0), &mut ownership).await;
++        cache_frame(&state, &old, &mut ownership).await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "old framebuffer metadata is not valid for the resized ROI"
++        );
++        seed_parameters(&state, &mut ownership).await;
++        let resized = keyframe(ownership.region, 0, 1);
++        cache_frame(&state, &resized, &mut ownership).await;
++        assert_eq!(cached_idr(&state).await.as_deref(), Some(&resized));
++    }
++
++    #[tokio::test]
++    async fn fragmented_idr_bootstraps_as_one_complete_bounded_reliable_frame() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 2), &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        cache_frame(&state, &keyframe(None, 1, 2), &mut ownership).await;
++        let cached = state.cached_keyframe.lock().await.clone().unwrap();
++        assert_eq!(cached.len(), 3);
++        let types: Vec<_> = cached
++            .iter()
++            .map(|frame| annex_b_nal_type(&VideoDatagram::decode(&frame.payload).unwrap().data))
++            .collect();
++        assert_eq!(
++            types,
++            [Some(7), Some(8), Some(5)],
++            "fresh decoders receive separate SPS/PPS before the complete IDR"
++        );
++        let reassembled = VideoDatagram::decode(&cached[2].payload).unwrap();
++        assert_eq!(reassembled.fragment_seq, 0);
++        assert_eq!(reassembled.fragment_total, 1);
++        assert_eq!(reassembled.data, [0, 0, 1, 0x65, 0, 0, 1, 0x65]);
++        assert!(ownership.pending_keyframe.is_none());
++        let complete = keyframe(None, 0, 1);
++        cache_frame(&state, &complete, &mut ownership).await;
++        assert_eq!(cached_idr(&state).await.as_deref(), Some(&complete));
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &complete, &mut ownership).await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "tile sessions require explicit current video ownership"
++        );
++    }
++
++    #[test]
++    fn bootstrap_assembly_rejects_gaps_mixed_generations_and_metadata() {
++        for (seq, nal_id, pts_us, total) in [
++            (2, 1, 100, 3),
++            (1, 2, 100, 3),
++            (1, 1, 200, 3),
++            (1, 1, 100, 4),
++        ] {
++            let mut ownership = BootstrapVideoState::default();
++            assert!(ownership.observe_video(&keyframe(None, 0, 3)).is_none());
++            let mut next = VideoDatagram::decode(&keyframe(None, seq, total).payload).unwrap();
++            next.nal_id = nal_id;
++            next.pts_us = pts_us;
++            assert!(ownership
++                .observe_video(&Frame::new(ChannelId::Video, next.encode()))
++                .is_none());
++            assert!(
++                ownership.pending_keyframe.is_none(),
++                "a broken fragment generation is discarded completely"
++            );
++            assert!(ownership.observe_video(&keyframe(None, 2, 3)).is_none());
++        }
++        let mut ownership = BootstrapVideoState::default();
++        assert!(ownership.observe_video(&keyframe(None, 0, 2)).is_none());
++        assert!(ownership.observe_video(&keyframe(None, 0, 3)).is_none());
++        assert_eq!(
++            ownership
++                .pending_keyframe
++                .as_ref()
++                .unwrap()
++                .video
++                .fragment_total,
++            3,
++            "only one keyframe generation can be retained"
++        );
++    }
++
++    #[tokio::test]
++    async fn fragmented_keyframe_is_retired_mid_assembly_on_region_exit() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        cache_frame(&state, &grid(640, 480), &mut ownership).await;
++        cache_frame(&state, &region(0), &mut ownership).await;
++        let roi = ownership.region;
++        cache_frame(&state, &keyframe(roi, 0, 2), &mut ownership).await;
++        assert!(ownership.pending_keyframe.is_some());
++        cache_frame(
++            &state,
++            &TileMessage::VideoRegion {
++                x: 0,
++                y: 0,
++                w: 0,
++                h: 0,
++            }
++            .to_frame(),
++            &mut ownership,
++        )
++        .await;
++        cache_frame(&state, &keyframe(roi, 1, 2), &mut ownership).await;
++        assert!(ownership.pending_keyframe.is_none());
++        assert!(state.cached_keyframe.lock().await.is_none());
++        // Region re-entry does not revive a retired partial generation.
++        cache_frame(&state, &region(0), &mut ownership).await;
++        cache_frame(&state, &keyframe(roi, 1, 2), &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++    }
++
++    #[test]
++    fn bootstrap_keyframe_memory_and_fragment_counts_are_bounded() {
++        let mut ownership = BootstrapVideoState::default();
++        assert!(ownership
++            .observe_video(&keyframe(None, 0, MAX_BOOTSTRAP_KEYFRAME_FRAGMENTS + 1))
++            .is_none());
++        assert!(ownership.pending_keyframe.is_none());
++        let mut large = VideoDatagram::decode(&keyframe(None, 0, 2).payload).unwrap();
++        large.data = vec![7; MAX_BOOTSTRAP_KEYFRAME_BYTES - 1];
++        assert!(ownership
++            .observe_video(&Frame::new(ChannelId::Video, large.encode()))
++            .is_none());
++        assert!(
++            ownership
++                .pending_keyframe
++                .as_ref()
++                .unwrap()
++                .video
++                .data
++                .capacity()
++                <= MAX_BOOTSTRAP_KEYFRAME_BYTES
++        );
++        assert!(ownership.observe_video(&keyframe(None, 1, 2)).is_none());
++        assert!(ownership.pending_keyframe.is_none());
++        large.fragment_total = 1;
++        large.data.resize(MAX_BOOTSTRAP_KEYFRAME_BYTES + 1, 7);
++        assert!(ownership
++            .observe_video(&Frame::new(ChannelId::Video, large.encode()))
++            .is_none());
++        assert!(ownership.pending_keyframe.is_none());
++    }
++
++    #[tokio::test]
++    async fn a_fragment_gap_retires_parameters_and_cannot_publish_an_incomplete_bundle() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_some());
++        cache_frame(&state, &keyframe(None, 0, 3), &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 2, 3), &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        assert!(ownership.sps.is_none() && ownership.pps.is_none());
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "IDR without current parameters cannot bootstrap a fresh decoder"
++        );
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert_eq!(
++            state.cached_keyframe.lock().await.as_ref().unwrap().len(),
++            3
++        );
++    }
++
++    #[tokio::test]
++    async fn parameter_updates_retire_old_bundle_and_enforce_order_and_size_bounds() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        let mut sps = VideoDatagram::decode(&keyframe(None, 0, 1).payload).unwrap();
++        sps.nal_id = 2;
++        sps.data = vec![0, 0, 1, 7];
++        cache_frame(
++            &state,
++            &Frame::new(ChannelId::Video, sps.encode()),
++            &mut ownership,
++        )
++        .await;
++        assert!(state.cached_keyframe.lock().await.is_none());
++        assert!(ownership.sps.is_some() && ownership.pps.is_none());
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "an old IDR cannot pair with newer parameters"
++        );
++        sps.data.resize(MAX_BOOTSTRAP_PARAMETER_BYTES + 1, 0);
++        cache_frame(
++            &state,
++            &Frame::new(ChannelId::Video, sps.encode()),
++            &mut ownership,
++        )
++        .await;
++        assert!(ownership.sps.is_none() && ownership.pps.is_none());
++        assert!(state.cached_keyframe.lock().await.is_none());
++    }
++
++    #[tokio::test]
++    async fn first_delta_retires_bootstrap_to_avoid_replaying_an_incomplete_gop_prefix() {
++        let state = state();
++        let mut ownership = BootstrapVideoState::default();
++        seed_parameters(&state, &mut ownership).await;
++        cache_frame(&state, &keyframe(None, 0, 1), &mut ownership).await;
++        assert!(state.cached_keyframe.lock().await.is_some());
++        let mut video = VideoDatagram::decode(&keyframe(None, 0, 1).payload).unwrap();
++        video.nal_id = 2;
++        video.pts_us = 101;
++        video.is_keyframe = false;
++        video.data = vec![0, 0, 1, 1];
++        cache_frame(
++            &state,
++            &Frame::new(ChannelId::Video, video.encode()),
++            &mut ownership,
++        )
++        .await;
++        assert!(
++            state.cached_keyframe.lock().await.is_none(),
++            "mid-GOP joiners must await a live IDR instead of decoding against missing references"
++        );
++        assert!(
++            ownership.sps.is_some() && ownership.pps.is_some(),
++            "current parameters remain reusable for the next IDR"
++        );
++        video.nal_id = 3;
++        video.pts_us = 102;
++        video.is_keyframe = true;
++        video.data = vec![0, 0, 1, 5];
++        cache_frame(
++            &state,
++            &Frame::new(ChannelId::Video, video.encode()),
++            &mut ownership,
++        )
++        .await;
++        assert_eq!(
++            state.cached_keyframe.lock().await.as_ref().unwrap().len(),
++            3
++        );
++    }
+ }
+diff --git a/code/apps/bpane-gateway/src/transport/egress.rs b/code/apps/bpane-gateway/src/transport/egress.rs
+--- a/code/apps/bpane-gateway/src/transport/egress.rs
++++ b/code/apps/bpane-gateway/src/transport/egress.rs
+@@ -41,9 +41,23 @@
+                     if !client_can_receive_frame(&frame, is_owner, &ctx.transport_policy) {
+                         continue;
+                     }
+-                    if !ctx.protocol.allows_server_frame(&frame) {
+-                        debug!("suppressed host frame outside negotiated protocol upper bound");
+-                        continue;
++                    match ctx.protocol.server_frame_delivery(&frame) {
++                        Ok(true) => {}
++                        Ok(false) => {
++                            debug!(
++                                "suppressed optional host frame outside negotiated protocol upper bound"
++                            );
++                            continue;
++                        }
++                        Err(failure) => {
++                            warn!(
++                                ctx.session_id,
++                                ctx.client_id,
++                                "invalid or unnegotiated dependent tile command; closing viewer"
++                            );
++                            ctx.session.deactivate();
++                            return Some(failure);
++                        }
+                     }
+ 
+                     if frame.channel == ChannelId::Video {
+diff --git a/code/apps/bpane-gateway/src/transport/bootstrap.rs b/code/apps/bpane-gateway/src/transport/bootstrap.rs
+--- a/code/apps/bpane-gateway/src/transport/bootstrap.rs
++++ b/code/apps/bpane-gateway/src/transport/bootstrap.rs
+@@ -40,7 +40,12 @@
+     let mut stream = send_stream.lock().await;
+ 
+     for frame in initial_frames {
+-        if !protocol.allows_server_frame(frame) {
++        if !protocol.server_frame_delivery(frame).map_err(|failure| {
++            anyhow::anyhow!(
++                "initial host tile stream failed protocol validation: {}",
++                failure.code()
++            )
++        })? {
+             continue;
+         }
+         let encoded =
+@@ -110,6 +115,37 @@
+     use super::super::negotiation::ConnectionProtocol;
+     use super::super::policy::{SessionFileTransportPolicy, SessionTransportPolicy};
+     use super::{send_initial_frames, InitialFramesContext};
++
++    #[tokio::test]
++    async fn invalid_initial_tile_aborts_bootstrap_before_batch_end() {
++        use bpane_protocol::{channel::ChannelId, frame::Frame, TileMessage};
++        let (writer, mut reader) = duplex(4096);
++        let send_stream = Arc::new(Mutex::new(writer));
++        let result = send_initial_frames(
++            &send_stream,
++            &[
++                Arc::new(Frame::new(ChannelId::Tiles, vec![0x01])),
++                Arc::new(TileMessage::BatchEnd { frame_seq: 1 }.to_frame()),
++            ],
++            InitialFramesContext {
++                joined_as_owner: true,
++                initial_access_state: None,
++                policy: SessionTransportPolicy::default(),
++                protocol: ConnectionProtocol::Legacy,
++                session_id: 1,
++                client_id: 2,
++            },
++        )
++        .await;
++        assert!(result.is_err());
++        drop(send_stream);
++        let mut delivered = Vec::new();
++        reader.read_to_end(&mut delivered).await.unwrap();
++        assert!(
++            delivered.is_empty(),
++            "bootstrap must not commit an incomplete tile batch"
++        );
++    }
+ 
+     #[tokio::test]
+     async fn non_owner_receives_adapted_ready_and_initial_access_state() {
+diff --git a/code/apps/bpane-gateway/src/transport/negotiation.rs b/code/apps/bpane-gateway/src/transport/negotiation.rs
+--- a/code/apps/bpane-gateway/src/transport/negotiation.rs
++++ b/code/apps/bpane-gateway/src/transport/negotiation.rs
+@@ -84,14 +84,27 @@
+     }
+ 
+     pub fn allows_server_frame(&self, frame: &Frame) -> bool {
+-        if matches!(self, Self::Legacy) {
+-            return true;
++        self.server_frame_delivery(frame).unwrap_or(false)
++    }
++
++    /// Optional side channels can be filtered independently. Tile commands
++    /// cannot: later copies/cache hits and BatchEnd depend on every preceding
++    /// render command. Fail the affected viewer instead of silently corrupting
++    /// its canvas when the paired host emits an invalid/unnegotiated command.
++    pub fn server_frame_delivery(&self, frame: &Frame) -> Result<bool, ProtocolFailure> {
++        if matches!(self, Self::Legacy) && frame.channel != ChannelId::Tiles {
++            return Ok(true);
+         }
+ 
+         let Ok(message) = Message::from_frame(frame) else {
+-            return false;
++            return if frame.channel == ChannelId::Tiles {
++                Err(ProtocolFailure::UnexpectedProtocolFrame)
++            } else {
++                Ok(false)
++            };
+         };
+-        match message {
++        let render_dependency = matches!(&message, Message::Tiles(tile) if !matches!(tile, TileMessage::ScrollStats { .. }));
++        let allowed = match message {
+             Message::Control(ControlMessage::ResolutionAck { .. })
+             | Message::Control(ControlMessage::SessionReady { .. })
+             | Message::Control(ControlMessage::Ping { .. })
+@@ -130,6 +143,11 @@
+             | Message::FileUp(_)
+             | Message::Tiles(TileMessage::CacheMiss { .. }) => false,
+             Message::FileDown(_) => self.allows(ProtocolCapability::FileTransfer),
++        };
++        if render_dependency && !allowed {
++            Err(ProtocolFailure::UnexpectedProtocolFrame)
++        } else {
++            Ok(allowed)
+         }
+     }
+ 
+@@ -284,18 +302,37 @@
+     send_stream: &Arc<Mutex<SendStream>>,
+     failure: ProtocolFailure,
+ ) {
+-    let mut stream = send_stream.lock().await;
+-    send_protocol_reject(&mut stream, failure).await;
+-    connection.close(protocol_close_code(failure), failure.code().as_bytes());
++    finish_protocol_rejection(
++        async {
++            let mut stream = send_stream.lock().await;
++            send_protocol_reject(&mut stream, failure).await;
++        },
++        || connection.close(protocol_close_code(failure), failure.code().as_bytes()),
++    )
++    .await;
+ }
+ 
++async fn finish_protocol_rejection(
++    reject: impl std::future::Future<Output = ()>,
++    close_connection: impl FnOnce(),
++) {
++    // A slow viewer may already have another task blocked on write_all while
++    // holding the shared stream lock. Closing must not wait for that lock (or
++    // the reject write itself) forever.
++    let _ = tokio::time::timeout(PROTOCOL_REJECT_DRAIN_TIMEOUT, reject).await;
++    close_connection();
++}
++
+ async fn send_protocol_reject(send_stream: &mut SendStream, failure: ProtocolFailure) {
+     let reject = NegotiationMessage::ProtocolReject(failure)
+         .to_frame()
+         .encode();
+-    if send_stream.write_all(&reject).await.is_ok() {
+-        let _ = tokio::time::timeout(PROTOCOL_REJECT_DRAIN_TIMEOUT, send_stream.finish()).await;
+-    }
++    let _ = tokio::time::timeout(PROTOCOL_REJECT_DRAIN_TIMEOUT, async {
++        if send_stream.write_all(&reject).await.is_ok() {
++            let _ = send_stream.finish().await;
++        }
++    })
++    .await;
+ }
+ 
+ fn protocol_close_code(failure: ProtocolFailure) -> wtransport::VarInt {
+diff --git a/code/apps/bpane-gateway/src/transport/negotiation/tests.rs b/code/apps/bpane-gateway/src/transport/negotiation/tests.rs
+--- a/code/apps/bpane-gateway/src/transport/negotiation/tests.rs
++++ b/code/apps/bpane-gateway/src/transport/negotiation/tests.rs
+@@ -332,4 +332,196 @@
+     assert!(!protocol.allows_server_frame(
+         &NegotiationMessage::ProtocolReject(ProtocolFailure::UnexpectedProtocolFrame).to_frame()
+     ));
++}
++
++#[test]
++fn dependent_tile_commands_fail_closed_when_not_negotiated() {
++    let protocol = ConnectionProtocol::V1 {
++        selection: ServerSelection::new(1, vec![]).unwrap(),
++    };
++    for tile in [
++        TileMessage::CacheHit {
++            col: 0,
++            row: 1,
++            hash: 7,
++        },
++        TileMessage::GridOffset {
++            offset_x: 0,
++            offset_y: 13,
++        },
++        TileMessage::TileDrawMode {
++            apply_offset: false,
++        },
++        TileMessage::ScrollCopy {
++            dx: 0,
++            dy: -13,
++            region_top: 80,
++            region_bottom: 720,
++            region_right: 1280,
++        },
++        TileMessage::Zstd {
++            col: 0,
++            row: 1,
++            hash: 7,
++            data: vec![1],
++        },
++        TileMessage::VideoRegion {
++            x: 0,
++            y: 80,
++            w: 640,
++            h: 360,
++        },
++    ] {
++        assert_eq!(
++            protocol.server_frame_delivery(&tile.to_frame()),
++            Err(ProtocolFailure::UnexpectedProtocolFrame)
++        );
++    }
++    assert_eq!(
++        protocol.server_frame_delivery(&TileMessage::BatchEnd { frame_seq: 1 }.to_frame()),
++        Ok(true)
++    );
++}
++
++#[test]
++fn malformed_tile_stops_delivery_before_a_misleading_batch_end() {
++    for protocol in [
++        ConnectionProtocol::Legacy,
++        ConnectionProtocol::V1 {
++            selection: ServerSelection::new(1, vec![]).unwrap(),
++        },
++    ] {
++        for payload in [vec![], vec![0x03, 0, 0], vec![0xFF]] {
++            let frames = [
++                TileMessage::Fill {
++                    col: 0,
++                    row: 0,
++                    rgba: 0xFF112233,
++                }
++                .to_frame(),
++                Frame::new(ChannelId::Tiles, payload),
++                TileMessage::BatchEnd { frame_seq: 1 }.to_frame(),
++            ];
++            let mut delivered = 0;
++            let outcome = frames.iter().try_for_each(|frame| {
++                if protocol.server_frame_delivery(frame)? {
++                    delivered += 1;
++                }
++                Ok::<_, ProtocolFailure>(())
++            });
++            assert_eq!(outcome, Err(ProtocolFailure::UnexpectedProtocolFrame));
++            assert_eq!(delivered, 1, "never commit the incomplete dependent batch");
++        }
++    }
++}
++
++#[test]
++fn optional_audio_video_and_scroll_telemetry_are_still_filterable() {
++    let protocol = ConnectionProtocol::V1 {
++        selection: ServerSelection::new(1, vec![]).unwrap(),
++    };
++    let video = VideoDatagram {
++        nal_id: 1,
++        fragment_seq: 0,
++        fragment_total: 1,
++        is_keyframe: true,
++        pts_us: 100,
++        data: vec![0, 0, 1, 0x65],
++        tile_info: None,
++    };
++    assert_eq!(
++        protocol.server_frame_delivery(&Frame::new(ChannelId::Video, video.encode())),
++        Ok(false)
++    );
++    assert_eq!(
++        protocol.server_frame_delivery(
++            &AudioFrame {
++                seq: 1,
++                timestamp_us: 100,
++                data: vec![b'W', b'R', b'A', b'1', 0x02, 0],
++            }
++            .to_frame_out()
++        ),
++        Ok(false)
++    );
++    let mut stats = vec![0; 1 + 23 * 4];
++    stats[0] = 0x0A;
++    assert_eq!(
++        protocol.server_frame_delivery(&Frame::new(ChannelId::Tiles, stats)),
++        Ok(false)
++    );
+ }
++
++#[test]
++fn fully_negotiated_scroll_and_repair_commands_remain_deliverable() {
++    let protocol = ConnectionProtocol::V1 {
++        selection: ServerSelection::new(
++            1,
++            vec![
++                ProtocolCapability::TileZstd.id(),
++                ProtocolCapability::TileCache.id(),
++                ProtocolCapability::TileScroll.id(),
++            ],
++        )
++        .unwrap(),
++    };
++    for tile in [
++        TileMessage::GridConfig {
++            tile_size: 64,
++            cols: 20,
++            rows: 12,
++            screen_w: 1280,
++            screen_h: 720,
++        },
++        TileMessage::GridOffset {
++            offset_x: 0,
++            offset_y: 13,
++        },
++        TileMessage::TileDrawMode { apply_offset: true },
++        TileMessage::Zstd {
++            col: 1,
++            row: 2,
++            hash: 7,
++            data: vec![1, 2],
++        },
++        TileMessage::CacheHit {
++            col: 1,
++            row: 3,
++            hash: 7,
++        },
++        TileMessage::BatchEnd { frame_seq: 42 },
++    ] {
++        assert_eq!(protocol.server_frame_delivery(&tile.to_frame()), Ok(true));
++        assert_eq!(
++            ConnectionProtocol::Legacy.server_frame_delivery(&tile.to_frame()),
++            Ok(true)
++        );
++    }
++}
++
++#[tokio::test(start_paused = true)]
++async fn protocol_failure_closes_even_when_a_slow_viewer_holds_the_stream_lock() {
++    let stream = Mutex::new(());
++    let held_by_slow_writer = stream.lock().await;
++    let started = tokio::time::Instant::now();
++    let mut closed = false;
++    finish_protocol_rejection(
++        async {
++            let _lock = stream.lock().await;
++        },
++        || closed = true,
++    )
++    .await;
++    assert!(closed);
++    assert_eq!(started.elapsed(), PROTOCOL_REJECT_DRAIN_TIMEOUT);
++    drop(held_by_slow_writer);
++}
++
++#[tokio::test(start_paused = true)]
++async fn successful_protocol_reject_closes_without_waiting_for_the_deadline() {
++    let started = tokio::time::Instant::now();
++    let mut closed = false;
++    finish_protocol_rejection(async {}, || closed = true).await;
++    assert!(closed);
++    assert_eq!(started.elapsed(), Duration::ZERO);
++}

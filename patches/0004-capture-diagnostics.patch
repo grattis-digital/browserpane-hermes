@@ -1,0 +1,142 @@
+diff --git a/code/apps/bpane-host/src/tile_loop/run.rs b/code/apps/bpane-host/src/tile_loop/run.rs
+index c195933..12bf659 100644
+--- a/code/apps/bpane-host/src/tile_loop/run.rs
++++ b/code/apps/bpane-host/src/tile_loop/run.rs
+@@ -21,6 +21,15 @@ pub(super) fn capture_budget_wait(
+     frame_interval.saturating_sub(since_last)
+ }
+ 
++fn capture_timings_requested(value: Option<&str>) -> bool {
++    value.is_some_and(|value| {
++        matches!(
++            value.trim().to_ascii_lowercase().as_str(),
++            "1" | "true" | "yes" | "on"
++        )
++    })
++}
++
+ pub(super) fn should_force_refresh_for_video_hint_drop(
+     active_region: Option<CaptureRegion>,
+     hint: &PageHintState,
+@@ -36,6 +45,11 @@ impl super::TileCaptureThread {
+     /// Run the tile capture loop. Blocks the current thread until the
+     /// tile channel is closed or an unrecoverable error occurs.
+     pub fn run(mut self) {
++        // Explicit diagnostics only: read the environment once, and do not
++        // sample phase clocks or log on the ordinary production hot path.
++        let timings_enabled =
++            capture_timings_requested(std::env::var("BPANE_CAPTURE_TIMINGS").ok().as_deref());
++        let mut timed_capture_seq = 0u64;
+         // ── Constants ────────────────────────────────────────────
+         const VIDEO_ENTER_SCORE: i8 = 5;
+         const VIDEO_EXIT_SCORE: i8 = -1;
+@@ -136,6 +150,7 @@ impl super::TileCaptureThread {
+             }
+ 
+             // ── Capture ──────────────────────────────────────────
++            let timing_start = timings_enabled.then(std::time::Instant::now);
+             self.frame_damage_bounds = self.damage.as_mut().and_then(|dt| dt.begin_capture());
+             let mut rgba = std::mem::take(&mut self.capture_scratch);
+             if let Err(e) =
+@@ -154,6 +169,7 @@ impl super::TileCaptureThread {
+             }
+             self.grid.advance_frame();
+             let stride = self.screen_w as usize * 4;
++            let capture_done = timings_enabled.then(std::time::Instant::now);
+ 
+             // ── Phase 1: CDP hints + scroll detection ────────────
+             let cdp = self.process_cdp_and_scroll(
+@@ -171,6 +187,7 @@ impl super::TileCaptureThread {
+                 NO_INPUT_SCROLL_MIN_CONFIDENCE,
+                 SCROLL_SUPPRESS_VIDEO_FRAMES,
+             );
++            let scroll_done = timings_enabled.then(std::time::Instant::now);
+ 
+             // ── Phase 2: Video classification ────────────────────
+             let classify = self.classify_tiles(
+@@ -189,6 +206,7 @@ impl super::TileCaptureThread {
+                 MIN_VIDEO_BBOX_HEIGHT_TILES,
+                 MIN_VIDEO_BBOX_AREA_RATIO,
+             );
++            let classify_done = timings_enabled.then(std::time::Instant::now);
+ 
+             // ── Phase 3: Scroll residual + dirty set ─────────────
+             let scroll = self.compute_scroll_and_dirty(
+@@ -204,6 +222,12 @@ impl super::TileCaptureThread {
+                 SCROLL_THIN_MODE_RESIDUAL_RATIO,
+                 SCROLL_THIN_REPAIR_QUIET_FRAMES,
+             );
++            let dirty_done = timings_enabled.then(std::time::Instant::now);
++            let dirty_tiles = if timings_enabled {
++                scroll.all_dirty.len()
++            } else {
++                0
++            };
+ 
+             // ── Phase 4: Tile emission ───────────────────────────
+             if !self.emit_tiles(
+@@ -228,6 +252,7 @@ impl super::TileCaptureThread {
+             ) {
+                 return; // channel closed
+             }
++            let encode_send_done = timings_enabled.then(std::time::Instant::now);
+ 
+             // ── Phase 5: H.264 region management ─────────────────
+             let cdp_has_video =
+@@ -245,6 +270,56 @@ impl super::TileCaptureThread {
+             if let Some(previous) = self.prev_frame.replace(rgba) {
+                 self.capture_scratch = previous;
+             }
++            if let (
++                Some(start),
++                Some(capture),
++                Some(scroll),
++                Some(classify),
++                Some(dirty),
++                Some(encode_send),
++            ) = (
++                timing_start,
++                capture_done,
++                scroll_done,
++                classify_done,
++                dirty_done,
++                encode_send_done,
++            ) {
++                timed_capture_seq = timed_capture_seq.wrapping_add(1);
++                // Microseconds; total excludes cadence/idle waits and resize
++                // checks. Dirty includes scroll sideband sends; encode_send
++                // includes channel backpressure, not final network delivery.
++                tracing::warn!(
++                    target: "bpane_capture_timings",
++                    capture_seq = timed_capture_seq,
++                    capture_us = capture.duration_since(start).as_micros() as u64,
++                    scroll_us = scroll.duration_since(capture).as_micros() as u64,
++                    classify_us = classify.duration_since(scroll).as_micros() as u64,
++                    dirty_us = dirty.duration_since(classify).as_micros() as u64,
++                    encode_send_us = encode_send.duration_since(dirty).as_micros() as u64,
++                    total_us = start.elapsed().as_micros() as u64,
++                    budget_wait_us = budget_wait.as_micros() as u64,
++                    interval_us = frame_interval.as_micros() as u64,
++                    dirty_tiles,
++                    force_refresh,
++                    "capture timings"
++                );
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod timing_tests {
++    use super::capture_timings_requested;
++
++    #[test]
++    fn phase_timings_are_explicitly_opt_in() {
++        for value in [None, Some(""), Some("0"), Some("false"), Some("unexpected")] {
++            assert!(!capture_timings_requested(value));
++        }
++        for value in ["1", "true", "YES", " on "] {
++            assert!(capture_timings_requested(Some(value)));
+         }
+     }
+ }

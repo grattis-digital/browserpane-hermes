@@ -1,0 +1,29 @@
+{
+  "name": "browserpane-hermes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:client": "node scripts/test-client.mjs",
+    "test:linux": "bash scripts/test-pipeline-linux.sh",
+    "test:webgl": "node scripts/check-webgl-pixels.mjs && node scripts/check-renderer-fallback.mjs",
+    "test:scroll": "node scripts/check-scroll-integrity.mjs",
+    "test:display": "node scripts/check-display-controls.mjs",
+    "test:runtime": "node scripts/test-runtime.mjs",
+    "start": "node server/main.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.68",
+    "fzstd": "0.1.1",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "esbuild": "0.25.9",
+    "jsdom": "26.1.0",
+    "vitest": "3.2.7"
+  }
+}

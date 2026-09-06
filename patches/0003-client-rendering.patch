@@ -1,0 +1,1643 @@
+diff --git a/code/web/bpane-client/js/__tests__/cache-hit-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/cache-hit-tile-renderer.test.ts
+index f63e807..7813303 100644
+--- a/code/web/bpane-client/js/__tests__/cache-hit-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/cache-hit-tile-renderer.test.ts
+@@ -105,6 +105,17 @@ describe('CacheHitTileRenderer', () => {
+     expect(ctx.putImageData).not.toHaveBeenCalled();
+   });
+ 
++  it('never stretches a same-hash bitmap with the wrong tile shape', () => {
++    const cache = new TileCache();
++    cache.set(6n, createBitmap(32, 64));
++    const glRenderer = createWebGLRenderer();
++    const result = new CacheHitTileRenderer().draw({
++      cache, hash: 6n, rect: { x: 0, y: 0, w: 64, h: 32 }, ctx: null, glRenderer: glRenderer as any,
++    });
++    expect(result).toEqual({ kind: 'miss', reason: 'size-mismatch' });
++    expect(glRenderer.drawTileImageBitmap).not.toHaveBeenCalled();
++  });
++
+   it('skips drawing when the rect is unavailable or there is no active output', () => {
+     const cache = new TileCache();
+     cache.set(7n, createBitmap());
+diff --git a/code/web/bpane-client/js/__tests__/fill-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/fill-tile-renderer.test.ts
+index b3cf684..ad55af3 100644
+--- a/code/web/bpane-client/js/__tests__/fill-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/fill-tile-renderer.test.ts
+@@ -91,6 +91,32 @@ describe('FillTileRenderer', () => {
+     })).toEqual({ kind: 'skipped', reason: 'offscreen' });
+   });
+ 
++  it('restores fillStyle after same-context canvas resize/state reset', () => {
++    const ctx = createCanvasContext();
++    const renderer = new FillTileRenderer();
++    const args = { rect: { x: 0, y: 0, w: 1, h: 1 }, rgba: 0xff332211, ctx, glRenderer: null };
++    renderer.draw(args);
++    ctx.fillStyle = '#000000';
++    renderer.draw(args);
++    expect(ctx.fillStyle).toBe('rgba(17,34,51,1)');
++    expect(ctx.fillStyleAssignments).toBe(3);
++  });
++
++  it('does not repeat assignments when a real context canonicalizes CSS colors', () => {
++    let style = '#000000';
++    let assignments = 0;
++    const ctx = {
++      get fillStyle() { return style; },
++      set fillStyle(_: string) { style = '#112233'; assignments++; },
++      fillRect: vi.fn(),
++    } as unknown as CanvasRenderingContext2D;
++    const renderer = new FillTileRenderer();
++    const args = { rect: { x: 0, y: 0, w: 1, h: 1 }, rgba: 0xff332211, ctx, glRenderer: null };
++    renderer.draw(args);
++    renderer.draw(args);
++    expect(assignments).toBe(1);
++  });
++
+   it('skips drawing when there is no active output', () => {
+     const renderer = new FillTileRenderer();
+ 
+diff --git a/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
+index a32a438..83db600 100644
+--- a/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/qoi-tile-renderer.test.ts
+@@ -107,6 +107,30 @@ describe('QoiTileRenderer', () => {
+     });
+   });
+ 
++  it('reuses the exact immutable decoded tile on a same-hash resend', () => {
++    const cache = new TileCache();
++    const ctx = createCanvasContext();
++    const renderer = new QoiTileRenderer();
++    const args = { cache, hash: 55n, data: createPngLikeQoi(), rect: { x: 0, y: 0, w: 1, h: 1 }, ctx, glRenderer: null };
++    renderer.draw(args);
++    const original = cache.get(55n);
++    const replace = vi.spyOn(cache, 'set');
++    expect(renderer.draw(args)).toMatchObject({ redundant: true });
++    expect(cache.get(55n)).toBe(original);
++    expect(replace).not.toHaveBeenCalled();
++    expect(ctx.putImageData).toHaveBeenLastCalledWith(original, 0, 0);
++  });
++
++  it('does not reuse a same-hash tile with different dimensions', () => {
++    const cache = new TileCache();
++    const wrongShape = { width: 2, height: 1, data: new Uint8ClampedArray(8) } as ImageData;
++    cache.set(56n, wrongShape);
++    const renderer = new QoiTileRenderer();
++    renderer.draw({ cache, hash: 56n, data: createPngLikeQoi(), rect: { x: 0, y: 0, w: 1, h: 1 }, ctx: createCanvasContext(), glRenderer: null });
++    expect(cache.get(56n)?.width).toBe(1);
++    expect(cache.get(56n)).not.toBe(wrongShape);
++  });
++
+   it('caches but does not draw when shouldDraw rejects a stale completion', () => {
+     const cache = new TileCache();
+     const ctx = createCanvasContext();
+@@ -169,6 +193,15 @@ describe('QoiTileRenderer', () => {
+     expect(result).toEqual({ kind: 'miss', reason: 'decode-failed' });
+   });
+ 
++  it('keeps zero-hash repair tiles out of the GPU cache too', () => {
++    const glRenderer = createWebGLRenderer();
++    new QoiTileRenderer().draw({
++      cache: new TileCache(), hash: 0n, data: createPngLikeQoi(),
++      rect: { x: 0, y: 0, w: 1, h: 1 }, ctx: null, glRenderer: glRenderer as any,
++    });
++    expect(glRenderer.drawTileImageData).toHaveBeenCalledWith(0, 0, 1, 1, expect.any(ImageData), false);
++  });
++
+   it('reports a size mismatch when decoded dimensions do not match the target rect', () => {
+     const renderer = new QoiTileRenderer();
+ 
+diff --git a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+index 8cc7d34..50b5e16 100644
+--- a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+@@ -210,6 +210,10 @@ describe('SessionRuntimeFactory', () => {
+     expect(context.setRemoteSize).toHaveBeenCalledWith(1280, 720);
+     expect(context.onResolutionChange).toHaveBeenCalledWith(1280, 720);
+ 
++    captured.surface.onRenderError(new Error('GPU context lost'));
++    expect(context.onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'GPU context lost' }));
++    expect(context.onDisconnect).toHaveBeenCalledWith('rendering failed: GPU context lost');
++
+     captured.frameRouter.handleVideoFrame(framePayload);
+     captured.frameRouter.handleCursorUpdate(framePayload);
+     captured.frameRouter.handleClipboardUpdate(framePayload);
+diff --git a/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
+index cab69a9..a522366 100644
+--- a/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-surface-runtime.test.ts
+@@ -25,6 +25,7 @@ function createTileCompositor() {
+     setContext: vi.fn(),
+     setWebGLRenderer: vi.fn(),
+     setCacheMissHandler: vi.fn(),
++    setVideoRegionChangeHandler: vi.fn(),
+     getGridConfig: vi.fn(() => null),
+     getVideoRegion: vi.fn(() => null),
+   };
+@@ -109,6 +110,7 @@ describe('SessionSurfaceRuntime', () => {
+     expect(container.querySelectorAll('canvas')).toHaveLength(0);
+     expect(container.style.position).toBe('absolute');
+     expect(tileCompositor.setCacheMissHandler).toHaveBeenLastCalledWith(null);
++    expect(tileCompositor.setVideoRegionChangeHandler).toHaveBeenLastCalledWith(null);
+     expect(tileCompositor.setWebGLRenderer).toHaveBeenCalledWith(null);
+   });
+ 
+@@ -133,4 +135,41 @@ describe('SessionSurfaceRuntime', () => {
+     runtime.destroy();
+     expect(container.style.position).toBe('absolute');
+   });
++
++  it('retires pending video immediately on applied region transitions, even between RAFs', () => {
++    const tileCompositor = createTileCompositor();
++    const runtime = new SessionSurfaceRuntime({
++      container: createContainer(), tileCompositor, hiDpi: false,
++      renderBackend: 'canvas2d', onTileCacheMiss: vi.fn(),
++      sendResizeRequest: vi.fn(), setRemoteSize: vi.fn(),
++    });
++    const frame = { close: vi.fn(), displayWidth: 320, displayHeight: 180 } as unknown as VideoFrame;
++    runtime.handleDecodedFrame(frame, null);
++    const onRegionChange = tileCompositor.setVideoRegionChangeHandler.mock.calls[0][0];
++    onRegionChange();
++    onRegionChange();
++    expect(frame.close).toHaveBeenCalledOnce();
++    runtime.destroy();
++    expect(frame.close).toHaveBeenCalledOnce();
++  });
++
++  it('reports WebGL context loss for fresh-snapshot reconnect and removes the listener on destroy', () => {
++    const onRenderError = vi.fn();
++    const renderer = { resize: vi.fn(), destroy: vi.fn() };
++    const runtime = new SessionSurfaceRuntime({
++      container: createContainer(), tileCompositor: createTileCompositor(), hiDpi: false,
++      onTileCacheMiss: vi.fn(), sendResizeRequest: vi.fn(), setRemoteSize: vi.fn(), onRenderError,
++      createWebGLRenderer: () => ({
++        renderer: renderer as any,
++        diagnostics: { backend: 'webgl2', renderer: 'hardware', vendor: 'test', software: false, reason: 'hardware-accelerated' },
++      }),
++    });
++    const canvas = runtime.getCanvas();
++    canvas.dispatchEvent(new Event('webglcontextlost'));
++    expect(onRenderError).toHaveBeenCalledWith(expect.objectContaining({ message: 'WebGL rendering context lost' }));
++    runtime.destroy();
++    canvas.dispatchEvent(new Event('webglcontextlost'));
++    expect(onRenderError).toHaveBeenCalledOnce();
++    expect(renderer.destroy).toHaveBeenCalledOnce();
++  });
+ });
+diff --git a/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
+index 7b2df1d..8c32629 100644
+--- a/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
+@@ -150,7 +150,7 @@ describe('SessionVideoDecoderRuntime', () => {
+     expect(MockVideoDecoder.instances).toHaveLength(0);
+   });
+ 
+-  it('drops frames under decoder backpressure and records the drop', () => {
++  it('retires backlogged decode work and immediately resumes at an incoming keyframe', () => {
+     const incrementDroppedFrame = vi.fn();
+     const runtime = new SessionVideoDecoderRuntime({
+       onDecodedFrame: vi.fn(),
+@@ -171,7 +171,58 @@ describe('SessionVideoDecoderRuntime', () => {
+     runtime.decodeNal(idr, null);
+ 
+     expect(MockVideoDecoder.instances[0].decodedChunks).toHaveLength(0);
+-    expect(incrementDroppedFrame).toHaveBeenCalledOnce();
++    expect(MockVideoDecoder.instances[0].closed).toBe(true);
++    expect(MockVideoDecoder.instances[1].decodedChunks).toHaveLength(1);
++    expect(MockVideoDecoder.instances[1].decodedChunks[0].type).toBe('key');
++    expect(incrementDroppedFrame).not.toHaveBeenCalled();
++  });
++
++  it('never submits dependent deltas after a backlog drop and rejects retired output', () => {
++    const onDecodedFrame = vi.fn();
++    const incrementDroppedFrame = vi.fn();
++    const runtime = new SessionVideoDecoderRuntime({
++      onDecodedFrame, incrementFrameCount: vi.fn(), incrementDroppedFrame,
++      onDecoderError: vi.fn(),
++      videoDecoderCtor: MockVideoDecoder as unknown as typeof VideoDecoder,
++      encodedVideoChunkCtor: MockEncodedVideoChunk as unknown as typeof EncodedVideoChunk,
++    });
++    const idr = new Uint8Array([0, 0, 1, 0x65, 0x88]);
++    const delta = new Uint8Array([0, 0, 1, 0x41, 0x99]);
++    runtime.decodeNal(idr, null);
++    const retired = MockVideoDecoder.instances[0];
++    retired.decodeQueueSize = 4;
++    runtime.decodeNal(delta, null);
++    runtime.decodeNal(delta, null);
++    expect(retired.closed).toBe(true);
++    expect(retired.decodedChunks).toHaveLength(1);
++    expect(incrementDroppedFrame).toHaveBeenCalledTimes(2);
++    const lateFrame = { close: vi.fn(), timestamp: 1 } as unknown as VideoFrame;
++    retired.outputCallback(lateFrame);
++    expect(lateFrame.close).toHaveBeenCalledOnce();
++    expect(onDecodedFrame).toHaveBeenCalledOnce();
++    runtime.decodeNal(idr, null);
++    const resumed = MockVideoDecoder.instances.at(-1)!;
++    expect(resumed.decodedChunks).toHaveLength(1);
++    expect(resumed.decodedChunks[0].type).toBe('key');
++    runtime.decodeNal(delta, null);
++    expect(resumed.decodedChunks).toHaveLength(2);
++  });
++
++  it('waits for a keyframe after a synchronous decode exception', () => {
++    const runtime = new SessionVideoDecoderRuntime({
++      onDecodedFrame: vi.fn(), incrementFrameCount: vi.fn(), incrementDroppedFrame: vi.fn(),
++      onDecoderError: vi.fn(),
++      videoDecoderCtor: MockVideoDecoder as unknown as typeof VideoDecoder,
++      encodedVideoChunkCtor: MockEncodedVideoChunk as unknown as typeof EncodedVideoChunk,
++    });
++    runtime.ensureDecoder();
++    vi.spyOn(MockVideoDecoder.instances[0], 'decode').mockImplementationOnce(() => { throw new Error('decode failed'); });
++    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
++    runtime.decodeNal(new Uint8Array([0, 0, 1, 0x65, 0x88]), null);
++    runtime.decodeNal(new Uint8Array([0, 0, 1, 0x41, 0x99]), null);
++    expect(MockVideoDecoder.instances[0].closed).toBe(true);
++    expect(MockVideoDecoder.instances.at(-1)!.decodedChunks).toHaveLength(0);
++    log.mockRestore();
+   });
+ 
+   it('waits for the next keyframe after a decoder error before resuming', () => {
+diff --git a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+index 8d5c3e5..7fa833d 100644
+--- a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+@@ -21,6 +21,107 @@ function flushAnimationFrame(callback: FrameRequestCallback | null): void {
+ }
+ 
+ describe('SessionVideoDisplayRuntime', () => {
++  describe.each(['webgl2', 'canvas2d'] as const)('reliable video-region lifetime (%s)', (backend) => {
++    function setup() {
++      let callback: FrameRequestCallback | null = null;
++      let region: { x: number; y: number; w: number; h: number } | null = { x: 10, y: 20, w: 30, h: 40 };
++      const draw = vi.fn();
++      const upload = vi.fn();
++      const runtime = new SessionVideoDisplayRuntime({
++        canvas: { width: 320, height: 180 } as HTMLCanvasElement,
++        ctx: backend === 'canvas2d' ? { drawImage: draw } as unknown as CanvasRenderingContext2D : null,
++        glRenderer: backend === 'webgl2' ? { uploadVideoFrame: upload, drawCachedVideo: draw, drawCachedVideoCropped: draw } : null,
++        getGridConfig: () => ({ tileSize: 64, cols: 5, rows: 3, screenW: 320, screenH: 180 }),
++        getVideoRegion: () => region,
++        createCanvas: () => ({ width: 0, height: 0, getContext: () => ({ drawImage: upload }) }) as unknown as HTMLCanvasElement,
++        requestAnimationFrameFn: (next) => { callback = next; return 1; },
++        now: () => 100,
++      });
++      runtime.start();
++      return {
++        runtime, draw, upload,
++        flush: () => flushAnimationFrame(callback),
++        setRegion: (next: typeof region) => { region = next; },
++        frame: () => ({ close: vi.fn(), displayWidth: 30, displayHeight: 40 }) as unknown as VideoFrame,
++      };
++    }
++
++    it('renders a matching active tile region', () => {
++      const test = setup();
++      const frame = test.frame();
++      test.runtime.handleDecodedFrame(frame, createTileInfo());
++      test.flush();
++      expect(test.upload).toHaveBeenCalledOnce();
++      expect(test.draw).toHaveBeenCalledOnce();
++      expect(frame.close).toHaveBeenCalledOnce();
++    });
++
++    it.each([null, createTileInfo()])('closes late decoded frames after a lossless exit without upload (%s)', (tileInfo) => {
++      const test = setup();
++      test.setRegion(null);
++      const frame = test.frame();
++      test.runtime.handleDecodedFrame(frame, tileInfo);
++      test.flush();
++      expect(frame.close).toHaveBeenCalledOnce();
++      expect(test.upload).not.toHaveBeenCalled();
++      expect(test.draw).not.toHaveBeenCalled();
++    });
++
++    it('closes a pending frame when the region exits before the next RAF', () => {
++      const test = setup();
++      const frame = test.frame();
++      test.runtime.handleDecodedFrame(frame, createTileInfo());
++      test.setRegion(null);
++      test.flush();
++      expect(frame.close).toHaveBeenCalledOnce();
++      expect(test.upload).not.toHaveBeenCalled();
++      expect(test.draw).not.toHaveBeenCalled();
++    });
++
++    it('does not resurrect a cached tile after exit, repair and same-region re-entry', () => {
++      const test = setup();
++      test.runtime.handleDecodedFrame(test.frame(), createTileInfo());
++      test.flush();
++      test.draw.mockClear();
++      test.setRegion(null);
++      test.runtime.markDirty();
++      test.flush();
++      test.setRegion({ x: 10, y: 20, w: 30, h: 40 });
++      test.runtime.markDirty();
++      test.flush();
++      expect(test.draw).not.toHaveBeenCalled();
++      test.runtime.handleDecodedFrame(test.frame(), createTileInfo());
++      test.flush();
++      expect(test.draw).toHaveBeenCalledOnce();
++    });
++
++    it('rejects obsolete tile geometry at receive and again before upload', () => {
++      const test = setup();
++      const pending = test.frame();
++      test.runtime.handleDecodedFrame(pending, createTileInfo());
++      test.setRegion({ x: 20, y: 20, w: 30, h: 40 });
++      test.flush();
++      const late = test.frame();
++      test.runtime.handleDecodedFrame(late, createTileInfo());
++      test.flush();
++      expect(pending.close).toHaveBeenCalledOnce();
++      expect(late.close).toHaveBeenCalledOnce();
++      expect(test.upload).not.toHaveBeenCalled();
++      expect(test.draw).not.toHaveBeenCalled();
++    });
++
++    it('does not redraw a cached tile over the repaired old geometry', () => {
++      const test = setup();
++      test.runtime.handleDecodedFrame(test.frame(), createTileInfo());
++      test.flush();
++      test.draw.mockClear();
++      test.setRegion({ x: 20, y: 20, w: 30, h: 40 });
++      test.runtime.markDirty();
++      test.flush();
++      expect(test.draw).not.toHaveBeenCalled();
++    });
++  });
++
+   it('uploads decoded frames to WebGL and redraws the cached tile region', () => {
+     let rafCallback: FrameRequestCallback | null = null;
+     const requestAnimationFrameFn = vi.fn((callback: FrameRequestCallback) => {
+diff --git a/code/web/bpane-client/js/__tests__/tile-batch-sequencer.test.ts b/code/web/bpane-client/js/__tests__/tile-batch-sequencer.test.ts
+index 34ea150..ea06818 100644
+--- a/code/web/bpane-client/js/__tests__/tile-batch-sequencer.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-batch-sequencer.test.ts
+@@ -139,4 +139,45 @@ describe('TileBatchSequencer', () => {
+ 
+     expect(appliedFrames).toEqual([5, 1]);
+   });
++
++  it('blocks dependent deltas after a thrown draw and recovers on a grid epoch reset', async () => {
++    const onError = vi.fn();
++    const sequencer = new TileBatchSequencer(onError);
++    const applied = vi.fn(() => true);
++    sequencer.enqueueBatch(1, [], () => { throw new Error('upload failed'); });
++    sequencer.enqueueBatch(2, [], applied);
++    await sequencer.flush();
++    expect(onError).toHaveBeenCalledOnce();
++    expect(applied).not.toHaveBeenCalled();
++    sequencer.invalidate();
++    sequencer.enqueueBatch(3, [], applied);
++    await sequencer.flush();
++    expect(applied).toHaveBeenCalledOnce();
++  });
++
++  it('contains rejected async draws and throwing observers without poisoning future epochs', async () => {
++    const sequencer = new TileBatchSequencer(() => { throw new Error('observer failed'); });
++    sequencer.enqueueBatch(1, [], async () => { throw new Error('decode failed'); });
++    await expect(sequencer.flush()).resolves.toBeUndefined();
++    sequencer.reset();
++    const applied = vi.fn(() => true);
++    sequencer.enqueueBatch(1, [], applied);
++    await sequencer.flush();
++    expect(applied).toHaveBeenCalledOnce();
++  });
++
++  it('does not let an old rejected batch invalidate a fresh grid epoch', async () => {
++    const onError = vi.fn();
++    const sequencer = new TileBatchSequencer(onError);
++    const deferred = createDeferred();
++    sequencer.enqueueBatch(1, [], async () => { await deferred.promise; throw new Error('stale'); });
++    await Promise.resolve();
++    sequencer.invalidate();
++    const applied = vi.fn(() => true);
++    sequencer.enqueueBatch(2, [], applied);
++    deferred.resolve();
++    await sequencer.flush();
++    expect(onError).not.toHaveBeenCalled();
++    expect(applied).toHaveBeenCalledOnce();
++  });
+ });
+diff --git a/code/web/bpane-client/js/__tests__/tile-cache.test.ts b/code/web/bpane-client/js/__tests__/tile-cache.test.ts
+index d3902ad..40874b9 100644
+--- a/code/web/bpane-client/js/__tests__/tile-cache.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-cache.test.ts
+@@ -336,6 +336,47 @@ describe('TileCache', () => {
+     expect(byteCache.bytes).toBe(tileBytes);
+     expect(byteCache.evictions).toBe(1);
+   });
++
++  it('reserves incoming bytes and permits exact budget fits', () => {
++    const bounded = new TileCache(10, 20);
++    bounded.set(1n, mockImageData(2, 1));
++    bounded.set(2n, mockImageData(3, 1));
++    expect(bounded.bytes).toBe(20);
++    expect(bounded.size).toBe(2);
++    bounded.set(3n, mockImageData(4, 1));
++    expect(bounded.bytes).toBe(16);
++    expect(bounded.size).toBe(1);
++    expect(bounded.evictions).toBe(2);
++  });
++
++  it('enforces the byte cap when replacing a smaller entry', () => {
++    const bounded = new TileCache(10, 20);
++    bounded.set(1n, mockImageData(1, 1));
++    bounded.set(2n, mockImageData(3, 1));
++    bounded.set(1n, mockImageData(4, 1));
++    expect(bounded.bytes).toBe(16);
++    expect(bounded.has(2n)).toBe(false);
++  });
++
++  it('does not retain oversized tiles or close caller-owned uncached bitmaps', () => {
++    const bounded = new TileCache(10, 20);
++    bounded.set(1n, mockImageData(1, 1));
++    const oversized = mockBitmap();
++    bounded.set(2n, oversized);
++    expect(bounded.size).toBe(1);
++    expect(bounded.bytes).toBe(4);
++    expect(oversized.close).not.toHaveBeenCalled();
++    new TileCache(0).set(1n, oversized);
++    expect(oversized.close).not.toHaveBeenCalled();
++  });
++
++  it('refreshes the same bitmap without closing its replacement identity', () => {
++    const bitmap = mockBitmap();
++    cache.set(1n, bitmap);
++    cache.set(1n, bitmap);
++    expect(bitmap.close).not.toHaveBeenCalled();
++    expect(cache.bytes).toBe(64 * 64 * 4);
++  });
+ });
+ 
+ // ── parseTileMessage tests ──────────────────────────────────────────
+diff --git a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+index 3a12aef..4a23a47 100644
+--- a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+@@ -93,6 +93,21 @@ describe('TileCompositor', () => {
+     vi.restoreAllMocks();
+   });
+ 
++  it('reports failed draws for snapshot recovery instead of replaying dependent batches', async () => {
++    const onError = vi.fn();
++    const failure = new Error('GPU upload failed');
++    vi.mocked(ctx.fillRect).mockImplementationOnce(() => { throw failure; });
++    compositor.setRenderErrorHandler(onError);
++    compositor.handlePayload(buildGridConfigPayload({ tileSize: 64, cols: 10, rows: 10, screenW: 640, screenH: 640 }));
++    compositor.handlePayload(buildFillPayload(0, 0, 0xff332211));
++    compositor.handlePayload(buildBatchEndPayload(1));
++    compositor.handlePayload(buildFillPayload(1, 0, 0xff332211));
++    compositor.handlePayload(buildBatchEndPayload(2));
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(onError).toHaveBeenCalledWith(failure);
++    expect(ctx.fillRect).toHaveBeenCalledOnce();
++  });
++
+   describe('grid config', () => {
+     it('stores grid config on grid-config message', () => {
+       compositor.handlePayload(buildGridConfigPayload({
+@@ -237,6 +252,45 @@ describe('TileCompositor', () => {
+   });
+ 
+   describe('video-region commands', () => {
++    it('invalidates overlays only when a sequenced region change is applied', async () => {
++      const changes: Array<ReturnType<TileCompositor['getVideoRegion']>> = [];
++      compositor.setVideoRegionChangeHandler(() => changes.push(compositor.getVideoRegion()));
++      const region = { type: 'video-region' as const, x: 10, y: 20, w: 30, h: 40 };
++      compositor.processCommand(region);
++      expect(changes).toEqual([]);
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      await new Promise(resolve => setTimeout(resolve, 0));
++      expect(changes).toEqual([{ x: 10, y: 20, w: 30, h: 40 }]);
++      compositor.processCommand(region);
++      compositor.processCommand({ type: 'batch-end', frameSeq: 2 });
++      await new Promise(resolve => setTimeout(resolve, 0));
++      expect(changes).toHaveLength(1);
++
++      // Exit and same-region re-entry can both apply before a display RAF.
++      // Each transition must still retire the previously cached video frame.
++      compositor.processCommand({ ...region, w: 0, h: 0 });
++      compositor.processCommand(region);
++      compositor.processCommand({ type: 'batch-end', frameSeq: 3 });
++      await new Promise(resolve => setTimeout(resolve, 0));
++      expect(changes).toEqual([
++        { x: 10, y: 20, w: 30, h: 40 }, null, { x: 10, y: 20, w: 30, h: 40 },
++      ]);
++      compositor.setVideoRegionChangeHandler(null);
++      compositor.reset();
++      expect(changes).toHaveLength(3);
++    });
++
++    it('does not notify a discarded old-grid video region', async () => {
++      const onChange = vi.fn();
++      compositor.setVideoRegionChangeHandler(onChange);
++      compositor.processCommand({ type: 'video-region', x: 10, y: 20, w: 30, h: 40 });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 1 });
++      compositor.processCommand({ type: 'grid-config', config: { tileSize: 64, cols: 5, rows: 3, screenW: 320, screenH: 180 } });
++      await new Promise(resolve => setTimeout(resolve, 0));
++      expect(onChange).not.toHaveBeenCalled();
++      expect(compositor.getVideoRegion()).toBeNull();
++    });
++
+     it('updates video region', async () => {
+       compositor.handlePayload(buildVideoRegionPayload(128, 64, 640, 480));
+       compositor.handlePayload(buildBatchEndPayload(1));
+diff --git a/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts b/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
+index 6df50f8..1cc7421 100644
+--- a/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-draw-runtime.test.ts
+@@ -22,6 +22,31 @@ function createStats(): TileCompositorRenderStats {
+ }
+ 
+ describe('TileDrawRuntime', () => {
++  it('drops GPU cache references on grid reset, disconnect and renderer changes', () => {
++    const runtime = new TileDrawRuntime({ stats: createStats() });
++    const first = { clearTileCache: vi.fn() };
++    const second = { clearTileCache: vi.fn() };
++    runtime.setWebGLRenderer(first as any);
++    runtime.applyGridConfig({ tileSize: 64, cols: 1, rows: 1, screenW: 64, screenH: 64 });
++    expect(first.clearTileCache).toHaveBeenCalledTimes(1);
++    runtime.setWebGLRenderer(second as any);
++    expect(first.clearTileCache).toHaveBeenCalledTimes(2);
++    runtime.reset();
++    expect(second.clearTileCache).toHaveBeenCalledOnce();
++    runtime.setWebGLRenderer(null);
++    expect(second.clearTileCache).toHaveBeenCalledTimes(2);
++  });
++
++  it('counts reused QOI and Zstd draws without claiming fresh decodes', () => {
++    const runtime = new TileDrawRuntime({
++      stats: createStats(),
++      qoiTileRenderer: { draw: () => ({ kind: 'drawn', redundant: true, decodedBytes: 12 }) },
++      zstdTileRenderer: { draw: () => ({ kind: 'drawn', redundant: true, encodedBytes: 9 }) },
++    });
++    runtime.drawQoi(0, 0, 1n, new Uint8Array(), () => true);
++    runtime.drawZstd(0, 0, 2n, new Uint8Array(), () => true);
++    expect(runtime.getStats()).toMatchObject({ qoiDecodes: 0, zstdDecodes: 0, qoiRedundant: 1, zstdRedundant: 1 });
++  });
+   it('resolves offset-aware fill rects and honors draw mode changes', () => {
+     const fillTileRenderer = {
+       draw: vi.fn(() => ({ kind: 'drawn' as const })),
+diff --git a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+index 0c2fc06..a3d6b8c 100644
+--- a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+@@ -234,6 +234,21 @@ describe('WebGLTileRenderer.tryCreate', () => {
+ });
+ 
+ describe('WebGLTileRenderer', () => {
++  it('keeps transient repair draws in the scratch texture without polluting retained tiles', () => {
++    const gl = createHardwareGl('ANGLE hardware') as any;
++    const renderer = new WebGLTileRenderer(gl);
++    const initialTextures = gl.createTexture.mock.calls.length;
++    const tile = { width: 2, height: 2, data: new Uint8ClampedArray(16) } as ImageData;
++    renderer.drawTileImageData(0, 0, 2, 2, tile, false);
++    renderer.drawTileImageData(2, 0, 2, 2, tile, false);
++    expect(gl.createTexture).toHaveBeenCalledTimes(initialTextures);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(2);
++    renderer.drawTileImageData(0, 0, 2, 2, tile);
++    renderer.drawTileImageData(2, 0, 2, 2, tile);
++    expect(gl.createTexture).toHaveBeenCalledTimes(initialTextures + 1);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(3);
++  });
++
+   it('resizes and draws fills, ImageData, ImageBitmaps, and VideoFrames', () => {
+     const gl = createHardwareGl('ANGLE (NVIDIA RTX 4090 Direct3D11 vs_5_0 ps_5_0)') as any;
+     const renderer = new WebGLTileRenderer(gl);
+diff --git a/code/web/bpane-client/js/__tests__/webgl-texture-source-renderer.test.ts b/code/web/bpane-client/js/__tests__/webgl-texture-source-renderer.test.ts
+index b3b9b24..74e6fef 100644
+--- a/code/web/bpane-client/js/__tests__/webgl-texture-source-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/webgl-texture-source-renderer.test.ts
+@@ -119,4 +119,24 @@ describe('WebGLTextureSourceRenderer', () => {
+     renderer.destroy();
+     expect(gl.deleteTexture).toHaveBeenCalledWith({ id: 'texture-1' });
+   });
++
++  it('retains immutable tile uploads without caching mutable canvas/video draws', () => {
++    const gl = createTextureGl() as any;
++    const renderer = new WebGLTextureSourceRenderer(gl, {
++      program: {} as WebGLProgram, vao: {} as WebGLVertexArrayObject,
++      uRect: {} as WebGLUniformLocation, uMode: {} as WebGLUniformLocation,
++    });
++    const source = { width: 2, height: 2 } as ImageBitmap;
++    renderer.drawTile(0, 0, 2, 2, source);
++    renderer.drawTile(2, 2, 2, 2, source);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(1);
++    renderer.draw(0, 0, 2, 2, source);
++    renderer.draw(0, 0, 2, 2, source);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(3);
++    renderer.clearTileCache();
++    renderer.drawTile(0, 0, 2, 2, source);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(4);
++    renderer.destroy();
++    expect(gl.deleteTexture).toHaveBeenCalledTimes(3);
++  });
+ });
+diff --git a/code/web/bpane-client/js/__tests__/webgl-tile-texture-cache.test.ts b/code/web/bpane-client/js/__tests__/webgl-tile-texture-cache.test.ts
+new file mode 100644
+index 0000000..b14fb4b
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/webgl-tile-texture-cache.test.ts
+@@ -0,0 +1,95 @@
++import { describe, expect, it, vi } from 'vitest';
++import { WebGLTileTextureCache } from '../render/webgl-tile-texture-cache.js';
++
++function createGl() {
++  let id = 0;
++  return {
++    TEXTURE_2D: 1, TEXTURE_MIN_FILTER: 2, TEXTURE_MAG_FILTER: 3,
++    TEXTURE_WRAP_S: 4, TEXTURE_WRAP_T: 5, NEAREST: 6,
++    CLAMP_TO_EDGE: 7, RGBA: 8, UNSIGNED_BYTE: 9,
++    createTexture: vi.fn(() => ({ id: ++id })),
++    deleteTexture: vi.fn(), bindTexture: vi.fn(), texParameteri: vi.fn(), texImage2D: vi.fn(),
++  } as unknown as WebGL2RenderingContext;
++}
++
++function tile(width = 2, height = 2): ImageData {
++  return { width, height, data: new Uint8ClampedArray(width * height * 4) } as ImageData;
++}
++
++describe('WebGLTileTextureCache', () => {
++  it('uploads once and reuses immutable source identity at every position', () => {
++    const gl = createGl();
++    const cache = new WebGLTileTextureCache(gl);
++    const source = tile();
++    const texture = cache.getOrUpload(source);
++    expect(cache.getOrUpload(source)).toBe(texture);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(1);
++    expect(cache.stats).toEqual({ hits: 1, uploads: 1, evictions: 0 });
++  });
++
++  it('distinguishes replacements and evicts least-recently-used textures', () => {
++    const gl = createGl();
++    const cache = new WebGLTileTextureCache(gl, 2, 100);
++    const first = tile();
++    const second = tile();
++    const third = tile();
++    cache.getOrUpload(first);
++    const oldTexture = cache.getOrUpload(second);
++    cache.getOrUpload(first);
++    cache.getOrUpload(third);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(3);
++    expect(gl.deleteTexture).toHaveBeenCalledWith(oldTexture);
++    expect(cache.size).toBe(2);
++    expect(cache.stats.evictions).toBe(1);
++  });
++
++  it('reserves incoming bytes, keeps exact fits and rejects oversized sources', () => {
++    const gl = createGl();
++    const cache = new WebGLTileTextureCache(gl, 10, 20);
++    cache.getOrUpload(tile(1, 1));
++    cache.getOrUpload(tile(2, 2));
++    expect(cache.bytes).toBe(20);
++    cache.getOrUpload(tile(2, 1));
++    expect(cache.bytes).toBe(8);
++    expect(cache.stats.evictions).toBe(2);
++    expect(cache.getOrUpload(tile(3, 3))).toBeNull();
++    expect(cache.bytes).toBe(8);
++  });
++
++  it('deletes all textures exactly once on clear and reuploads on reuse', () => {
++    const gl = createGl();
++    const cache = new WebGLTileTextureCache(gl);
++    const source = tile();
++    const texture = cache.getOrUpload(source);
++    cache.clear();
++    cache.clear();
++    expect(gl.deleteTexture).toHaveBeenCalledTimes(1);
++    expect(gl.deleteTexture).toHaveBeenCalledWith(texture);
++    expect(cache.bytes).toBe(0);
++    expect(cache.size).toBe(0);
++    cache.getOrUpload(source);
++    expect(gl.texImage2D).toHaveBeenCalledTimes(2);
++  });
++
++  it('handles allocation failure and deletes resources after an upload exception', () => {
++    const gl = createGl();
++    const cache = new WebGLTileTextureCache(gl);
++    vi.mocked(gl.createTexture).mockReturnValueOnce(null);
++    expect(cache.getOrUpload(tile())).toBeNull();
++    vi.mocked(gl.texImage2D).mockImplementationOnce(() => { throw new Error('lost'); });
++    expect(() => cache.getOrUpload(tile())).toThrow('lost');
++    expect(gl.deleteTexture).toHaveBeenCalledTimes(1);
++    expect(cache.size).toBe(0);
++    expect(cache.bytes).toBe(0);
++  });
++
++  it('does not share textures between WebGL contexts', () => {
++    const source = tile();
++    const firstGl = createGl();
++    const secondGl = createGl();
++    new WebGLTileTextureCache(firstGl).getOrUpload(source);
++    new WebGLTileTextureCache(secondGl).getOrUpload(source);
++    expect(firstGl.texImage2D).toHaveBeenCalledTimes(1);
++    expect(secondGl.texImage2D).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts b/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
+index bc07d94..8859207 100644
+--- a/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
++++ b/code/web/bpane-client/js/__tests__/zstd-tile-renderer.test.ts
+@@ -163,6 +163,15 @@ describe('ZstdTileRenderer', () => {
+     expect(result).toEqual({ kind: 'miss', reason: 'decode-failed' });
+   });
+ 
++  it('keeps zero-hash repair tiles out of the GPU cache too', () => {
++    const glRenderer = createWebGLRenderer();
++    new ZstdTileRenderer().draw({
++      cache: new TileCache(), hash: 0n, data: createCompressedRgbaPixel(),
++      rect: { x: 0, y: 0, w: 1, h: 1 }, ctx: null, glRenderer: glRenderer as any,
++    });
++    expect(glRenderer.drawTileImageData).toHaveBeenCalledWith(0, 0, 1, 1, expect.any(ImageData), false);
++  });
++
+   it('reports a size mismatch when decompressed bytes do not match the target rect', () => {
+     const renderer = new ZstdTileRenderer();
+ 
+@@ -219,4 +228,32 @@ describe('ZstdTileRenderer', () => {
+     expect(imageData.data.buffer).toBe(decompressed.buffer);
+     expect(imageData.data.byteOffset).toBe(decompressed.byteOffset);
+   });
++
++  it('skips decompression for dimension-matched nonzero hashes but not repair tiles', () => {
++    const decompress = vi.fn(() => new Uint8Array([1, 2, 3, 255]));
++    const renderer = new ZstdTileRenderer(decompress);
++    const cache = new TileCache();
++    const ctx = createCanvasContext();
++    const args = { cache, hash: 25n, data: createCompressedRgbaPixel(), rect: { x: 0, y: 0, w: 1, h: 1 }, ctx, glRenderer: null };
++    renderer.draw(args);
++    const original = cache.get(25n);
++    renderer.draw(args);
++    expect(decompress).toHaveBeenCalledTimes(1);
++    expect(cache.get(25n)).toBe(original);
++    expect(ctx.putImageData).toHaveBeenLastCalledWith(original, 0, 0);
++    renderer.draw({ ...args, hash: 0n });
++    renderer.draw({ ...args, hash: 0n });
++    expect(decompress).toHaveBeenCalledTimes(3);
++  });
++
++  it('decodes again when the cached content ID has a different shape', () => {
++    const decompress = vi.fn(() => new Uint8Array(8));
++    const cache = new TileCache();
++    const renderer = new ZstdTileRenderer(decompress);
++    const args = { cache, hash: 26n, data: createCompressedRgbaPixel(), rect: { x: 0, y: 0, w: 2, h: 1 }, ctx: createCanvasContext(), glRenderer: null };
++    renderer.draw(args);
++    renderer.draw({ ...args, rect: { x: 0, y: 0, w: 1, h: 2 } });
++    expect(decompress).toHaveBeenCalledTimes(2);
++    expect(cache.get(26n)?.height).toBe(2);
++  });
+ });
+diff --git a/code/web/bpane-client/js/render/cache-hit-tile-renderer.ts b/code/web/bpane-client/js/render/cache-hit-tile-renderer.ts
+index 6282eb9..2600295 100644
+--- a/code/web/bpane-client/js/render/cache-hit-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/cache-hit-tile-renderer.ts
+@@ -1,4 +1,4 @@
+-import type { TileCache } from '../tile-cache.js';
++import type { CachedTile, TileCache } from '../tile-cache.js';
+ import type { WebGLTileRenderer } from '../webgl-compositor.js';
+ 
+ export type CacheHitTileDrawResult =
+@@ -6,6 +6,26 @@ export type CacheHitTileDrawResult =
+   | { kind: 'miss'; reason: 'missing' | 'size-mismatch' }
+   | { kind: 'skipped'; reason: 'offscreen' | 'no-output' };
+ 
++/** Decoded cache entries are immutable; the hash identifies pixels, not geometry. */
++export function drawCachedTile(
++  tile: CachedTile,
++  rect: { x: number; y: number; w: number; h: number },
++  ctx: CanvasRenderingContext2D | null,
++  glRenderer: WebGLTileRenderer | null,
++): void {
++  if ('close' in tile && typeof tile.close === 'function') {
++    if (glRenderer) {
++      glRenderer.drawTileImageBitmap(rect.x, rect.y, rect.w, rect.h, tile as ImageBitmap);
++    } else {
++      ctx!.drawImage(tile as ImageBitmap, rect.x, rect.y, rect.w, rect.h);
++    }
++  } else if (glRenderer) {
++    glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, tile as ImageData);
++  } else {
++    ctx!.putImageData(tile as ImageData, rect.x, rect.y);
++  }
++}
++
+ export class CacheHitTileRenderer {
+   draw(args: {
+     cache: TileCache;
+@@ -27,31 +47,10 @@ export class CacheHitTileRenderer {
+       return { kind: 'miss', reason: 'missing' };
+     }
+ 
+-    if (glRenderer) {
+-      if ('close' in tile && typeof tile.close === 'function') {
+-        glRenderer.drawTileImageBitmap(rect.x, rect.y, rect.w, rect.h, tile as ImageBitmap);
+-        return { kind: 'drawn' };
+-      }
+-
+-      const imageData = tile as ImageData;
+-      if (imageData.width !== rect.w || imageData.height !== rect.h) {
+-        return { kind: 'miss', reason: 'size-mismatch' };
+-      }
+-      glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
+-      return { kind: 'drawn' };
+-    }
+-
+-    const canvasContext = ctx!;
+-    if ('close' in tile && typeof tile.close === 'function') {
+-      canvasContext.drawImage(tile as ImageBitmap, rect.x, rect.y, rect.w, rect.h);
+-      return { kind: 'drawn' };
+-    }
+-
+-    const imageData = tile as ImageData;
+-    if (imageData.width !== rect.w || imageData.height !== rect.h) {
++    if (tile.width !== rect.w || tile.height !== rect.h) {
+       return { kind: 'miss', reason: 'size-mismatch' };
+     }
+-    canvasContext.putImageData(imageData, rect.x, rect.y);
++    drawCachedTile(tile, rect, ctx, glRenderer);
+     return { kind: 'drawn' };
+   }
+ }
+diff --git a/code/web/bpane-client/js/render/fill-tile-renderer.ts b/code/web/bpane-client/js/render/fill-tile-renderer.ts
+index 479eea6..f5585ad 100644
+--- a/code/web/bpane-client/js/render/fill-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/fill-tile-renderer.ts
+@@ -32,9 +32,12 @@ export class FillTileRenderer {
+       glRenderer.drawFill(rect.x, rect.y, rect.w, rect.h, r, g, b, a);
+     } else {
+       const canvasContext = ctx!;
+-      if (canvasContext !== this.lastCanvasCtx || rgba !== this.lastCanvasRgba) {
+-        this.lastCanvasFillStyle = `rgba(${r},${g},${b},${a})`;
+-        canvasContext.fillStyle = this.lastCanvasFillStyle;
++      if (canvasContext !== this.lastCanvasCtx || rgba !== this.lastCanvasRgba
++        || canvasContext.fillStyle !== this.lastCanvasFillStyle) {
++        canvasContext.fillStyle = `rgba(${r},${g},${b},${a})`;
++        // Canvas resize resets drawing state without changing context identity.
++        // Retain its canonical CSS form (e.g. #rrggbb), not our input spelling.
++        this.lastCanvasFillStyle = canvasContext.fillStyle as string;
+         this.lastCanvasCtx = canvasContext;
+         this.lastCanvasRgba = rgba;
+       }
+diff --git a/code/web/bpane-client/js/render/qoi-tile-renderer.ts b/code/web/bpane-client/js/render/qoi-tile-renderer.ts
+index 390bd4a..4a45549 100644
+--- a/code/web/bpane-client/js/render/qoi-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/qoi-tile-renderer.ts
+@@ -1,6 +1,7 @@
+ import { decodeQoi } from '../qoi.js';
+ import type { TileCache } from '../tile-cache.js';
+ import type { WebGLTileRenderer } from '../webgl-compositor.js';
++import { drawCachedTile } from './cache-hit-tile-renderer.js';
+ 
+ export type QoiTileDrawResult =
+   | { kind: 'drawn'; redundant: boolean; decodedBytes: number }
+@@ -26,6 +27,17 @@ export class QoiTileRenderer {
+       return { kind: 'skipped', reason: 'offscreen' };
+     }
+ 
++    // Nonzero hashes are immutable content IDs in the same trusted-host
++    // contract as CacheHit. Dimensions must also match: hashes omit geometry.
++    const cached = hash !== 0n && cache.has(hash) ? cache.get(hash) : null;
++    if (cached && cached.width === rect.w && cached.height === rect.h) {
++      if (shouldDraw && !shouldDraw()) {
++        return { kind: 'cached', redundant: true, decodedBytes: data.byteLength };
++      }
++      drawCachedTile(cached, rect, ctx, glRenderer);
++      return { kind: 'drawn', redundant: true, decodedBytes: data.byteLength };
++    }
++
+     const decoded = decodeQoi(data);
+     if (!decoded) {
+       return { kind: 'miss', reason: 'decode-failed' };
+@@ -36,7 +48,7 @@ export class QoiTileRenderer {
+ 
+     const imageData = new ImageData(decoded.pixels, decoded.width, decoded.height);
+     const cacheable = hash !== 0n;
+-    const redundant = cacheable && cache.has(hash);
++    const redundant = false;
+     if (cacheable) {
+       cache.set(hash, imageData);
+     }
+@@ -50,7 +62,11 @@ export class QoiTileRenderer {
+     }
+ 
+     if (glRenderer) {
+-      glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
++      if (cacheable) {
++        glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
++      } else {
++        glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData, false);
++      }
+     } else {
+       ctx!.putImageData(imageData, rect.x, rect.y);
+     }
+diff --git a/code/web/bpane-client/js/render/tile-batch-sequencer.ts b/code/web/bpane-client/js/render/tile-batch-sequencer.ts
+index 3b8fd1c..99c6d55 100644
+--- a/code/web/bpane-client/js/render/tile-batch-sequencer.ts
++++ b/code/web/bpane-client/js/render/tile-batch-sequencer.ts
+@@ -10,10 +10,14 @@ export class TileBatchSequencer {
+   private flushChain: Promise<void> = Promise.resolve();
+   private lastAppliedFrameSeq: number | null = null;
+   private epoch = 0;
++  private failed = false;
++
++  constructor(private readonly onError?: (error: unknown, batch: QueuedTileBatch) => void) {}
+ 
+   invalidate(): void {
+     this.epoch++;
+     this.lastAppliedFrameSeq = null;
++    this.failed = false;
+   }
+ 
+   reset(): void {
+@@ -64,7 +68,22 @@ export class TileBatchSequencer {
+         return;
+       }
+ 
+-      const completed = await applyBatch(batch);
++      let completed: boolean;
++      try {
++        completed = await applyBatch(batch);
++      } catch (error) {
++        if (batch.epoch === this.epoch) {
++          // A partially drawn delta cannot be rolled back. Do not apply later
++          // scroll copies against it; request a fresh session/grid instead.
++          this.failed = true;
++          try {
++            this.onError?.(error, batch);
++          } catch {
++            // An observer must not poison the serialization promise forever.
++          }
++        }
++        return;
++      }
+       if (!completed) {
+         return;
+       }
+@@ -80,7 +99,7 @@ export class TileBatchSequencer {
+   }
+ 
+   private canStartBatch(frameSeq: number, epoch: number): boolean {
+-    return epoch === this.epoch && this.isNewerFrameSeq(frameSeq);
++    return !this.failed && epoch === this.epoch && this.isNewerFrameSeq(frameSeq);
+   }
+ 
+   private isNewerFrameSeq(seq: number): boolean {
+diff --git a/code/web/bpane-client/js/render/tile-draw-runtime.ts b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+index 7f8d0d2..f0b1a76 100644
+--- a/code/web/bpane-client/js/render/tile-draw-runtime.ts
++++ b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+@@ -98,6 +98,7 @@ export class TileDrawRuntime {
+   }
+ 
+   setWebGLRenderer(renderer: WebGLTileRenderer | null): void {
++    if (this.glRenderer !== renderer) this.glRenderer?.clearTileCache?.();
+     this.glRenderer = renderer;
+   }
+ 
+@@ -122,6 +123,7 @@ export class TileDrawRuntime {
+   }
+ 
+   applyGridConfig(config: TileGridConfig): void {
++    this.glRenderer?.clearTileCache?.();
+     this.gridConfig = config;
+     this.cache.clear();
+     this.gridOffsetX = 0;
+@@ -130,6 +132,7 @@ export class TileDrawRuntime {
+   }
+ 
+   reset(): void {
++    this.glRenderer?.clearTileCache?.();
+     this.cache.clear();
+     this.gridConfig = null;
+     this.gridOffsetX = 0;
+@@ -243,7 +246,7 @@ export class TileDrawRuntime {
+       if (result.kind === 'cached') {
+         return;
+       }
+-      this.stats.qoiDecodes++;
++      if (!result.redundant) this.stats.qoiDecodes++;
+       return;
+     }
+ 
+@@ -271,7 +274,7 @@ export class TileDrawRuntime {
+       if (result.kind === 'cached') {
+         return;
+       }
+-      this.stats.zstdDecodes++;
++      if (!result.redundant) this.stats.zstdDecodes++;
+       return;
+     }
+ 
+diff --git a/code/web/bpane-client/js/render/webgl-texture-source-renderer.ts b/code/web/bpane-client/js/render/webgl-texture-source-renderer.ts
+index 0949047..113f7b1 100644
+--- a/code/web/bpane-client/js/render/webgl-texture-source-renderer.ts
++++ b/code/web/bpane-client/js/render/webgl-texture-source-renderer.ts
+@@ -10,10 +10,12 @@ export class WebGLTextureSourceRenderer {
+   private bindings: WebGLTextureSourceBindings;
+   private texture: WebGLTexture;
+   private canvasHeight = 0;
++  private readonly tileTextures: WebGLTileTextureCache;
+ 
+   constructor(gl: WebGL2RenderingContext, bindings: WebGLTextureSourceBindings) {
+     this.gl = gl;
+     this.bindings = bindings;
++    this.tileTextures = new WebGLTileTextureCache(gl);
+     this.texture = gl.createTexture()!;
+     gl.bindTexture(gl.TEXTURE_2D, this.texture);
+     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+@@ -27,6 +29,28 @@ export class WebGLTextureSourceRenderer {
+     this.canvasHeight = canvasHeight;
+   }
+ 
++  /** Only immutable decoded tiles use GPU retention; video/canvas draws do not. */
++  drawTile(x: number, y: number, width: number, height: number, tile: CachedTile): void {
++    const texture = this.tileTextures.getOrUpload(tile);
++    if (!texture) {
++      this.draw(x, y, width, height, tile);
++      return;
++    }
++    const gl = this.gl;
++    gl.useProgram(this.bindings.program);
++    gl.bindVertexArray(this.bindings.vao);
++    gl.bindTexture(gl.TEXTURE_2D, texture);
++    gl.uniform4f(this.bindings.uRect, x, y, width, height);
++    gl.uniform1i(this.bindings.uMode, 0);
++    gl.drawArrays(gl.TRIANGLES, 0, 6);
++    gl.bindTexture(gl.TEXTURE_2D, null);
++    gl.bindVertexArray(null);
++  }
++
++  clearTileCache(): void {
++    this.tileTextures.clear();
++  }
++
+   draw(x: number, y: number, width: number, height: number, source: TexImageSource | ImageData): void {
+     const gl = this.gl;
+     gl.useProgram(this.bindings.program);
+@@ -75,6 +99,9 @@ export class WebGLTextureSourceRenderer {
+   }
+ 
+   destroy(): void {
++    this.clearTileCache();
+     this.gl.deleteTexture(this.texture);
+   }
+ }
++import type { CachedTile } from '../tile-cache.js';
++import { WebGLTileTextureCache } from './webgl-tile-texture-cache.js';
+diff --git a/code/web/bpane-client/js/render/webgl-tile-texture-cache.ts b/code/web/bpane-client/js/render/webgl-tile-texture-cache.ts
+new file mode 100644
+index 0000000..d851d8b
+--- /dev/null
++++ b/code/web/bpane-client/js/render/webgl-tile-texture-cache.ts
+@@ -0,0 +1,73 @@
++import type { CachedTile } from '../tile-cache.js';
++
++type TextureEntry = { texture: WebGLTexture; bytes: number };
++
++/**
++ * Bounded GPU mirror of immutable decoded tiles. Object identity deliberately
++ * distinguishes replacements for the same wire hash. Mutable video/canvas
++ * sources never enter this cache. CPU and GPU cache eviction are independent;
++ * a GPU miss only reuploads pixels and never causes a protocol cache miss.
++ */
++export class WebGLTileTextureCache {
++  private readonly entries = new Map<CachedTile, TextureEntry>();
++  private byteSize = 0;
++  readonly stats = { hits: 0, uploads: 0, evictions: 0 };
++
++  constructor(
++    private readonly gl: WebGL2RenderingContext,
++    private readonly maxEntries = 2048,
++    private readonly maxBytes = 32 * 1024 * 1024,
++  ) {}
++
++  get bytes(): number { return this.byteSize; }
++  get size(): number { return this.entries.size; }
++
++  getOrUpload(tile: CachedTile): WebGLTexture | null {
++    const existing = this.entries.get(tile);
++    if (existing) {
++      this.entries.delete(tile);
++      this.entries.set(tile, existing);
++      this.stats.hits++;
++      return existing.texture;
++    }
++
++    const bytes = tile.width * tile.height * 4;
++    if (bytes <= 0 || !Number.isSafeInteger(bytes) || bytes > this.maxBytes || this.maxEntries <= 0) {
++      return null;
++    }
++    const gl = this.gl;
++    const texture = gl.createTexture();
++    if (!texture) return null;
++
++    while (this.entries.size >= this.maxEntries || this.byteSize + bytes > this.maxBytes) {
++      const oldest = this.entries.entries().next().value;
++      if (!oldest) break;
++      this.entries.delete(oldest[0]);
++      this.byteSize -= oldest[1].bytes;
++      gl.deleteTexture(oldest[1].texture);
++      this.stats.evictions++;
++    }
++
++    try {
++      gl.bindTexture(gl.TEXTURE_2D, texture);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
++      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
++      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tile);
++    } catch (error) {
++      gl.deleteTexture(texture);
++      throw error;
++    }
++    this.entries.set(tile, { texture, bytes });
++    this.byteSize += bytes;
++    this.stats.uploads++;
++    return texture;
++  }
++
++  clear(): void {
++    for (const entry of this.entries.values()) this.gl.deleteTexture(entry.texture);
++    this.entries.clear();
++    this.byteSize = 0;
++  }
++}
+diff --git a/code/web/bpane-client/js/render/zstd-tile-renderer.ts b/code/web/bpane-client/js/render/zstd-tile-renderer.ts
+index 5a7a58e..2653f45 100644
+--- a/code/web/bpane-client/js/render/zstd-tile-renderer.ts
++++ b/code/web/bpane-client/js/render/zstd-tile-renderer.ts
+@@ -2,6 +2,7 @@ import { decompress } from 'fzstd';
+ 
+ import type { TileCache } from '../tile-cache.js';
+ import type { WebGLTileRenderer } from '../webgl-compositor.js';
++import { drawCachedTile } from './cache-hit-tile-renderer.js';
+ 
+ export type ZstdTileDrawResult =
+   | { kind: 'drawn'; redundant: boolean; encodedBytes: number }
+@@ -33,6 +34,17 @@ export class ZstdTileRenderer {
+       return { kind: 'skipped', reason: 'offscreen' };
+     }
+ 
++    // Match the protocol's CacheHit invariant: nonzero immutable content ID
++    // plus dimensions. Zero-hash repair tiles must always be decoded afresh.
++    const cached = hash !== 0n && cache.has(hash) ? cache.get(hash) : null;
++    if (cached && cached.width === rect.w && cached.height === rect.h) {
++      if (shouldDraw && !shouldDraw()) {
++        return { kind: 'cached', redundant: true, encodedBytes: data.byteLength };
++      }
++      drawCachedTile(cached, rect, ctx, glRenderer);
++      return { kind: 'drawn', redundant: true, encodedBytes: data.byteLength };
++    }
++
+     let decompressed: Uint8Array;
+     try {
+       decompressed = this.decompressFn(data);
+@@ -54,7 +66,7 @@ export class ZstdTileRenderer {
+       : Uint8ClampedArray.from(decompressed);
+     const imageData = new ImageData(pixels, rect.w, rect.h);
+     const cacheable = hash !== 0n;
+-    const redundant = cacheable && cache.has(hash);
++    const redundant = false;
+     if (cacheable) {
+       cache.set(hash, imageData);
+     }
+@@ -68,7 +80,11 @@ export class ZstdTileRenderer {
+     }
+ 
+     if (glRenderer) {
+-      glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
++      if (cacheable) {
++        glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData);
++      } else {
++        glRenderer.drawTileImageData(rect.x, rect.y, rect.w, rect.h, imageData, false);
++      }
+     } else {
+       ctx!.putImageData(imageData, rect.x, rect.y);
+     }
+diff --git a/code/web/bpane-client/js/session-runtime-factory.ts b/code/web/bpane-client/js/session-runtime-factory.ts
+index a6e049b..d6073ae 100644
+--- a/code/web/bpane-client/js/session-runtime-factory.ts
++++ b/code/web/bpane-client/js/session-runtime-factory.ts
+@@ -201,6 +201,15 @@ export class SessionRuntimeFactory {
+         console.error(message, error);
+       },
+     });
++    const onRenderError = (failure: unknown): void => {
++      const error = failure instanceof Error ? failure : new Error(String(failure));
++      try {
++        params.context.onError(error);
++      } finally {
++        params.context.onDisconnect(`rendering failed: ${error.message}`);
++      }
++    };
++    params.tileCompositor.setRenderErrorHandler?.(onRenderError);
+     const surfaceRuntime = this.deps.createSessionSurfaceRuntime({
+       container: params.container,
+       tileCompositor: params.tileCompositor,
+@@ -210,6 +219,7 @@ export class SessionRuntimeFactory {
+       onTileCacheMiss: ({ frameSeq, col, row, hash }) => {
+         params.context.sendTileCacheMiss(frameSeq, col, row, hash);
+       },
++      onRenderError,
+       sendResizeRequest: params.context.sendResizeRequest,
+       setRemoteSize: params.context.setRemoteSize,
+       onResolutionChange: params.context.onResolutionChange,
+diff --git a/code/web/bpane-client/js/session-surface-runtime.ts b/code/web/bpane-client/js/session-surface-runtime.ts
+index 402e751..8450008 100644
+--- a/code/web/bpane-client/js/session-surface-runtime.ts
++++ b/code/web/bpane-client/js/session-surface-runtime.ts
+@@ -16,6 +16,8 @@ interface SessionSurfaceTileCompositor {
+   setContext(ctx: CanvasRenderingContext2D): void;
+   setWebGLRenderer(renderer: WebGLTileRenderer | null): void;
+   setCacheMissHandler(handler: ((event: CacheMissEvent) => void) | null): void;
++  setRenderErrorHandler?(handler: ((error: unknown) => void) | null): void;
++  setVideoRegionChangeHandler?(handler: (() => void) | null): void;
+   getGridConfig(): { tileSize: number; cols: number; rows: number; screenW: number; screenH: number } | null;
+   getVideoRegion(): { x: number; y: number; w: number; h: number } | null;
+ }
+@@ -27,6 +29,7 @@ export interface SessionSurfaceRuntimeInput {
+   renderBackend?: SessionSurfaceRenderBackendPreference;
+   resizeSource?: SessionResizeSource;
+   onTileCacheMiss: (event: CacheMissEvent) => void;
++  onRenderError?: (error: unknown) => void;
+   sendResizeRequest: (width: number, height: number) => void;
+   setRemoteSize: (width: number, height: number) => void;
+   onResolutionChange?: (width: number, height: number) => void;
+@@ -47,6 +50,12 @@ export class SessionSurfaceRuntime {
+   private readonly previousContainerPosition: string;
+   private readonly managesContainerPosition: boolean;
+   private glRenderer: WebGLTileRenderer | null = null;
++  private readonly onRenderError: ((error: unknown) => void) | undefined;
++  private readonly onContextLost = (): void => {
++    // Retained tiles and scroll copies depend on framebuffer history. A new
++    // session creates a fresh context and requests the host's full snapshot.
++    this.onRenderError?.(new Error('WebGL rendering context lost'));
++  };
+   private renderDiagnostics: WebGLRendererDiagnostics = {
+     backend: 'canvas2d',
+     renderer: null,
+@@ -58,6 +67,7 @@ export class SessionSurfaceRuntime {
+   constructor(input: SessionSurfaceRuntimeInput) {
+     this.container = input.container;
+     this.tileCompositor = input.tileCompositor;
++    this.onRenderError = input.onRenderError;
+     this.previousContainerPosition = this.container.style.position;
+     const computedContainerPosition = window.getComputedStyle(this.container).position;
+     this.managesContainerPosition = computedContainerPosition === '' || computedContainerPosition === 'static';
+@@ -111,6 +121,7 @@ export class SessionSurfaceRuntime {
+ 
+     let ctx: CanvasRenderingContext2D | null = null;
+     if (this.glRenderer) {
++      this.canvas.addEventListener('webglcontextlost', this.onContextLost);
+       this.tileCompositor.setWebGLRenderer(this.glRenderer);
+     } else {
+       ctx = this.canvas.getContext('2d', {
+@@ -132,6 +143,9 @@ export class SessionSurfaceRuntime {
+       getGridConfig: () => this.tileCompositor.getGridConfig(),
+       getVideoRegion: () => this.tileCompositor.getVideoRegion(),
+     });
++    this.tileCompositor.setVideoRegionChangeHandler?.(() => {
++      this.videoDisplayRuntime.clearVideoOverlay();
++    });
+ 
+     const resizeObserverFactory = input.createResizeObserver
+       ?? ((callback: ResizeObserverCallback) => new ResizeObserver(callback));
+@@ -230,6 +244,9 @@ export class SessionSurfaceRuntime {
+     this.videoDisplayRuntime.destroy();
+     this.cursorRuntime.reset();
+     this.tileCompositor.setCacheMissHandler(null);
++    this.tileCompositor.setRenderErrorHandler?.(null);
++    this.tileCompositor.setVideoRegionChangeHandler?.(null);
++    this.canvas.removeEventListener('webglcontextlost', this.onContextLost);
+     this.tileCompositor.setWebGLRenderer(null);
+ 
+     if (this.glRenderer) {
+diff --git a/code/web/bpane-client/js/session-video-decoder-runtime.ts b/code/web/bpane-client/js/session-video-decoder-runtime.ts
+index 1355b75..93cf253 100644
+--- a/code/web/bpane-client/js/session-video-decoder-runtime.ts
++++ b/code/web/bpane-client/js/session-video-decoder-runtime.ts
+@@ -19,6 +19,8 @@ export class SessionVideoDecoderRuntime {
+ 
+   private videoDecoder: VideoDecoder | null = null;
+   private decoderConfigured = false;
++  private waitingForKeyframe = true;
++  private decoderGeneration = 0;
+   private decoderTimestamp = 0;
+   private spsNal: Uint8Array | null = null;
+   private ppsNal: Uint8Array | null = null;
+@@ -37,6 +39,7 @@ export class SessionVideoDecoderRuntime {
+   destroy(): void {
+     this.closeDecoder();
+     this.decoderConfigured = false;
++    this.waitingForKeyframe = true;
+     this.decoderTimestamp = 0;
+     this.spsNal = null;
+     this.ppsNal = null;
+@@ -72,17 +75,30 @@ export class SessionVideoDecoderRuntime {
+     if (!this.videoDecoder) {
+       this.initDecoder();
+     }
+-    if (!this.decoderConfigured && nalType !== 5) {
++    if ((!this.decoderConfigured || this.waitingForKeyframe) && nalType !== 5) {
++      this.incrementDroppedFrame();
+       return;
+     }
+     if (!this.decoderConfigured) {
+       this.initDecoder();
+     }
+ 
+-    const decoder = this.videoDecoder!;
++    let decoder = this.videoDecoder!;
+     if (decoder.decodeQueueSize > 3) {
+-      this.incrementDroppedFrame();
+-      return;
++      // Arbitrarily skipping a delta breaks H.264 reference history. Bound
++      // latency by retiring the entire decoder, then resume only at an IDR.
++      this.closeDecoder();
++      this.decoderConfigured = false;
++      this.waitingForKeyframe = true;
++      this.tileInfoByTimestamp.clear();
++      if (nalType !== 5) {
++        this.incrementDroppedFrame();
++        return;
++      }
++      // An incoming IDR is already a safe recovery point; never discard it
++      // simply because work in the retired decoder was backlogged.
++      this.initDecoder();
++      decoder = this.videoDecoder!;
+     }
+ 
+     const chunkData = this.buildChunk(nalData, nalType);
+@@ -97,8 +113,13 @@ export class SessionVideoDecoderRuntime {
+         data: chunkData,
+       }));
+       this.decoderTimestamp = timestamp;
++      this.waitingForKeyframe = false;
+     } catch (error) {
+       this.tileInfoByTimestamp.delete(timestamp);
++      this.closeDecoder();
++      this.decoderConfigured = false;
++      this.waitingForKeyframe = true;
++      this.tileInfoByTimestamp.clear();
+       console.error('[bpane] decode error:', error);
+     }
+   }
+@@ -106,8 +127,14 @@ export class SessionVideoDecoderRuntime {
+   private initDecoder(): void {
+     this.closeDecoder();
+     this.tileInfoByTimestamp.clear();
++    this.waitingForKeyframe = true;
++    const generation = this.decoderGeneration;
+     this.videoDecoder = new this.videoDecoderCtor({
+       output: (frame: VideoFrame) => {
++        if (generation !== this.decoderGeneration) {
++          frame.close();
++          return;
++        }
+         const timestamp = typeof frame.timestamp === 'number' ? frame.timestamp : null;
+         const tileInfo = timestamp !== null && this.tileInfoByTimestamp.has(timestamp)
+           ? this.tileInfoByTimestamp.get(timestamp) ?? null
+@@ -118,7 +145,10 @@ export class SessionVideoDecoderRuntime {
+         this.onDecodedFrame(frame, tileInfo);
+       },
+       error: (error: DOMException) => {
++        if (generation !== this.decoderGeneration) return;
++        this.closeDecoder();
+         this.decoderConfigured = false;
++        this.waitingForKeyframe = true;
+         this.tileInfoByTimestamp.clear();
+         this.onDecoderError(error);
+       },
+@@ -132,6 +162,7 @@ export class SessionVideoDecoderRuntime {
+   }
+ 
+   private closeDecoder(): void {
++    this.decoderGeneration++;
+     if (!this.videoDecoder) {
+       return;
+     }
+diff --git a/code/web/bpane-client/js/session-video-display-runtime.ts b/code/web/bpane-client/js/session-video-display-runtime.ts
+index dc38c01..befdedd 100644
+--- a/code/web/bpane-client/js/session-video-display-runtime.ts
++++ b/code/web/bpane-client/js/session-video-display-runtime.ts
+@@ -71,7 +71,7 @@ export class SessionVideoDisplayRuntime {
+   }
+ 
+   handleDecodedFrame(frame: VideoFrame, tileInfo: TileInfo | null): void {
+-    if (!this.ctx && !this.glRenderer) {
++    if ((!this.ctx && !this.glRenderer) || !this.canDisplayFrame(tileInfo)) {
+       frame.close();
+       return;
+     }
+@@ -116,6 +116,12 @@ export class SessionVideoDisplayRuntime {
+     if (!this.pendingVideoFrame) {
+       return;
+     }
++    // Reliable tile batches can retire or move a region after decoder output
++    // but before the next animation frame. Never upload that obsolete frame.
++    if (!this.canDisplayFrame(this.pendingTileInfo)) {
++      this.clearVideoOverlay();
++      return;
++    }
+ 
+     if (this.glRenderer) {
+       this.glRenderer.uploadVideoFrame(this.pendingVideoFrame);
+@@ -141,6 +147,13 @@ export class SessionVideoDisplayRuntime {
+   }
+ 
+   private drawOverlay(): void {
++    // Datagrams and decoder callbacks are independent of the reliable tile
++    // stream. In tile mode only that stream authorizes an overlay. In
++    // particular, a cached tile frame must not repaint a lossless exit repair.
++    if (!this.canDisplayFrame(this.videoBufferTileInfo)) {
++      this.clearVideoOverlay();
++      return;
++    }
+     const isFresh = this.lastVideoFrameAtMs > 0
+       && (this.now() - this.lastVideoFrameAtMs) <= this.staleMs;
+     if (!isFresh) {
+@@ -193,4 +206,15 @@ export class SessionVideoDisplayRuntime {
+       );
+     }
+   }
++
++  private canDisplayFrame(tile: TileInfo | null): boolean {
++    if (!this.getGridConfig()) return true;
++    const region = this.getVideoRegion();
++    if (!region || region.w <= 0 || region.h <= 0) return false;
++    // Legacy full-screen video is cropped to the authorized region below.
++    // Region-coded video must match the committed capture rectangle exactly;
++    // an old geometry may otherwise cover freshly repaired lossless pixels.
++    return !tile || (tile.tileX === region.x && tile.tileY === region.y
++      && tile.tileW === region.w && tile.tileH === region.h);
++  }
+ }
+diff --git a/code/web/bpane-client/js/tile-cache.ts b/code/web/bpane-client/js/tile-cache.ts
+index 155a619..6d8a7a9 100644
+--- a/code/web/bpane-client/js/tile-cache.ts
++++ b/code/web/bpane-client/js/tile-cache.ts
+@@ -118,24 +118,24 @@ export class TileCache {
+ 
+   /** Store a decoded tile by hash. Evicts oldest if at capacity. */
+   set(hash: bigint, tile: CachedTile): void {
+-    if (this.cache.has(hash)) {
+-      // Update existing — subtract old byte cost, close bitmap, then replace.
+-      const old = this.cache.get(hash)!;
++    const incomingBytes = this.tileBytes(tile);
++    const old = this.cache.get(hash);
++    if (old) {
+       this.byteSize -= this.tileBytes(old);
+-      if ('close' in old && typeof old.close === 'function') {
++      if (old !== tile && 'close' in old && typeof old.close === 'function') {
+         old.close();
+       }
+-      // delete + set to move to end of insertion order
+       this.cache.delete(hash);
+-      this.cache.set(hash, tile);
+-      this.byteSize += this.tileBytes(tile);
++    }
++
++    // An uncacheable tile still belongs to the caller and may be drawn now.
++    // Do not close it or evict the entire cache trying to fit an oversized tile.
++    if (this.maxEntries <= 0 || incomingBytes > this.maxBytes || this.maxBytes <= 0) {
+       return;
+     }
+ 
+-    // Evict oldest (first in insertion order) while over either limit.
+-    // Check byteSize >= maxBytes so that adding the incoming tile does not
+-    // push the total above the cap (the new tile's bytes are added after the loop).
+-    while (this.cache.size >= this.maxEntries || this.byteSize >= this.maxBytes) {
++    // Account for the incoming tile, including larger replacements and edges.
++    while (this.cache.size >= this.maxEntries || this.byteSize + incomingBytes > this.maxBytes) {
+       const oldest = this.cache.keys().next().value;
+       if (oldest === undefined) break;
+       const old = this.cache.get(oldest);
+@@ -150,7 +150,7 @@ export class TileCache {
+     }
+ 
+     this.cache.set(hash, tile);
+-    this.byteSize += this.tileBytes(tile);
++    this.byteSize += incomingBytes;
+   }
+ 
+   /** Number of cached entries. */
+diff --git a/code/web/bpane-client/js/tile-compositor.ts b/code/web/bpane-client/js/tile-compositor.ts
+index 7694d9c..b67cf93 100644
+--- a/code/web/bpane-client/js/tile-compositor.ts
++++ b/code/web/bpane-client/js/tile-compositor.ts
+@@ -39,7 +39,11 @@ export class TileCompositor {
+   private videoRegion: { x: number; y: number; w: number; h: number } | null = null;
+   private pendingCommands: TileCommand[] = [];
+   private readonly tileBatchCommandApplier: TileBatchCommandApplier;
+-  private readonly tileBatchSequencer = new TileBatchSequencer();
++  private onRenderError: ((error: unknown) => void) | null = null;
++  private onVideoRegionChange: (() => void) | null = null;
++  private readonly tileBatchSequencer = new TileBatchSequencer((error) => {
++    this.onRenderError?.(error);
++  });
+   private readonly tileDrawRuntime: TileDrawRuntime;
+ 
+   stats: CompositorStats = {
+@@ -90,7 +94,7 @@ export class TileCompositor {
+         this.tileDrawRuntime.setApplyOffsetMode(applyOffset);
+       },
+       setVideoRegion: (region) => {
+-        this.videoRegion = region;
++        this.setVideoRegion(region);
+       },
+       drawFill: (col, row, rgba) => {
+         this.tileDrawRuntime.drawFill(col, row, rgba);
+@@ -133,6 +137,19 @@ export class TileCompositor {
+     return this.videoRegion;
+   }
+ 
++  /** Notify overlay invalidation when a reliable region transition is applied. */
++  setVideoRegionChangeHandler(handler: (() => void) | null): void {
++    this.onVideoRegionChange = handler;
++  }
++
++  private setVideoRegion(region: { x: number; y: number; w: number; h: number } | null): void {
++    const previous = this.videoRegion;
++    const changed = previous?.x !== region?.x || previous?.y !== region?.y
++      || previous?.w !== region?.w || previous?.h !== region?.h;
++    this.videoRegion = region;
++    if (changed) this.onVideoRegionChange?.();
++  }
++
+   /** Access the underlying tile cache. */
+   getCache(): TileCache {
+     return this.tileDrawRuntime.getCache();
+@@ -143,6 +160,11 @@ export class TileCompositor {
+     this.tileDrawRuntime.setCacheMissHandler(handler);
+   }
+ 
++  /** Fatal batch errors need a fresh snapshot, not dependent-delta replay. */
++  setRenderErrorHandler(handler: ((error: unknown) => void) | null): void {
++    this.onRenderError = handler;
++  }
++
+   /** Diagnostic switch to disable retained scroll-copy reuse. */
+   setScrollCopyEnabled(enabled: boolean): void {
+     this.tileDrawRuntime.setScrollCopyEnabled(enabled);
+@@ -167,7 +189,7 @@ export class TileCompositor {
+         this.tileBatchSequencer.invalidate();
+         this.pendingCommands = [];
+         this.stats.currentPendingCommands = 0;
+-        this.videoRegion = null;
++        this.setVideoRegion(null);
+         this.tileDrawRuntime.applyGridConfig(cmd.config);
+         break;
+ 
+@@ -206,7 +228,7 @@ export class TileCompositor {
+   reset(): void {
+     this.tileBatchSequencer.reset();
+     this.tileDrawRuntime.reset();
+-    this.videoRegion = null;
++    this.setVideoRegion(null);
+     this.pendingCommands = [];
+     this.stats.currentPendingCommands = 0;
+   }
+diff --git a/code/web/bpane-client/js/webgl-compositor.ts b/code/web/bpane-client/js/webgl-compositor.ts
+index d8d8718..56b6402 100644
+--- a/code/web/bpane-client/js/webgl-compositor.ts
++++ b/code/web/bpane-client/js/webgl-compositor.ts
+@@ -5,7 +5,8 @@
+  * drawn via a minimal vertex + fragment shader pair.
+  *
+  * Design:
+- * - A single reusable texture is uploaded per tile draw (texImage2D).
++ * - Immutable decoded tiles retain textures in a bounded GPU LRU.
++ * - Mutable sources use a separate reusable texture, uploaded on every draw.
+  * - Solid-color fills use a uniform color (no texture upload).
+  * - Scroll copies use a framebuffer blit approach (read to temp texture, redraw shifted).
+  * - preserveDrawingBuffer: true — tiles are drawn incrementally, not redrawn every frame.
+@@ -143,13 +144,23 @@ export class WebGLTileRenderer {
+   }
+ 
+   /** Draw a tile from ImageData at pixel coordinates. */
+-  drawTileImageData(x: number, y: number, w: number, h: number, imageData: ImageData): void {
+-    this.textureSourceRenderer.draw(x, y, w, h, imageData);
++  drawTileImageData(x: number, y: number, w: number, h: number, imageData: ImageData, retain = true): void {
++    if (retain) {
++      this.textureSourceRenderer.drawTile(x, y, w, h, imageData);
++    } else {
++      // Zero-hash repair/edge tiles are one-shot pixels, not reusable content.
++      this.textureSourceRenderer.draw(x, y, w, h, imageData);
++    }
+   }
+ 
+   /** Draw a tile from an ImageBitmap at pixel coordinates (zero-copy on Chrome). */
+   drawTileImageBitmap(x: number, y: number, w: number, h: number, bitmap: ImageBitmap): void {
+-    this.textureSourceRenderer.draw(x, y, w, h, bitmap);
++    this.textureSourceRenderer.drawTile(x, y, w, h, bitmap);
++  }
++
++  /** Drop GPU tile references on grid/session reset. Does not alter framebuffer. */
++  clearTileCache(): void {
++    this.textureSourceRenderer.clearTileCache();
+   }
+ 
+   /**

@@ -1,0 +1,1192 @@
+diff --git a/code/apps/bpane-host/src/tiles/mod.rs b/code/apps/bpane-host/src/tiles/mod.rs
+index 029209e..6fd47ec 100644
+--- a/code/apps/bpane-host/src/tiles/mod.rs
++++ b/code/apps/bpane-host/src/tiles/mod.rs
+@@ -5,6 +5,7 @@
+ //! hash management. The production tile loop lives in main.rs.
+ 
+ pub mod emitter;
++mod sent_hash_cache;
+ 
+ use std::time::Instant;
+ 
+diff --git a/code/apps/bpane-host/src/tiles/emitter.rs b/code/apps/bpane-host/src/tiles/emitter.rs
+index 5113268..f426069 100644
+--- a/code/apps/bpane-host/src/tiles/emitter.rs
++++ b/code/apps/bpane-host/src/tiles/emitter.rs
+@@ -12,11 +12,10 @@
+ //! If the hash matches the last-sent hash, a CacheHit is emitted instead
+ //! of re-encoding.
+ 
+-use indexmap::IndexSet;
+-
+ use bpane_protocol::frame::Frame;
+ use bpane_protocol::TileMessage;
+ 
++use super::sent_hash_cache::SentHashCache;
+ use super::{fnv_hash, Rect, TileClass, TileCoord, TileGrid};
+ 
+ /// Which lossless codec to use for non-solid, non-video tiles.
+@@ -83,10 +82,12 @@ pub struct TileEmitter {
+     cols: u16,
+     /// Content hashes of QOI tiles the client has in its tile cache.
+     /// Used for cross-position CacheHit (e.g. scroll reuse).
+-    /// IndexSet provides O(1) lookup, O(1) insert, and preserves insertion
+-    /// order for bounded eviction (oldest = index 0).
+-    sent_hashes: IndexSet<u64>,
++    /// Bounded O(1) LRU with stable slots: touches/evictions never shift the
++    /// other cached entries, and invalidation preserves their relative order.
++    sent_hashes: SentHashCache,
+     sent_hash_evictions_total: u64,
++    /// Explicit full-snapshot requests are coalesced until the next fresh capture.
++    snapshot_requested: bool,
+     /// Last video region sideband sent to the client.
+     /// Used to send updates and a clearing VideoRegion(0,0,0,0) on exit.
+     last_video_region: Option<Rect>,
+@@ -94,6 +95,8 @@ pub struct TileEmitter {
+     tile_scratch: Vec<u8>,
+     /// Which lossless codec to use for non-solid tiles.
+     codec: TileCodec,
++    /// One native context/output buffer per capture thread, never per tile.
++    zstd_encoder: TileZstdEncoder,
+ }
+ 
+ impl TileEmitter {
+@@ -109,11 +112,13 @@ impl TileEmitter {
+             last_hashes: vec![0; count],
+             static_last_hashes: vec![0; count],
+             cols,
+-            sent_hashes: IndexSet::with_capacity(MAX_SENT_HASHES),
++            sent_hashes: SentHashCache::new(MAX_SENT_HASHES),
+             sent_hash_evictions_total: 0,
++            snapshot_requested: false,
+             last_video_region: None,
+             tile_scratch: Vec::new(),
+             codec,
++            zstd_encoder: TileZstdEncoder::default(),
+         }
+     }
+ 
+@@ -235,13 +240,8 @@ impl TileEmitter {
+     }
+ 
+     /// Mark a known hash as recently used in the sender-side LRU index.
+-    /// IndexSet: move_to_back is O(1) amortized.
+     fn touch_sent_hash(&mut self, hash: u64) {
+-        // move_index moves the entry to the given position, shifting others.
+-        // For LRU we move to back (most recent).
+-        if let Some(idx) = self.sent_hashes.get_index_of(&hash) {
+-            self.sent_hashes.move_index(idx, self.sent_hashes.len() - 1);
+-        }
++        self.sent_hashes.touch(hash);
+     }
+ 
+     /// Record a QOI hash as "client has this cached".
+@@ -249,16 +249,9 @@ impl TileEmitter {
+         if hash == 0 {
+             return;
+         }
+-        if self.sent_hashes.contains(&hash) {
+-            self.touch_sent_hash(hash);
+-            return;
+-        }
+-        // Evict oldest (index 0) if at capacity
+-        while self.sent_hashes.len() >= MAX_SENT_HASHES {
+-            self.sent_hashes.shift_remove_index(0);
++        if self.sent_hashes.insert(hash) {
+             self.sent_hash_evictions_total = self.sent_hash_evictions_total.saturating_add(1);
+         }
+-        self.sent_hashes.insert(hash);
+     }
+ 
+     pub fn sent_hash_entries(&self) -> usize {
+@@ -289,7 +282,7 @@ impl TileEmitter {
+                 continue;
+             }
+             extract_tile_pixels_into(frame_pixels, stride, &rect, &mut self.tile_scratch);
+-            let (hash, _) = tile_content_hash(&self.tile_scratch);
++            let (hash, _) = tile_content_hash(&self.tile_scratch, rect.w, rect.h);
+             let idx = coord.row as usize * self.cols as usize + coord.col as usize;
+             if idx < self.last_hashes.len() {
+                 self.last_hashes[idx] = hash;
+@@ -302,8 +295,14 @@ impl TileEmitter {
+     /// - Drop the hash from the "client has this" set so future emits use QOI/Fill.
+     /// - Clear the per-position hash so the next frame does not Level-1 skip.
+     pub fn handle_cache_miss(&mut self, col: u16, row: u16, hash: u64) {
++        // Reserved impossible coordinate: gateway requests a self-contained
++        // snapshot, not an individual cache repair. The wire format is unchanged.
++        if col == u16::MAX && row == u16::MAX && hash == 0 {
++            self.snapshot_requested = true;
++            return;
++        }
+         if hash != 0 {
+-            self.sent_hashes.swap_remove(&hash);
++            self.sent_hashes.remove(hash);
+         }
+         let idx = row as usize * self.cols as usize + col as usize;
+         if idx < self.last_hashes.len() {
+@@ -314,6 +313,32 @@ impl TileEmitter {
+         }
+     }
+ 
++    /// Begin a fresh capture snapshot after scroll analysis has finished.
++    /// GridConfig is the client epoch barrier: it discards pending ScrollCopy
++    /// commands/async work and clears caches before this independent repaint.
++    pub fn begin_requested_snapshot(
++        &mut self,
++        grid: &TileGrid,
++        offset_y: u16,
++    ) -> Option<Vec<Frame>> {
++        if !std::mem::take(&mut self.snapshot_requested) {
++            return None;
++        }
++        self.last_hashes.fill(0);
++        self.static_last_hashes.fill(0);
++        self.sent_hashes.clear();
++        self.last_video_region = None;
++        Some(vec![
++            self.emit_grid_config(grid),
++            TileMessage::GridOffset {
++                offset_x: 0,
++                offset_y: offset_y as i16,
++            }
++            .to_frame(),
++            TileMessage::TileDrawMode { apply_offset: true }.to_frame(),
++        ])
++    }
++
+     /// Emit a GridConfig message.
+     pub fn emit_grid_config(&self, grid: &TileGrid) -> Frame {
+         let msg = TileMessage::GridConfig {
+@@ -402,7 +427,7 @@ impl TileEmitter {
+             // based on just the RGBA value - invariant across tile dimensions.
+             // This ensures L1 skip works even when edge tiles change height during scroll.
+             extract_tile_pixels_into(frame_pixels, stride, &rect, &mut self.tile_scratch);
+-            let (hash, solid_rgba) = tile_content_hash(&self.tile_scratch);
++            let (hash, solid_rgba) = tile_content_hash(&self.tile_scratch, rect.w, rect.h);
+ 
+             // Level 1: same position, same hash -> skip entirely.
+             // The canvas already shows the correct pixels from the previous draw.
+@@ -461,6 +486,7 @@ impl TileEmitter {
+                     self.codec
+                 };
+                 if let Some(msg) = encode_tile(
++                    &mut self.zstd_encoder,
+                     codec,
+                     &self.tile_scratch,
+                     rect.w as u32,
+@@ -549,7 +575,7 @@ impl TileEmitter {
+             }
+ 
+             extract_tile_pixels_into(frame_pixels, stride, &rect, &mut self.tile_scratch);
+-            let (hash, solid_rgba) = tile_content_hash(&self.tile_scratch);
++            let (hash, solid_rgba) = tile_content_hash(&self.tile_scratch, rect.w, rect.h);
+ 
+             let is_boundary = boundary_col.is_some_and(|bc| coord.col == bc)
+                 || boundary_top_row.is_some_and(|br| coord.row == br)
+@@ -612,6 +638,7 @@ impl TileEmitter {
+                 };
+                 let cache_hash = if is_boundary { 0 } else { hash };
+                 if let Some(msg) = encode_tile(
++                    &mut self.zstd_encoder,
+                     codec,
+                     &self.tile_scratch,
+                     rect.w as u32,
+@@ -668,12 +695,18 @@ fn extract_tile_pixels_into(frame: &[u8], stride: usize, rect: &Rect, out: &mut
+ /// edge tiles change height as `offset_y` shifts, but a white tile is still white
+ /// regardless of whether it's 64x64 or 27x64. The canonical hash ensures L1 skip
+ /// works across dimension changes, sending zero bytes for unchanged solid-color tiles.
+-fn tile_content_hash(tile_data: &[u8]) -> (u64, Option<u32>) {
++fn tile_content_hash(tile_data: &[u8], width: u16, height: u16) -> (u64, Option<u32>) {
+     if let Some(rgba) = detect_solid_color(tile_data) {
+         // Canonical: hash just the 4-byte color, not the full pixel buffer.
+         (fnv_hash(&rgba.to_le_bytes()), Some(rgba))
+     } else {
+-        (fnv_hash(tile_data), None)
++        // Cached decoded bitmaps have dimensions. Equal pixel byte sequences
++        // at differently shaped edge tiles must not share a cache key.
++        let dimensions = (u64::from(width) << 32) | u64::from(height);
++        (
++            xxhash_rust::xxh3::xxh3_64_with_seed(tile_data, dimensions),
++            None,
++        )
+     }
+ }
+ 
+@@ -710,9 +743,37 @@ fn encode_qoi(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+     qoi::encode_to_vec(rgba, width, height).ok()
+ }
+ 
+-/// Compress raw RGBA pixels with zstd. Returns None on failure.
+-fn encode_zstd(rgba: &[u8]) -> Option<Vec<u8>> {
+-    zstd::encode_all(rgba, 1).ok()
++/// Independent zstd frames at the existing level 1, without allocating a native
++/// streaming context or copying through Read buffers for every small tile.
++#[derive(Default)]
++struct TileZstdEncoder {
++    compressor: Option<zstd::bulk::Compressor<'static>>,
++    output: Vec<u8>,
++}
++
++impl TileZstdEncoder {
++    fn encode(&mut self, rgba: &[u8]) -> Option<Vec<u8>> {
++        // Matches the largest tile permitted by tile_size_from_env(). No
++        // dictionaries, workers or cross-tile compression history are used.
++        if rgba.len() > 256 * 256 * 4 {
++            return None;
++        }
++        if self.compressor.is_none() {
++            self.compressor = Some(zstd::bulk::Compressor::new(1).ok()?);
++        }
++        self.output.clear();
++        let bound = zstd::zstd_safe::compress_bound(rgba.len());
++        if self.output.capacity() < bound {
++            self.output.reserve_exact(bound);
++        }
++        self.compressor
++            .as_mut()?
++            .compress_to_buffer(rgba, &mut self.output)
++            .ok()?;
++        // Wire frames own their bytes until asynchronous delivery completes.
++        // Copy only the compressed result, retaining the bounded work buffer.
++        Some(self.output.clone())
++    }
+ }
+ 
+ fn coord_in_tile_bounds(coord: TileCoord, bounds: Option<(u16, u16, u16, u16)>) -> bool {
+@@ -728,6 +789,7 @@ fn coord_in_tile_bounds(coord: TileCoord, bounds: Option<(u16, u16, u16, u16)>)
+ 
+ /// Encode tile pixels and return the appropriate TileMessage.
+ fn encode_tile(
++    zstd_encoder: &mut TileZstdEncoder,
+     codec: TileCodec,
+     rgba: &[u8],
+     width: u32,
+@@ -743,12 +805,24 @@ fn encode_tile(
+             hash,
+             data,
+         }),
+-        TileCodec::Zstd => encode_zstd(rgba).map(|data| TileMessage::Zstd {
+-            col,
+-            row,
+-            hash,
+-            data,
+-        }),
++        TileCodec::Zstd => zstd_encoder
++            .encode(rgba)
++            .map(|data| TileMessage::Zstd {
++                col,
++                row,
++                hash,
++                data,
++            })
++            .or_else(|| {
++                // A codec error must not silently leave the previous tile on the
++                // client while its sender-side L1 hash already claims success.
++                encode_qoi(rgba, width, height).map(|data| TileMessage::Qoi {
++                    col,
++                    row,
++                    hash,
++                    data,
++                })
++            }),
+     }
+ }
+ 
+@@ -757,6 +831,123 @@ mod tests {
+     use super::*;
+     use bpane_protocol::channel::ChannelId;
+ 
++    fn zstd_test_pixels(width: usize, height: usize, seed: u64) -> Vec<u8> {
++        let mut state = seed;
++        (0..width * height * 4)
++            .map(|index| {
++                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++                if seed == 0 {
++                    (index % 61) as u8
++                } else {
++                    (state >> 32) as u8
++                }
++            })
++            .collect()
++    }
++
++    #[test]
++    fn reused_zstd_context_emits_independent_frames_and_bounded_scratch() {
++        let mut encoder = TileZstdEncoder::default();
++        let mut frames = Vec::new();
++        for (width, height, seed) in [
++            (64, 64, 0),
++            (32, 17, 1),
++            (64, 64, 2),
++            (256, 256, 3),
++            (32, 32, 0),
++        ] {
++            let pixels = zstd_test_pixels(width, height, seed);
++            let compressed = encoder.encode(&pixels).unwrap();
++            assert_eq!(zstd::decode_all(compressed.as_slice()).unwrap(), pixels);
++            frames.push((compressed, pixels));
++        }
++        // Decoding in reverse order with fresh decoders proves there is no
++        // preceding-tile dictionary/history dependency on the wire.
++        for (compressed, pixels) in frames.into_iter().rev() {
++            assert_eq!(zstd::decode_all(compressed.as_slice()).unwrap(), pixels);
++        }
++        let pointer = encoder.output.as_ptr();
++        let capacity = encoder.output.capacity();
++        for _ in 0..10 {
++            encoder.encode(&zstd_test_pixels(64, 64, 0)).unwrap();
++        }
++        assert_eq!(encoder.output.as_ptr(), pointer);
++        assert_eq!(encoder.output.capacity(), capacity);
++        assert!(capacity <= zstd::zstd_safe::compress_bound(256 * 256 * 4));
++        assert!(encoder.encode(&vec![0; 256 * 256 * 4 + 1]).is_none());
++    }
++
++    #[test]
++    fn zstd_failure_falls_back_to_lossless_qoi() {
++        let pixels = zstd_test_pixels(257, 256, 0);
++        let mut encoder = TileZstdEncoder::default();
++        let message =
++            encode_tile(&mut encoder, TileCodec::Zstd, &pixels, 257, 256, 0, 0, 1).unwrap();
++        match message {
++            TileMessage::Qoi { data, .. } => {
++                assert_eq!(qoi::decode_to_vec(&data).unwrap().1, pixels);
++            }
++            _ => panic!("oversized bounded zstd job must use lossless fallback"),
++        }
++    }
++
++    /// Requires the reduced application's npm dependencies (fzstd). No files
++    /// are created; transfer real compressed frames to Node over stdin.
++    #[test]
++    #[ignore]
++    fn zstd_bulk_frames_decode_with_frontend_fzstd() {
++        use std::io::Write;
++        use std::process::{Command, Stdio};
++        let mut encoder = TileZstdEncoder::default();
++        let vectors = [(64, 64, 0), (32, 17, 1), (64, 64, 2), (256, 256, 0)]
++            .into_iter()
++            .map(|(w, h, seed)| {
++                let pixels = zstd_test_pixels(w, h, seed);
++                let compressed = encoder.encode(&pixels).unwrap();
++                serde_json::json!({"compressed": compressed, "pixels": pixels})
++            })
++            .collect::<Vec<_>>();
++        let mut child = Command::new("node")
++            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../.."))
++            .args(["--input-type=module", "-e", "import{decompress}from'fzstd';import assert from'node:assert/strict';let input='';for await(const chunk of process.stdin)input+=chunk;const vectors=JSON.parse(input);for(const v of vectors.reverse())assert.deepEqual([...decompress(Uint8Array.from(v.compressed))],v.pixels);console.log('fzstd independent frame round trips:',vectors.length);"])
++            .stdin(Stdio::piped()).spawn().unwrap();
++        child
++            .stdin
++            .take()
++            .unwrap()
++            .write_all(&serde_json::to_vec(&vectors).unwrap())
++            .unwrap();
++        assert!(child.wait().unwrap().success());
++    }
++
++    #[test]
++    #[ignore]
++    fn benchmark_reused_zstd_context_against_encode_all() {
++        use std::hint::black_box;
++        use std::time::Instant;
++        const OPERATIONS: usize = 10_000;
++        for (workload, seed) in [("ui_pattern", 0), ("noisy_pixels", 1)] {
++            let pixels = zstd_test_pixels(64, 64, seed);
++            for round in 0..3 {
++                let started = Instant::now();
++                let mut original_bytes = 0;
++                for _ in 0..OPERATIONS {
++                    original_bytes +=
++                        black_box(zstd::encode_all(pixels.as_slice(), 1).unwrap()).len();
++                }
++                let original_us = started.elapsed().as_micros();
++                let mut encoder = TileZstdEncoder::default();
++                let started = Instant::now();
++                let mut improved_bytes = 0;
++                for _ in 0..OPERATIONS {
++                    improved_bytes += black_box(encoder.encode(&pixels).unwrap()).len();
++                }
++                let improved_us = started.elapsed().as_micros();
++                println!("{{\"workload\":\"{workload}\",\"round\":{round},\"operations\":{OPERATIONS},\"original_us\":{original_us},\"improved_us\":{improved_us},\"original_bytes\":{original_bytes},\"improved_bytes\":{improved_bytes}}}");
++            }
++        }
++    }
++
+     #[test]
+     fn detect_solid_color_uniform() {
+         // Input is BGRA: B=0x00, G=0x00, R=0xFF, A=0xFF (red pixel in BGRA)
+@@ -767,6 +958,101 @@ mod tests {
+         assert_eq!(rgba.unwrap(), 0xFF0000FF);
+     }
+ 
++    #[test]
++    fn sender_cache_evicts_true_lru_after_cache_miss() {
++        let mut emitter = TileEmitter::new(1, 1);
++        for hash in 1..=MAX_SENT_HASHES as u64 {
++            emitter.track_sent_hash(hash);
++        }
++        emitter.touch_sent_hash(1);
++        emitter.handle_cache_miss(0, 0, 2);
++        emitter.track_sent_hash(MAX_SENT_HASHES as u64 + 1);
++        assert_eq!(emitter.sent_hash_evictions_total(), 0);
++        emitter.track_sent_hash(MAX_SENT_HASHES as u64 + 2);
++        assert_eq!(emitter.sent_hash_entries(), MAX_SENT_HASHES);
++        assert_eq!(emitter.sent_hash_evictions_total(), 1);
++        assert!(emitter.sent_hashes.contains(&1));
++        assert!(!emitter.sent_hashes.contains(&3));
++        assert!(emitter.sent_hashes.contains(&(MAX_SENT_HASHES as u64)));
++    }
++
++    #[test]
++    fn sender_cache_zero_hash_and_resize_do_not_leave_stale_entries() {
++        let mut emitter = TileEmitter::new(1, 1);
++        emitter.track_sent_hash(0);
++        assert_eq!(emitter.sent_hash_entries(), 0);
++        emitter.track_sent_hash(1);
++        emitter.last_hashes[0] = 1;
++        emitter.static_last_hashes[0] = 1;
++        emitter.handle_cache_miss(0, 0, 1);
++        assert_eq!(emitter.sent_hash_entries(), 0);
++        assert_eq!(emitter.last_hashes[0], 0);
++        assert_eq!(emitter.static_last_hashes[0], 0);
++        emitter.track_sent_hash(2);
++        emitter.resize(1, 1);
++        assert_eq!(emitter.sent_hash_entries(), 0);
++        assert_eq!(emitter.sent_hash_evictions_total(), 0);
++        emitter.track_sent_hash(3);
++        assert!(emitter.sent_hashes.contains(&3));
++    }
++
++    #[test]
++    fn full_snapshot_clears_all_assumptions_and_restores_offset_before_tiles() {
++        let grid = TileGrid::new(128, 128, 64);
++        let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++        emitter.last_hashes.fill(42);
++        emitter.static_last_hashes.fill(42);
++        emitter.track_sent_hash(42);
++        emitter.last_video_region = Some(Rect::new(0, 0, 64, 64));
++        emitter.handle_cache_miss(u16::MAX, u16::MAX, 0);
++        emitter.handle_cache_miss(u16::MAX, u16::MAX, 0); // coalesce
++        let prefix = emitter.begin_requested_snapshot(&grid, 17).unwrap();
++        assert_eq!(prefix.len(), 3);
++        assert!(matches!(
++            TileMessage::decode(&prefix[0].payload).unwrap(),
++            TileMessage::GridConfig { .. }
++        ));
++        assert!(matches!(
++            TileMessage::decode(&prefix[1].payload).unwrap(),
++            TileMessage::GridOffset {
++                offset_x: 0,
++                offset_y: 17
++            }
++        ));
++        assert!(matches!(
++            TileMessage::decode(&prefix[2].payload).unwrap(),
++            TileMessage::TileDrawMode { apply_offset: true }
++        ));
++        assert!(emitter.last_hashes.iter().all(|&hash| hash == 0));
++        assert!(emitter.static_last_hashes.iter().all(|&hash| hash == 0));
++        assert_eq!(emitter.sent_hash_entries(), 0);
++        assert_eq!(emitter.current_video_region(), None);
++        assert!(emitter.begin_requested_snapshot(&grid, 17).is_none());
++
++        let pixels = vec![0xFF; 128 * 128 * 4];
++        let coords = (0..3)
++            .flat_map(|row| (0..2).map(move |col| TileCoord::new(col, row)))
++            .collect::<Vec<_>>();
++        let result = emitter.emit_frame(&pixels, 128 * 4, &coords, &grid, 17, None, None);
++        assert_eq!(result.stats.fills, 6);
++        assert_eq!(result.stats.skipped, 0);
++        assert_eq!(result.stats.cache_hits, 0);
++        assert!(matches!(
++            TileMessage::decode(&result.tile_frames.last().unwrap().payload).unwrap(),
++            TileMessage::BatchEnd { .. }
++        ));
++    }
++
++    #[test]
++    fn ordinary_zero_hash_repair_does_not_trigger_full_snapshot() {
++        let grid = TileGrid::new(64, 64, 64);
++        let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++        emitter.handle_cache_miss(0, 0, 0);
++        assert!(emitter.begin_requested_snapshot(&grid, 0).is_none());
++        emitter.handle_cache_miss(u16::MAX, u16::MAX, 123);
++        assert!(emitter.begin_requested_snapshot(&grid, 0).is_none());
++    }
++
+     #[test]
+     fn detect_solid_color_not_uniform() {
+         // BGRA input
+@@ -780,6 +1066,26 @@ mod tests {
+         assert!(detect_solid_color(&[]).is_none());
+     }
+ 
++    #[test]
++    fn non_solid_cache_identity_includes_bitmap_dimensions() {
++        let pixels = [0, 0, 0, 255, 255, 255, 255, 255].repeat(32 * 32);
++        let wide = tile_content_hash(&pixels, 64, 32);
++        let tall = tile_content_hash(&pixels, 32, 64);
++        assert_eq!(wide.1, None);
++        assert_eq!(tall.1, None);
++        assert_ne!(wide.0, tall.0);
++        assert_eq!(wide, tile_content_hash(&pixels, 64, 32));
++    }
++
++    #[test]
++    fn solid_color_identity_remains_dimension_independent() {
++        let pixel = [0, 0, 255, 255];
++        assert_eq!(
++            tile_content_hash(&pixel.repeat(64 * 32), 64, 32),
++            tile_content_hash(&pixel.repeat(32 * 64), 32, 64)
++        );
++    }
++
+     #[test]
+     fn extract_tile_pixels_basic() {
+         // 4x4 frame, tile at (1,1) size 2x2
+diff --git a/code/apps/bpane-host/src/tiles/sent_hash_cache.rs b/code/apps/bpane-host/src/tiles/sent_hash_cache.rs
+new file mode 100644
+index 0000000..57d2c61
+--- /dev/null
++++ b/code/apps/bpane-host/src/tiles/sent_hash_cache.rs
+@@ -0,0 +1,300 @@
++//! Sender-side content hash LRU. The client's Map uses delete+set for touches;
++//! mirror that order without IndexSet's O(n) move_index/shift_remove operations.
++
++use std::collections::HashMap;
++
++const NONE: usize = usize::MAX;
++
++#[derive(Clone, Copy)]
++struct Entry {
++    hash: u64,
++    previous: usize,
++    next: usize,
++}
++
++/// A bounded hash index and intrusive list in reusable, stable vector slots.
++/// All lookup, touch, insertion, eviction and removal operations are O(1)
++/// expected time; no unsafe code, per-touch allocation, or external dependency.
++pub(super) struct SentHashCache {
++    capacity: usize,
++    index: HashMap<u64, usize>,
++    entries: Vec<Entry>,
++    free: Vec<usize>,
++    oldest: usize,
++    newest: usize,
++}
++
++impl SentHashCache {
++    pub(super) fn new(capacity: usize) -> Self {
++        assert!(capacity > 0);
++        Self {
++            capacity,
++            index: HashMap::with_capacity(capacity),
++            entries: Vec::with_capacity(capacity),
++            free: Vec::with_capacity(capacity),
++            oldest: NONE,
++            newest: NONE,
++        }
++    }
++
++    pub(super) fn len(&self) -> usize {
++        self.index.len()
++    }
++
++    pub(super) fn contains(&self, hash: &u64) -> bool {
++        self.index.contains_key(hash)
++    }
++
++    pub(super) fn clear(&mut self) {
++        self.index.clear();
++        self.entries.clear();
++        self.free.clear();
++        self.oldest = NONE;
++        self.newest = NONE;
++    }
++
++    fn detach(&mut self, slot: usize) {
++        let entry = self.entries[slot];
++        if entry.previous == NONE {
++            self.oldest = entry.next;
++        } else {
++            self.entries[entry.previous].next = entry.next;
++        }
++        if entry.next == NONE {
++            self.newest = entry.previous;
++        } else {
++            self.entries[entry.next].previous = entry.previous;
++        }
++    }
++
++    fn append(&mut self, slot: usize) {
++        self.entries[slot].previous = self.newest;
++        self.entries[slot].next = NONE;
++        if self.newest == NONE {
++            self.oldest = slot;
++        } else {
++            self.entries[self.newest].next = slot;
++        }
++        self.newest = slot;
++    }
++
++    pub(super) fn touch(&mut self, hash: u64) -> bool {
++        let Some(&slot) = self.index.get(&hash) else {
++            return false;
++        };
++        if slot != self.newest {
++            self.detach(slot);
++            self.append(slot);
++        }
++        true
++    }
++
++    /// Return true only when this insertion evicted an older hash.
++    pub(super) fn insert(&mut self, hash: u64) -> bool {
++        if self.touch(hash) {
++            return false;
++        }
++        let evicted = self.len() == self.capacity;
++        if evicted {
++            self.remove(self.entries[self.oldest].hash);
++        }
++        let entry = Entry {
++            hash,
++            previous: NONE,
++            next: NONE,
++        };
++        let slot = if let Some(slot) = self.free.pop() {
++            self.entries[slot] = entry;
++            slot
++        } else {
++            self.entries.push(entry);
++            self.entries.len() - 1
++        };
++        self.index.insert(hash, slot);
++        self.append(slot);
++        evicted
++    }
++
++    /// Invalidate a hash without changing the recency of surviving entries.
++    pub(super) fn remove(&mut self, hash: u64) -> bool {
++        let Some(slot) = self.index.remove(&hash) else {
++            return false;
++        };
++        self.detach(slot);
++        self.free.push(slot);
++        true
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn order(cache: &SentHashCache) -> Vec<u64> {
++        let mut result = Vec::new();
++        let mut slot = cache.oldest;
++        let mut previous = NONE;
++        while slot != NONE {
++            assert!(
++                result.len() < cache.capacity,
++                "list must not contain a cycle"
++            );
++            let entry = cache.entries[slot];
++            assert_eq!(entry.previous, previous);
++            assert_eq!(cache.index.get(&entry.hash), Some(&slot));
++            result.push(entry.hash);
++            previous = slot;
++            slot = entry.next;
++        }
++        assert_eq!(previous, cache.newest);
++        assert_eq!(result.len(), cache.len());
++        assert_eq!(cache.entries.len(), cache.len() + cache.free.len());
++        assert!(cache.entries.len() <= cache.capacity);
++        result
++    }
++
++    #[test]
++    fn touch_and_insert_mirror_client_lru_order() {
++        let mut cache = SentHashCache::new(3);
++        for hash in [1, 2, 3] {
++            assert!(!cache.insert(hash));
++        }
++        assert!(cache.touch(1));
++        assert_eq!(order(&cache), [2, 3, 1]);
++        assert!(cache.insert(4));
++        assert!(!cache.contains(&2));
++        assert!(!cache.insert(3));
++        assert_eq!(order(&cache), [1, 4, 3]);
++        assert!(!cache.touch(99));
++    }
++
++    #[test]
++    fn invalidation_preserves_order_and_reuses_storage() {
++        let mut cache = SentHashCache::new(4);
++        for hash in [1, 2, 3, 4] {
++            cache.insert(hash);
++        }
++        assert!(cache.remove(2));
++        assert_eq!(order(&cache), [1, 3, 4]);
++        assert!(!cache.remove(2));
++        assert!(!cache.insert(5));
++        assert_eq!(order(&cache), [1, 3, 4, 5]);
++        assert!(cache.insert(6));
++        assert_eq!(order(&cache), [3, 4, 5, 6]);
++        assert_eq!(cache.entries.len(), 4);
++    }
++
++    #[test]
++    fn single_entry_and_clear_are_reusable() {
++        let mut cache = SentHashCache::new(1);
++        cache.insert(1);
++        assert!(cache.touch(1));
++        assert!(cache.insert(2));
++        assert_eq!(order(&cache), [2]);
++        assert!(cache.remove(2));
++        assert!(order(&cache).is_empty());
++        cache.insert(3);
++        cache.clear();
++        assert!(order(&cache).is_empty());
++        assert!(!cache.insert(4));
++        assert_eq!(order(&cache), [4]);
++    }
++
++    #[test]
++    fn randomized_operations_match_reference_client_order() {
++        let mut cache = SentHashCache::new(31);
++        let mut reference = Vec::new();
++        let mut seed = 0x1234_5678_u64;
++        for _ in 0..30_000 {
++            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
++            let hash = (seed >> 32) % 83;
++            let position = reference.iter().position(|&entry| entry == hash);
++            match seed % 13 {
++                0 => {
++                    cache.clear();
++                    reference.clear();
++                }
++                1..=3 => {
++                    assert_eq!(cache.remove(hash), position.is_some());
++                    if let Some(position) = position {
++                        reference.remove(position);
++                    }
++                }
++                4..=7 => {
++                    assert_eq!(cache.touch(hash), position.is_some());
++                    if let Some(position) = position {
++                        reference.remove(position);
++                        reference.push(hash);
++                    }
++                }
++                _ => {
++                    let evicted = position.is_none() && reference.len() == 31;
++                    if let Some(position) = position {
++                        reference.remove(position);
++                    }
++                    if evicted {
++                        reference.remove(0);
++                    }
++                    reference.push(hash);
++                    assert_eq!(cache.insert(hash), evicted);
++                }
++            }
++            assert_eq!(order(&cache), reference);
++        }
++    }
++
++    /// Run explicitly with --release --ignored --nocapture. Measures cache
++    /// bookkeeping only, not capture, codecs, transport or end-to-end latency.
++    #[test]
++    #[ignore]
++    fn benchmark_warm_cache_against_original_indexset() {
++        use indexmap::IndexSet;
++        use std::hint::black_box;
++        use std::time::Instant;
++
++        const CAPACITY: usize = 8192;
++        const OPERATIONS: usize = 100_000;
++        for workload in ["scroll_reuse", "new_content"] {
++            for round in 0..3 {
++                let mut original = IndexSet::with_capacity(CAPACITY);
++                let mut improved = SentHashCache::new(CAPACITY);
++                for hash in 1..=CAPACITY as u64 {
++                    original.insert(hash);
++                    improved.insert(hash);
++                }
++                let started = Instant::now();
++                for step in 0..OPERATIONS {
++                    let hash = if workload == "scroll_reuse" {
++                        (step % CAPACITY + 1) as u64
++                    } else {
++                        (CAPACITY + step + 1) as u64
++                    };
++                    if let Some(index) = original.get_index_of(&hash) {
++                        original.move_index(index, original.len() - 1);
++                    } else {
++                        original.shift_remove_index(0);
++                        original.insert(hash);
++                    }
++                    black_box(&original);
++                }
++                let original_us = started.elapsed().as_micros();
++                let started = Instant::now();
++                for step in 0..OPERATIONS {
++                    let hash = if workload == "scroll_reuse" {
++                        (step % CAPACITY + 1) as u64
++                    } else {
++                        (CAPACITY + step + 1) as u64
++                    };
++                    improved.insert(hash);
++                    black_box(&improved);
++                }
++                let improved_us = started.elapsed().as_micros();
++                assert_eq!(
++                    order(&improved),
++                    original.iter().copied().collect::<Vec<_>>()
++                );
++                println!("{{\"workload\":\"{workload}\",\"round\":{round},\"capacity\":{CAPACITY},\"operations\":{OPERATIONS},\"original_us\":{original_us},\"improved_us\":{improved_us}}}");
++            }
++        }
++    }
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/emit.rs b/code/apps/bpane-host/src/tile_loop/emit.rs
+index 6c2241b..999de94 100644
+--- a/code/apps/bpane-host/src/tile_loop/emit.rs
++++ b/code/apps/bpane-host/src/tile_loop/emit.rs
+@@ -3,6 +3,7 @@
+ use tokio::sync::mpsc;
+ 
+ use crate::capture::ffmpeg::CaptureRegion;
++use crate::config::H264Mode;
+ use crate::region::extend_dirty_with_tile_bounds;
+ use crate::scroll::{has_scroll_region_split, is_content_tile_in_scroll_region};
+ use crate::tiles::{self, Rect};
+@@ -33,6 +34,13 @@ fn send_tile_batch(
+     true
+ }
+ 
++fn snapshot_tile_coords(grid: &tiles::TileGrid, offset_y: u16) -> Vec<tiles::TileCoord> {
++    let rows = grid.rows + u16::from(offset_y > 0);
++    (0..rows)
++        .flat_map(|row| (0..grid.cols).map(move |col| tiles::TileCoord::new(col, row)))
++        .collect()
++}
++
+ fn capture_region_to_rect(region: CaptureRegion) -> Option<Rect> {
+     Some(Rect::new(
+         u16::try_from(region.x).ok()?,
+@@ -43,10 +51,15 @@ fn capture_region_to_rect(region: CaptureRegion) -> Option<Rect> {
+ }
+ 
+ fn effective_video_capture_region(
++    h264_mode: H264Mode,
+     committed_video_region: Option<CaptureRegion>,
+     cdp_video_region_hint: Option<CaptureRegion>,
+ ) -> Option<CaptureRegion> {
+-    committed_video_region.or(cdp_video_region_hint)
++    if matches!(h264_mode, H264Mode::Off) {
++        None
++    } else {
++        committed_video_region.or(cdp_video_region_hint)
++    }
+ }
+ 
+ fn rect_tile_bounds(
+@@ -145,6 +158,14 @@ impl super::TileCaptureThread {
+         scroll_thin_mode_frame: bool,
+         scroll_thin_repair_frame: bool,
+     ) -> bool {
++        // This capture is independent of every previous client canvas/cache.
++        // Include the clipped bottom row when the content grid is offset.
++        let snapshot_prefix = self
++            .emitter
++            .begin_requested_snapshot(&self.grid, self.grid_offset_y);
++        if snapshot_prefix.is_some() {
++            all_dirty = snapshot_tile_coords(&self.grid, self.grid_offset_y);
++        }
+         // Split dirty tiles into static (browser chrome) and content (scrolling
+         // viewport). Static tiles are emitted at raw framebuffer positions
+         // with a separate hash table that is never shifted, so browser
+@@ -159,9 +180,12 @@ impl super::TileCaptureThread {
+                 extend_dirty_with_tile_bounds(&mut all_dirty, bounds);
+             }
+         }
+-        let active_video_region =
+-            effective_video_capture_region(self.region_committer.active, cdp_video_region_hint)
+-                .and_then(capture_region_to_rect);
++        let active_video_region = effective_video_capture_region(
++            self.h264_mode,
++            self.region_committer.active,
++            cdp_video_region_hint,
++        )
++        .and_then(capture_region_to_rect);
+         let previous_video_region = self.emitter.current_video_region();
+         if let Some(bounds) = video_region_transition_bounds(
+             previous_video_region,
+@@ -172,13 +196,17 @@ impl super::TileCaptureThread {
+         ) {
+             extend_dirty_with_tile_bounds(&mut all_dirty, bounds);
+         }
+-        let use_static_split = has_scroll_region_split(
+-            self.last_scroll_region_top,
+-            self.last_scroll_region_bottom,
+-            self.last_scroll_region_right,
+-            self.screen_h,
+-            self.screen_w,
+-        );
++        // A snapshot paints the complete capture on one offset grid. Mixing raw
++        // static rows with shifted content can leave a gap at a split boundary
++        // when offset_y is nonzero. Normal delta frames retain the static split.
++        let use_static_split = snapshot_prefix.is_none()
++            && has_scroll_region_split(
++                self.last_scroll_region_top,
++                self.last_scroll_region_bottom,
++                self.last_scroll_region_right,
++                self.screen_h,
++                self.screen_w,
++            );
+         let (content_dirty, static_dirty): (Vec<tiles::TileCoord>, Vec<tiles::TileCoord>) =
+             if use_static_split {
+                 let ts = self.tile_size as u16;
+@@ -202,7 +230,7 @@ impl super::TileCaptureThread {
+         let static_dirty =
+             filter_video_owned_coords(static_dirty, &self.grid, 0, active_video_region);
+ 
+-        let result = self.emitter.emit_frame(
++        let mut result = self.emitter.emit_frame(
+             &rgba,
+             stride,
+             &content_dirty,
+@@ -211,6 +239,10 @@ impl super::TileCaptureThread {
+             editable_qoi_tile_bounds,
+             active_video_region,
+         );
++        if let Some(mut prefix) = snapshot_prefix {
++            prefix.append(&mut result.tile_frames);
++            result.tile_frames = prefix;
++        }
+ 
+         // Emit static (chrome) tiles separately with offset_y=0.
+         let static_frames = if !static_dirty.is_empty() {
+@@ -333,13 +365,14 @@ mod tests {
+     use tokio::sync::mpsc;
+ 
+     use crate::capture::ffmpeg::CaptureRegion;
++    use crate::config::H264Mode;
+     use crate::tiles::Rect;
+ 
+     use crate::tiles::{TileCoord, TileGrid};
+ 
+     use super::{
+         effective_video_capture_region, filter_video_owned_coords, send_tile_batch,
+-        tile_rect_with_offset, video_region_transition_bounds,
++        snapshot_tile_coords, tile_rect_with_offset, video_region_transition_bounds,
+     };
+ 
+     #[test]
+@@ -364,6 +397,20 @@ mod tests {
+         assert_eq!(payloads, vec![vec![1], vec![2], vec![4], vec![5], vec![3]]);
+     }
+ 
++    #[test]
++    fn snapshot_covers_offset_bottom_row_and_entire_screen() {
++        let grid = TileGrid::new(128, 128, 64);
++        assert_eq!(snapshot_tile_coords(&grid, 0).len(), 4);
++        let offset_coords = snapshot_tile_coords(&grid, 17);
++        assert_eq!(offset_coords.len(), 6);
++        assert!(offset_coords.contains(&TileCoord::new(0, 2)));
++        assert!(offset_coords.contains(&TileCoord::new(1, 2)));
++        assert_eq!(
++            tile_rect_with_offset(TileCoord::new(1, 2), &grid, 17),
++            Rect::new(64, 111, 64, 17)
++        );
++    }
++
+     #[test]
+     fn video_region_transition_bounds_union_changed_regions() {
+         let bounds = video_region_transition_bounds(
+@@ -398,7 +445,7 @@ mod tests {
+             h: 64,
+         };
+         assert_eq!(
+-            effective_video_capture_region(Some(committed), Some(hint)),
++            effective_video_capture_region(H264Mode::VideoTiles, Some(committed), Some(hint)),
+             Some(committed)
+         );
+     }
+@@ -411,8 +458,32 @@ mod tests {
+             w: 128,
+             h: 64,
+         };
+-        assert_eq!(effective_video_capture_region(None, Some(hint)), Some(hint));
+-        assert_eq!(effective_video_capture_region(None, None), None);
++        assert_eq!(
++            effective_video_capture_region(H264Mode::VideoTiles, None, Some(hint)),
++            Some(hint)
++        );
++        assert_eq!(
++            effective_video_capture_region(H264Mode::VideoTiles, None, None),
++            None
++        );
++    }
++
++    #[test]
++    fn disabled_video_encoder_never_excludes_tiles_from_lossless_capture() {
++        let hint = CaptureRegion {
++            x: 0,
++            y: 64,
++            w: 128,
++            h: 64,
++        };
++        assert_eq!(
++            effective_video_capture_region(H264Mode::Off, None, Some(hint)),
++            None
++        );
++        assert_eq!(
++            effective_video_capture_region(H264Mode::Off, Some(hint), Some(hint)),
++            None
++        );
+     }
+ 
+     #[test]
+diff --git a/code/apps/bpane-gateway/src/session_hub/refresh.rs b/code/apps/bpane-gateway/src/session_hub/refresh.rs
+index 4a99ce8..03eb91c 100644
+--- a/code/apps/bpane-gateway/src/session_hub/refresh.rs
++++ b/code/apps/bpane-gateway/src/session_hub/refresh.rs
+@@ -23,21 +23,56 @@ pub(super) async fn request_full_refresh(
+     let rows = u16::from_le_bytes([gc_frame.payload[5], gc_frame.payload[6]]);
+     drop(gc);
+ 
+-    debug!(cols, rows, "requesting full tile refresh for late joiner");
++    debug!(
++        cols,
++        rows, "requesting independent tile snapshot for late joiner"
++    );
+ 
+-    for row in 0..rows {
+-        for col in 0..cols {
+-            let msg = TileMessage::CacheMiss {
++    // Reserved impossible coordinate, understood by this paired host build.
++    // One request atomically clears sender assumptions and includes current
++    // grid offset/draw mode plus every visible tile (including the extra row).
++    // Ordinary per-tile CacheMiss messages keep their existing repair semantics.
++    let msg = TileMessage::CacheMiss {
++        frame_seq: 0,
++        col: u16::MAX,
++        row: u16::MAX,
++        hash: 0,
++    };
++    if to_agent.send(msg.to_frame()).await.is_err() {
++        warn!("failed to request snapshot from agent");
++        return 0;
++    }
++    // Telemetry counts logical base-grid tiles requested, not IPC messages.
++    u64::from(cols) * u64::from(rows)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn full_refresh_is_one_snapshot_request_not_a_repair_flood() {
++        let grid = TileMessage::GridConfig {
++            tile_size: 64,
++            cols: 3,
++            rows: 2,
++            screen_w: 192,
++            screen_h: 128,
++        }
++        .to_frame();
++        let cached = Mutex::new(Some(Arc::new(grid)));
++        let (tx, mut rx) = mpsc::channel(1);
++        assert_eq!(request_full_refresh(&cached, &tx).await, 6);
++        let request = rx.try_recv().unwrap();
++        assert!(matches!(
++            TileMessage::decode(&request.payload).unwrap(),
++            TileMessage::CacheMiss {
+                 frame_seq: 0,
+-                col,
+-                row,
+-                hash: 0,
+-            };
+-            if to_agent.send(msg.to_frame()).await.is_err() {
+-                warn!("failed to send CacheMiss to agent");
+-                return u64::from(row) * u64::from(cols) + u64::from(col);
++                col: u16::MAX,
++                row: u16::MAX,
++                hash: 0
+             }
+-        }
++        ));
++        assert!(rx.try_recv().is_err());
+     }
+-    u64::from(cols) * u64::from(rows)
+ }
+diff --git a/code/apps/bpane-gateway/src/transport/egress.rs b/code/apps/bpane-gateway/src/transport/egress.rs
+index 58a2b90..13e3f81 100644
+--- a/code/apps/bpane-gateway/src/transport/egress.rs
++++ b/code/apps/bpane-gateway/src/transport/egress.rs
+@@ -83,9 +83,21 @@ pub(super) fn spawn_agent_to_browser_task(
+                     ctx.hub.record_egress_lagged(n);
+                     warn!(
+                         ctx.session_id,
+-                        ctx.client_id, n, "client lagged, skipping frames"
++                        ctx.client_id,
++                        n,
++                        "client lagged; closing render stream for snapshot reconnect"
+                     );
+-                    continue;
++                    // Tile frames are dependent deltas: dropping a ScrollCopy,
++                    // GridOffset or cache insertion and continuing silently can
++                    // leave persistent corruption. Only this viewer reconnects;
++                    // the shared host/browser/profile remain running.
++                    close_lagged_session(&ctx.session, || {
++                        ctx.connection.close(
++                            wtransport::VarInt::from_u32(0),
++                            b"render stream fell behind; reconnect required",
++                        );
++                    });
++                    return None;
+                 }
+                 Err(broadcast::error::RecvError::Closed) => return None,
+             }
+@@ -94,13 +106,34 @@ pub(super) fn spawn_agent_to_browser_task(
+     })
+ }
+ 
++fn close_lagged_session(session: &Session, close_connection: impl FnOnce()) {
++    // Deactivate first so other tasks stop producing dependent output even if
++    // transport shutdown is not observed until their next scheduling turn.
++    session.deactivate();
++    close_connection();
++}
++
+ fn is_video_keyframe_payload(payload: &[u8]) -> bool {
+     payload.len() > 8 && payload[8] != 0
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::is_video_keyframe_payload;
++    use super::{close_lagged_session, is_video_keyframe_payload, Session};
++
++    #[test]
++    fn lagged_viewer_is_deactivated_before_its_connection_closes() {
++        let session = Session::new(7, std::time::Duration::from_secs(10));
++        let independent_viewer = Session::new(8, std::time::Duration::from_secs(10));
++        let mut closed = false;
++        close_lagged_session(&session, || {
++            assert!(!session.is_active());
++            closed = true;
++        });
++        assert!(closed);
++        assert!(!session.is_active());
++        assert!(independent_viewer.is_active());
++    }
+ 
+     #[test]
+     fn video_keyframe_payload_detects_keyframes() {

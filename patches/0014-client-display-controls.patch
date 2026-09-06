@@ -1,0 +1,1019 @@
+diff --git a/code/web/bpane-client/js/__tests__/session-display-options.test.ts b/code/web/bpane-client/js/__tests__/session-display-options.test.ts
+new file mode 100644
+index 0000000..2f0a88a
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/session-display-options.test.ts
+@@ -0,0 +1,294 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { SessionResizeRuntime } from '../session-resize-runtime.js';
++import { SessionConnectOptionsValidator } from '../shared/connect-options-validator.js';
++import { validateCaptureScale, validateCaptureSize } from '../shared/display-options-validator.js';
++import { PointerInputRuntime } from '../input/pointer-input-runtime.js';
++
++function fixture(overrides: Partial<ConstructorParameters<typeof SessionResizeRuntime>[0]> = {}) {
++  const container = document.createElement('div');
++  container.style.cssText = 'width:800px;height:600px;flex:none;max-width:100%;resize:both';
++  const canvas = document.createElement('canvas');
++  const cursorEl = document.createElement('canvas');
++  let cssWidth = 800, cssHeight = 600;
++  const rect = () => ({ x: 41, y: 73, left: 41, top: 73, width: cssWidth, height: cssHeight,
++    right: 41 + cssWidth, bottom: 73 + cssHeight, toJSON() {} });
++  container.getBoundingClientRect = rect;
++  canvas.getBoundingClientRect = rect;
++  for (const child of [canvas, cursorEl]) {
++    child.style.width = '100%'; child.style.height = '100%';
++    container.appendChild(child);
++  }
++  const sendResizeRequest = vi.fn(), resizeRenderer = vi.fn(), onDisplayStateChange = vi.fn();
++  const runtime = new SessionResizeRuntime({ container, canvas, cursorEl,
++    hiDpi: false, resizeSource: 'container', resizeAlignment: { width: 8, height: 2 },
++    resizeObserver: { observe: vi.fn(), disconnect: vi.fn() },
++    sendResizeRequest, resizeRenderer, onDisplayStateChange, markDisplayDirty: vi.fn(),
++    setRemoteSize: vi.fn(), getDevicePixelRatio: () => 2, ...overrides });
++  return { runtime, container, canvas, cursorEl, sendResizeRequest, resizeRenderer, onDisplayStateChange,
++    setCssSize(width: number, height: number) { cssWidth = width; cssHeight = height; } };
++}
++
++afterEach(() => vi.useRealTimers());
++
++describe('explicit capture options validation', () => {
++  it.each([undefined, 1, 1.25, 1.5, 2, 3])('accepts capture scale %s', value => {
++    expect(() => validateCaptureScale(value)).not.toThrow();
++  });
++  it.each([null, '2', NaN, Infinity, -Infinity, 0, 0.99, 3.01])('rejects capture scale %s before creating a session', value => {
++    expect(() => SessionConnectOptionsValidator.validate({ container: document.createElement('div'),
++      gatewayUrl: 'https://localhost', token: 'test', captureScale: value })).toThrow(/captureScale/);
++    expect(() => fixture({ captureScale: value as number })).toThrow(/captureScale/);
++    const { runtime } = fixture({ captureScale: 1.5 });
++    expect(() => runtime.setCaptureScale(value as number)).toThrow(/captureScale/);
++    expect(runtime.getCaptureScale()).toBe(1.5);
++  });
++  it.each([undefined, { width: 1, height: 1 }, { width: 65535, height: 65535 }, { width: 1366, height: 769 }])
++  ('accepts exact positive protocol dimensions %j without host-specific rounding', value => {
++    expect(() => validateCaptureSize(value)).not.toThrow();
++    if (value) expect(fixture({ captureSize: value }).runtime.initializeCanvasSize()).toEqual(value);
++  });
++  it.each([null, '800x600', {}, { width: 0, height: 600 }, { width: 800, height: 65536 },
++    { width: 800.5, height: 600 }, { width: 800, height: NaN }, { width: '800', height: 600 }])
++  ('rejects invalid physical dimensions %j without altering the current setting', value => {
++    expect(() => SessionConnectOptionsValidator.validate({ container: document.createElement('div'),
++      gatewayUrl: 'https://localhost', token: 'test', captureSize: value })).toThrow(/captureSize/);
++    const { runtime } = fixture({ captureSize: { width: 1280, height: 720 } });
++    expect(() => runtime.setCaptureSize(value as any)).toThrow(/captureSize/);
++    expect(runtime.getContainerResizeDims()).toEqual({ width: 1280, height: 720 });
++  });
++});
++
++describe('live density and physical resolution', () => {
++  it('initializes renderer state even if requested dimensions match the default canvas backing', () => {
++    const { runtime, canvas, resizeRenderer } = fixture({ captureSize: { width: 300, height: 150 } });
++    const widthSetter = vi.spyOn(canvas, 'width', 'set');
++    runtime.initializeCanvasSize();
++    runtime.initializeCanvasSize();
++    expect(resizeRenderer.mock.calls).toEqual([[300, 150]]);
++    expect(widthSetter).not.toHaveBeenCalled();
++  });
++
++  it.each([1, 1.5, 3])('keeps the same preset physical pixels at scale %s and at a tiny fitted CSS size', async captureScale => {
++    vi.useFakeTimers();
++    const f = fixture({ captureScale, captureSize: { width: 1920, height: 1080 } });
++    expect(f.runtime.initializeCanvasSize()).toEqual({ width: 1920, height: 1080 });
++    const widthSetter = vi.spyOn(f.canvas, 'width', 'set');
++    f.resizeRenderer.mockClear();
++    f.setCssSize(240, 135);
++    f.runtime.handleResize(240, 135);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(f.runtime.getContainerResizeDims({ width: 240, height: 135 })).toEqual({ width: 1920, height: 1080 });
++    expect([f.canvas.width, f.canvas.height, f.cursorEl.width, f.cursorEl.height]).toEqual([1920, 1080, 1920, 1080]);
++    expect([f.canvas.style.width, f.canvas.style.height, f.cursorEl.style.width, f.cursorEl.style.height])
++      .toEqual(['100%', '100%', '100%', '100%']);
++    expect(f.sendResizeRequest).not.toHaveBeenCalled();
++    expect(f.resizeRenderer).not.toHaveBeenCalled();
++    expect(widthSetter).not.toHaveBeenCalled();
++    f.runtime.destroy();
++  });
++
++  it('coalesces same-frame scale and size changes into one exact physical request', async () => {
++    vi.useFakeTimers();
++    const f = fixture();
++    f.runtime.initializeCanvasSize();
++    f.runtime.setCaptureScale(1.5);
++    const size = { width: 1920, height: 1080 };
++    f.runtime.setCaptureSize(size);
++    size.width = 800; // Public options are copied, not retained mutable caller objects.
++    f.runtime.setCaptureScale(2);
++    f.runtime.handleResize(320, 180);
++    await vi.advanceTimersByTimeAsync(150);
++    expect(f.sendResizeRequest.mock.calls).toEqual([[1920, 1080]]);
++    expect(f.runtime.getCaptureScale()).toBe(2);
++    expect(f.canvas.width).toBe(1920);
++    f.runtime.setCaptureSize({ width: 1920, height: 1080 });
++    f.runtime.setCaptureScale(3);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(f.sendResizeRequest).toHaveBeenCalledTimes(1);
++    expect(f.onDisplayStateChange).toHaveBeenCalled();
++    f.runtime.destroy();
++  });
++
++  it('resumes aligned CSS-times-scale capture after clearing an explicit preset', async () => {
++    vi.useFakeTimers();
++    const size = { width: 1920, height: 1080 };
++    const f = fixture({ captureSize: size, captureScale: 1.5 });
++    size.height = 600;
++    f.runtime.initializeCanvasSize();
++    expect(f.canvas.height).toBe(1080);
++    f.setCssSize(1366, 769);
++    f.runtime.setCaptureSize(undefined);
++    await vi.advanceTimersByTimeAsync(150);
++    expect(f.sendResizeRequest.mock.calls).toEqual([[2048, 1152]]);
++    expect(parseFloat(f.canvas.style.width)).toBeCloseTo(2048 / 1.5);
++    expect(f.canvas.style.height).toBe('768px');
++    f.runtime.destroy();
++  });
++
++  it('changes live scale without reconnecting and undefined restores legacy hiDpi', async () => {
++    vi.useFakeTimers();
++    const f = fixture({ hiDpi: true, captureScale: 1.5 });
++    f.runtime.initializeCanvasSize();
++    expect(f.canvas.width).toBe(1200);
++    f.runtime.setCaptureScale(1);
++    await vi.advanceTimersByTimeAsync(150);
++    f.runtime.setCaptureScale(undefined);
++    await vi.advanceTimersByTimeAsync(150);
++    expect(f.sendResizeRequest.mock.calls).toEqual([[800, 600], [1600, 1200]]);
++    f.runtime.destroy();
++  });
++
++  it.each([1, 1.5, 3])('maps centered fitted input and cursor to exact physical pixels at density %s', captureScale => {
++    const f = fixture({ captureSize: { width: 1920, height: 1080 }, captureScale });
++    const size = f.runtime.initializeCanvasSize();
++    f.setCssSize(320, 180);
++    const drawCursor = vi.fn(), sendMouseMove = vi.fn(), abort = new AbortController();
++    new PointerInputRuntime({ canvas: f.canvas, drawCursor, getRemoteDims: () => size, sendMouseMove,
++      sendMouseButton: vi.fn(), sendScroll: vi.fn(), now: () => 100 })
++      .bind({ signal: abort.signal, focusKeyboardTarget: vi.fn() });
++    f.canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 41 + 319, clientY: 73 + 179 }));
++    expect(sendMouseMove).toHaveBeenLastCalledWith(1914, 1074);
++    expect(drawCursor).toHaveBeenLastCalledWith(null, 1914, 1074);
++    abort.abort();
++    f.runtime.destroy();
++  });
++});
++
++describe('shared-session lock and layout ownership', () => {
++  it('preserves locked physical size and caller CSS while storing new owner preferences', async () => {
++    vi.useFakeTimers();
++    const f = fixture({ captureSize: { width: 1280, height: 720 } });
++    const style = f.container.style.cssText;
++    f.runtime.initializeCanvasSize();
++    f.runtime.applyClientAccessState(0x02, 1279, 767);
++    f.resizeRenderer.mockClear();
++    const widthSetter = vi.spyOn(f.canvas, 'width', 'set');
++    f.runtime.setCaptureScale(2);
++    f.runtime.setCaptureSize({ width: 1920, height: 1080 });
++    // The wrapper may recompute its preferred capture while this viewer is
++    // locked. Promotion must use the latest preference, not the visible lock.
++    f.runtime.setCaptureSize({ width: 2560, height: 1440 });
++    f.runtime.handleResize(240, 135);
++    await vi.advanceTimersByTimeAsync(500);
++    expect([f.canvas.width, f.canvas.height]).toEqual([1279, 767]);
++    expect(f.runtime.isResolutionLocked()).toBe(true);
++    expect(f.container.style.cssText).toBe(style);
++    expect(f.sendResizeRequest).not.toHaveBeenCalled();
++    expect(f.resizeRenderer).not.toHaveBeenCalled();
++    expect(widthSetter).not.toHaveBeenCalled();
++    f.runtime.applyClientAccessState(0, 0, 0);
++    expect(f.sendResizeRequest.mock.calls).toEqual([[2560, 1440]]);
++    expect(f.container.style.cssText).toBe(style);
++    f.runtime.destroy();
++    expect(f.container.style.cssText).toBe(style);
++  });
++
++  it('restores pre-existing caller inline sizing after a legacy lock instead of clearing it', () => {
++    const f = fixture();
++    const sizing = () => ['width', 'height', 'flex', 'max-width', 'max-height', 'resize']
++      .map(key => f.container.style.getPropertyValue(key));
++    const style = sizing();
++    f.runtime.initializeCanvasSize();
++    f.runtime.applyClientAccessState(0x02, 640, 400);
++    expect(f.container.style.width).toBe('640px');
++    f.runtime.applyClientAccessState(0, 0, 0);
++    expect(sizing()).toEqual(style);
++    f.runtime.applyClientAccessState(0x02, 640, 400);
++    f.runtime.destroy();
++    expect(sizing()).toEqual(style);
++  });
++
++  it('cancels an already queued owner resize when a dimensionless lock arrives', async () => {
++    vi.useFakeTimers();
++    const f = fixture();
++    f.runtime.initializeCanvasSize();
++    f.runtime.setCaptureScale(2);
++    f.runtime.applyClientAccessState(0x02, 0, 0);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(f.canvas.width).toBe(800);
++    expect(f.sendResizeRequest).not.toHaveBeenCalled();
++    expect(f.onDisplayStateChange).toHaveBeenCalled();
++    f.runtime.destroy();
++  });
++
++  it('does not overwrite a newly fitted caller layout when leaving legacy lock sizing', () => {
++    const f = fixture();
++    f.runtime.initializeCanvasSize();
++    f.runtime.applyClientAccessState(0x02, 640, 400);
++    f.container.style.width = '480px';
++    f.container.style.height = '300px';
++    f.container.style.maxWidth = '100%';
++    f.runtime.setCaptureSize({ width: 1280, height: 720 });
++    expect([f.container.style.width, f.container.style.height, f.container.style.maxWidth])
++      .toEqual(['480px', '300px', '100%']);
++    f.runtime.destroy();
++    expect([f.container.style.width, f.container.style.height]).toEqual(['480px', '300px']);
++  });
++});
++
++describe('Auto density monitor changes', () => {
++  function mediaFixture(fixed = false) {
++    let dpr = 1;
++    const queries: { query: string; addEventListener: ReturnType<typeof vi.fn>; removeEventListener: ReturnType<typeof vi.fn> }[] = [];
++    const matchMedia = vi.fn((query: string) => {
++      const result = { query, addEventListener: vi.fn(), removeEventListener: vi.fn() };
++      queries.push(result); return result;
++    });
++    const f = fixture({ hiDpi: true, getDevicePixelRatio: () => dpr, matchMedia,
++      captureSize: fixed ? { width: 1280, height: 720 } : undefined });
++    f.runtime.initializeCanvasSize();
++    return { ...f, queries, changeDpr(value: number) {
++      dpr = value;
++      queries.at(-1)!.addEventListener.mock.calls[0][1]();
++    } };
++  }
++
++  it('re-arms the DPR query, detaches on manual override, restores Auto, and cleans up on destroy', async () => {
++    vi.useFakeTimers();
++    const f = mediaFixture();
++    expect(f.queries[0].query).toBe('(resolution: 1dppx)');
++    f.changeDpr(1.5);
++    expect(f.queries[0].removeEventListener).toHaveBeenCalledWith('change', f.queries[0].addEventListener.mock.calls[0][1]);
++    expect(f.queries[1].query).toBe('(resolution: 1.5dppx)');
++    await vi.advanceTimersByTimeAsync(150);
++    expect(f.sendResizeRequest.mock.calls).toEqual([[1200, 900]]);
++    f.runtime.setCaptureScale(1);
++    expect(f.queries[1].removeEventListener).toHaveBeenCalledOnce();
++    f.runtime.setCaptureScale(undefined);
++    expect(f.queries[2].query).toBe('(resolution: 1.5dppx)');
++    f.changeDpr(2);
++    const staleCallback = f.queries[3].addEventListener.mock.calls[0][1];
++    f.runtime.destroy();
++    expect(f.queries[3].removeEventListener).toHaveBeenCalledWith('change', staleCallback);
++    staleCallback();
++    await vi.advanceTimersByTimeAsync(500);
++    expect(f.sendResizeRequest).toHaveBeenCalledTimes(1);
++  });
++
++  it('updates Auto density for a fixed preset without physical resize or bitmap clearing', async () => {
++    vi.useFakeTimers();
++    const f = mediaFixture(true);
++    f.resizeRenderer.mockClear();
++    f.changeDpr(2);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(f.runtime.getCaptureScale()).toBe(2);
++    expect(f.onDisplayStateChange).toHaveBeenCalled();
++    expect(f.sendResizeRequest).not.toHaveBeenCalled();
++    expect(f.resizeRenderer).not.toHaveBeenCalled();
++    expect([f.canvas.width, f.canvas.height]).toEqual([1280, 720]);
++    f.runtime.destroy();
++  });
++
++  it('never resizes the remote capture or clears the framebuffer on monitor changes while locked', async () => {
++    vi.useFakeTimers();
++    const f = mediaFixture();
++    f.runtime.applyClientAccessState(0x02, 1921, 1081);
++    f.resizeRenderer.mockClear();
++    f.changeDpr(2);
++    await vi.advanceTimersByTimeAsync(500);
++    expect([f.canvas.width, f.canvas.height]).toEqual([1921, 1081]);
++    expect(f.sendResizeRequest).not.toHaveBeenCalled();
++    expect(f.resizeRenderer).not.toHaveBeenCalled();
++    f.runtime.destroy();
++  });
++});
+diff --git a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+index 63bd746..6684a22 100644
+--- a/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-runtime-factory.test.ts
+@@ -25,6 +25,7 @@ describe('SessionRuntimeFactory', () => {
+       getInputController: vi.fn(() => input),
+       setRemoteSize: vi.fn(),
+       onResolutionChange: vi.fn(),
++      onDisplayStateChange: vi.fn(),
+       setSessionFlags: vi.fn(),
+       setMicrophoneSupported: vi.fn(),
+       setCameraSupported: vi.fn(),
+@@ -124,6 +125,8 @@ describe('SessionRuntimeFactory', () => {
+         audioEnabled: true,
+         fileTransferEnabled: true,
+         hiDpi: false,
++        captureScale: 1.5,
++        captureSize: { width: 1920, height: 1080 },
+         pingIntervalMs: 5000,
+         renderBackend: 'canvas2d',
+         resizeSource: 'container',
+@@ -155,6 +158,10 @@ describe('SessionRuntimeFactory', () => {
+     expect(captured.surface.renderBackend).toBe('canvas2d');
+     expect(captured.surface.resizeSource).toBe('container');
+     expect(captured.surface.resizeAlignment).toEqual({ width: 8, height: 2 });
++    expect(captured.surface.captureScale).toBe(1.5);
++    expect(captured.surface.captureSize).toEqual({ width: 1920, height: 1080 });
++    captured.surface.onDisplayStateChange();
++    expect(context.onDisplayStateChange).toHaveBeenCalledOnce();
+ 
+     const framePayload = new Uint8Array([1, 2, 3]);
+     captured.audio.sendFrame(7, framePayload);
+diff --git a/code/web/bpane-client/js/__tests__/session.test.ts b/code/web/bpane-client/js/__tests__/session.test.ts
+index 442c594..2f6c1bd 100644
+--- a/code/web/bpane-client/js/__tests__/session.test.ts
++++ b/code/web/bpane-client/js/__tests__/session.test.ts
+@@ -1357,6 +1357,80 @@ describe('BpaneSession', () => {
+   });
+ 
+   describe('hiDpi scaling', () => {
++    it('cleans mounted surfaces if the initial display-state callback throws', async () => {
++      const container = createContainer();
++      await expect(createSession({ container,
++        onDisplayStateChange: () => { throw new Error('caller display failure'); } }))
++        .rejects.toThrow('caller display failure');
++      expect(container.querySelectorAll('canvas')).toHaveLength(0);
++    });
++
++    it('exposes live physical display controls without replacing the session or transport', async () => {
++      vi.useFakeTimers();
++      const onDisplayStateChange = vi.fn();
++      const { session, container } = await createSession({ captureScale: 1.5,
++        captureSize: { width: 1280, height: 720 }, onDisplayStateChange });
++      expect(session.getDisplayState()).toEqual({ captureScale: 1.5, resolutionLocked: false,
++        width: 1280, height: 720 });
++      expect(onDisplayStateChange).toHaveBeenCalledWith(session.getDisplayState());
++      mockTransport._incomingBidi.pushValue(mockTransport._bidiStream);
++      await flushMicrotasks();
++      const initialCount = getResolutionRequestFrames().length;
++      const transports = vi.mocked(globalThis.WebTransport).mock.calls.length;
++      const canvas = container.querySelector('canvas')!;
++      session.setCaptureScale(2);
++      session.setCaptureSize({ width: 1920, height: 1080 });
++      await vi.advanceTimersByTimeAsync(150);
++      expect(getResolutionRequestFrames()).toHaveLength(initialCount + 1);
++      const latest = getResolutionRequestFrames().at(-1)!;
++      expect(Array.from(latest.slice(5))).toEqual([0x01, 0x80, 0x07, 0x38, 0x04]);
++      expect(container.querySelector('canvas')).toBe(canvas);
++      expect([canvas.width, canvas.height]).toEqual([1920, 1080]);
++      expect(vi.mocked(globalThis.WebTransport).mock.calls).toHaveLength(transports);
++      expect(mockTransport.close).not.toHaveBeenCalled();
++      session.disconnect();
++    });
++
++    it('reports acknowledged dimensions and resize-lock changes while protecting secondary viewers', async () => {
++      vi.useFakeTimers();
++      const onDisplayStateChange = vi.fn();
++      const { session, container } = await createSession({ captureScale: 1,
++        captureSize: { width: 1280, height: 720 }, onDisplayStateChange });
++      mockTransport._incomingBidi.pushValue(mockTransport._bidiStream);
++      await flushMicrotasks();
++      const injectControl = async (payload: number[]) => {
++        mockTransport._bidiStream.readable.pushValue(encodeFrame(CH_CONTROL, new Uint8Array(payload)));
++        await flushMicrotasks(8);
++      };
++      await injectControl([0x02, 0x50, 0x05, 0x00, 0x03]); // ACK1360×768
++      expect(session.getDisplayState()).toMatchObject({ width: 1360, height: 768 });
++      await injectControl([0x09, 0x02, 0xFF, 0x04, 0xFF, 0x02]); // locked1279×767
++      expect(onDisplayStateChange).toHaveBeenLastCalledWith({ captureScale: 1, resolutionLocked: true,
++        width: 1279, height: 767 });
++      const requests = getResolutionRequestFrames().length;
++      const style = container.style.cssText;
++      session.setCaptureScale(1.5);
++      session.setCaptureSize({ width: 1920, height: 1080 });
++      await vi.advanceTimersByTimeAsync(250);
++      expect(getResolutionRequestFrames()).toHaveLength(requests);
++      expect(session.getDisplayState()).toEqual({ captureScale: 1.5, resolutionLocked: true,
++        width: 1279, height: 767 });
++      expect(container.style.cssText).toBe(style);
++      expect([container.querySelector('canvas')!.width, container.querySelector('canvas')!.height]).toEqual([1279, 767]);
++      await injectControl([0x09, 0x00, 0, 0, 0, 0]);
++      expect(onDisplayStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ resolutionLocked: false }));
++      expect(getResolutionRequestFrames()).toHaveLength(requests + 1);
++      await injectControl([0x02, 0x80, 0x07, 0x38, 0x04]);
++      expect(session.getDisplayState()).toEqual({ captureScale: 1.5, resolutionLocked: false,
++        width: 1920, height: 1080 });
++      const callbacks = onDisplayStateChange.mock.calls.length;
++      session.disconnect();
++      session.setCaptureScale(2);
++      session.setCaptureSize({ width: 800, height: 600 });
++      await vi.advanceTimersByTimeAsync(200);
++      expect(onDisplayStateChange).toHaveBeenCalledTimes(callbacks);
++    });
++
+     it('applies devicePixelRatio when hiDpi is true', async () => {
+       Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+       const { container } = await createSession({ hiDpi: true });
+diff --git a/code/web/bpane-client/js/bpane-types.ts b/code/web/bpane-client/js/bpane-types.ts
+index 126074f..f46350e 100644
+--- a/code/web/bpane-client/js/bpane-types.ts
++++ b/code/web/bpane-client/js/bpane-types.ts
+@@ -2,6 +2,15 @@ export type RenderBackendPreference = 'auto' | 'canvas2d' | 'webgl2';
+ export type SessionClientRole = 'interactive' | 'recorder';
+ export type SessionResizeSourcePreference = 'canvas' | 'container';
+ export type SessionResizeAlignmentPreference = number | { width: number; height: number };
++export interface SessionCaptureSize { width: number; height: number; }
++export interface SessionDisplayState {
++  /** Effective capture pixels per preferred local CSS pixel; not remote Chrome UI DPI. */
++  captureScale: number;
++  resolutionLocked: boolean;
++  /** Last acknowledged/locked physical capture dimensions; initial canvas size before acknowledgement. */
++  width: number;
++  height: number;
++}
+ 
+ export interface BpaneOptions {
+   container: HTMLElement;
+@@ -15,6 +24,11 @@ export interface BpaneOptions {
+   /** Optional browser client role for gateway policy decisions. */
+   clientRole?: SessionClientRole;
+   hiDpi?: boolean;
++  /** Explicit density from 1 through 3. Overrides hiDpi; does not change remote Chrome UI DPI. */
++  captureScale?: number;
++  /** Exact physical capture size (positive uint16 dimensions), independent of CSS fit/density.
++   * Caller owns the aspect-correct canvas container layout and host-specific size limits/alignment. */
++  captureSize?: SessionCaptureSize;
+   audio?: boolean;
+   microphone?: boolean;
+   camera?: boolean;
+@@ -39,6 +53,7 @@ export interface BpaneOptions {
+   onError?: (error: Error) => void;
+   onCapabilitiesChange?: (capabilities: SessionCapabilities) => void;
+   onResolutionChange?: (width: number, height: number) => void;
++  onDisplayStateChange?: (state: SessionDisplayState) => void;
+ }
+ 
+ export interface SessionCapabilities {
+diff --git a/code/web/bpane-client/js/bpane.ts b/code/web/bpane-client/js/bpane.ts
+index 2e5fd62..071d2fa 100644
+--- a/code/web/bpane-client/js/bpane.ts
++++ b/code/web/bpane-client/js/bpane.ts
+@@ -11,6 +11,8 @@ export type {
+   SessionClientRole,
+   SessionRecordingOptions,
+   SessionCapabilities,
++  SessionCaptureSize,
++  SessionDisplayState,
+ } from './bpane-types.js';
+ export { BpaneSession } from './session/bpane-session.js';
+ 
+diff --git a/code/web/bpane-client/js/session/bpane-session.ts b/code/web/bpane-client/js/session/bpane-session.ts
+index c61b40c..13f9f02 100644
+--- a/code/web/bpane-client/js/session/bpane-session.ts
++++ b/code/web/bpane-client/js/session/bpane-session.ts
+@@ -8,7 +8,7 @@ import { FileTransferController } from '../file-transfer.js';
+ import { fnvHash } from '../hash.js';
+ import { InputController } from '../input-controller.js';
+ import { NalReassembler } from '../nal.js';
+-import type { BpaneOptions, SessionCapabilities, SessionRecordingOptions } from '../bpane-types.js';
++import type { BpaneOptions, SessionCapabilities, SessionRecordingOptions, SessionCaptureSize, SessionDisplayState } from '../bpane-types.js';
+ import { SessionRecordingRuntime } from '../session-recording-runtime.js';
+ import { SessionCapabilityRuntime } from '../session-capability-runtime.js';
+ import { SessionControlRuntime } from '../session-control-runtime.js';
+@@ -79,6 +79,8 @@ export class BpaneSession {
+         audioEnabled: options.audio ?? true,
+         fileTransferEnabled: options.fileTransfer !== false,
+         hiDpi: options.hiDpi ?? false,
++        captureScale: options.captureScale,
++        captureSize: options.captureSize,
+         pingIntervalMs: PING_INTERVAL_MS,
+         renderBackend: options.renderBackend,
+         resizeSource: options.resizeSource,
+@@ -97,7 +99,9 @@ export class BpaneSession {
+         },
+         onResolutionChange: (width, height) => {
+           this.options.onResolutionChange?.(width, height);
++          this.notifyDisplayState();
+         },
++        onDisplayStateChange: () => this.notifyDisplayState(),
+         setSessionFlags: (flags) => {
+           this.sessionFlags = flags;
+         },
+@@ -179,6 +183,7 @@ export class BpaneSession {
+     SessionConnectOptionsValidator.validate(options);
+     const session = new BpaneSession(options);
+     try {
++      session.notifyDisplayState();
+       session.microphoneEncoderSupported = await AudioController.isMicrophoneSupported();
+       session.cameraEncoderSupported = await CameraController.isSupported();
+       await session.setupTransport();
+@@ -270,6 +275,23 @@ export class BpaneSession {
+     return this.surfaceRuntime.getRenderDiagnostics();
+   }
+ 
++  /** Change capture density without reconnecting; undefined restores legacy hiDpi behavior. */
++  setCaptureScale(scale: number | undefined): void { this.surfaceRuntime.setCaptureScale(scale); }
++
++  /** Keep a fixed physical capture while fitting/centering its CSS container locally. */
++  setCaptureSize(size: SessionCaptureSize | undefined): void { this.surfaceRuntime.setCaptureSize(size); }
++
++  getDisplayState(): SessionDisplayState {
++    const canvas = this.surfaceRuntime.getCanvas();
++    return { captureScale: this.surfaceRuntime.getCaptureScale(),
++      resolutionLocked: this.surfaceRuntime.isResolutionLocked(),
++      width: this.remoteWidth || canvas.width, height: this.remoteHeight || canvas.height };
++  }
++
++  private notifyDisplayState(): void {
++    if (!this.destroyed && this.surfaceRuntime) this.options.onDisplayStateChange?.(this.getDisplayState());
++  }
++
+   isRecording(): boolean {
+     return this.recordingRuntime.isRecording();
+   }
+diff --git a/code/web/bpane-client/js/session-resize-runtime.ts b/code/web/bpane-client/js/session-resize-runtime.ts
+index b4d1882..2bb5aad 100644
+--- a/code/web/bpane-client/js/session-resize-runtime.ts
++++ b/code/web/bpane-client/js/session-resize-runtime.ts
+@@ -1,6 +1,8 @@
+-import type { SessionResizeAlignmentPreference } from './bpane-types.js';
++import type { SessionResizeAlignmentPreference, SessionCaptureSize } from './bpane-types.js';
++import { validateCaptureScale, validateCaptureSize } from './shared/display-options-validator.js';
+ 
+ const RESIZE_DEBOUNCE_MS = 150;
++const CONTAINER_SIZING = ['flex', 'width', 'height', 'resize', 'maxWidth', 'maxHeight'] as const;
+ 
+ function physicalAlignment(value: number | undefined): number {
+   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 64 ? value : 1;
+@@ -13,6 +15,8 @@ export interface SessionResizeRuntimeInput {
+   canvas: HTMLCanvasElement;
+   cursorEl: HTMLCanvasElement | null;
+   hiDpi: boolean;
++  captureScale?: number;
++  captureSize?: SessionCaptureSize;
+   resizeSource?: SessionResizeSource;
+   /** Container-driven capture dimensions, in physical pixels. */
+   resizeAlignment?: SessionResizeAlignmentPreference;
+@@ -22,10 +26,12 @@ export interface SessionResizeRuntimeInput {
+   sendResizeRequest: (width: number, height: number) => void;
+   setRemoteSize: (width: number, height: number) => void;
+   onResolutionChange?: (width: number, height: number) => void;
++  onDisplayStateChange?: () => void;
+   resizeDebounceMs?: number;
+   setTimeoutFn?: Window['setTimeout'];
+   clearTimeoutFn?: Window['clearTimeout'];
+   getDevicePixelRatio?: () => number;
++  matchMedia?: (query: string) => Pick<MediaQueryList, 'addEventListener' | 'removeEventListener'>;
+ }
+ 
+ export class SessionResizeRuntime {
+@@ -42,19 +48,38 @@ export class SessionResizeRuntime {
+   private readonly sendResizeRequest: (width: number, height: number) => void;
+   private readonly setRemoteSize: (width: number, height: number) => void;
+   private readonly onResolutionChange?: (width: number, height: number) => void;
++  private readonly onDisplayStateChange?: () => void;
+   private readonly resizeDebounceMs: number;
+   private readonly setTimeoutFn: Window['setTimeout'];
+   private readonly clearTimeoutFn: Window['clearTimeout'];
+   private readonly getDevicePixelRatio: () => number;
++  private readonly matchMedia?: SessionResizeRuntimeInput['matchMedia'];
++  private dprQuery: ReturnType<NonNullable<SessionResizeRuntimeInput['matchMedia']>> | null = null;
++  private captureScale: number | undefined;
++  private captureSize: SessionCaptureSize | undefined;
++  private lastScale: number;
++  private destroyed = false;
++  private savedContainerSizing: Record<typeof CONTAINER_SIZING[number], string> | null = null;
++  private appliedContainerSizing: Record<typeof CONTAINER_SIZING[number], string> | null = null;
++  private readonly onDprChange = (): void => {
++    if (this.destroyed) return;
++    this.watchDevicePixelRatio();
++    this.applyScaleChange();
++  };
+ 
+   private resizeTimeout: number | null = null;
+   private resolutionLocked = false;
++  private rendererSizeInitialized = false;
+ 
+   constructor(input: SessionResizeRuntimeInput) {
++    validateCaptureScale(input.captureScale);
++    validateCaptureSize(input.captureSize);
+     this.container = input.container;
+     this.canvas = input.canvas;
+     this.cursorEl = input.cursorEl;
+     this.hiDpi = input.hiDpi;
++    this.captureScale = input.captureScale;
++    this.captureSize = input.captureSize ? { ...input.captureSize } : undefined;
+     this.resizeSource = input.resizeSource ?? 'canvas';
+     // Embedded canvas-driven clients own their CSS sizing. Only opt-in
+     // container-driven sessions may pin child dimensions without a feedback loop.
+@@ -67,10 +92,14 @@ export class SessionResizeRuntime {
+     this.sendResizeRequest = input.sendResizeRequest;
+     this.setRemoteSize = input.setRemoteSize;
+     this.onResolutionChange = input.onResolutionChange;
++    this.onDisplayStateChange = input.onDisplayStateChange;
+     this.resizeDebounceMs = input.resizeDebounceMs ?? RESIZE_DEBOUNCE_MS;
+     this.setTimeoutFn = input.setTimeoutFn ?? window.setTimeout.bind(window);
+     this.clearTimeoutFn = input.clearTimeoutFn ?? window.clearTimeout.bind(window);
+     this.getDevicePixelRatio = input.getDevicePixelRatio ?? (() => window.devicePixelRatio || 1);
++    this.matchMedia = input.matchMedia ?? (typeof window.matchMedia === 'function' ? window.matchMedia.bind(window) : undefined);
++    this.lastScale = this.computeScale();
++    this.watchDevicePixelRatio();
+   }
+ 
+   initializeCanvasSize(): { width: number; height: number } {
+@@ -80,12 +109,13 @@ export class SessionResizeRuntime {
+   }
+ 
+   getContainerResizeDims(fallback?: { width: number; height: number }): { width: number; height: number } {
++    if (this.captureSize) return { ...this.captureSize };
+     const rect = this.getResizeSource(fallback);
+     return this.scaledDims(rect.width, rect.height);
+   }
+ 
+   handleResize(width: number, height: number): void {
+-    if (this.resolutionLocked) {
++    if (this.destroyed || this.resolutionLocked || this.captureSize) {
+       return;
+     }
+ 
+@@ -96,20 +126,52 @@ export class SessionResizeRuntime {
+       height = Math.floor(height);
+     }
+ 
++    this.queueResize({ width, height });
++  }
++
++  getCaptureScale(): number { return this.computeScale(); }
++
++  setCaptureScale(scale: number | undefined): void {
++    validateCaptureScale(scale);
++    if (this.destroyed) return;
++    this.captureScale = scale;
++    this.watchDevicePixelRatio();
++    this.applyScaleChange();
++  }
++
++  setCaptureSize(size: SessionCaptureSize | undefined): void {
++    validateCaptureSize(size);
++    if (this.destroyed || (size?.width === this.captureSize?.width && size?.height === this.captureSize?.height)) return;
++    this.captureSize = size ? { ...size } : undefined;
++    if (this.resolutionLocked) {
++      this.applyCanvasCssSize(this.canvas.width, this.canvas.height);
++      this.applyLockedContainerSize(this.canvas.width, this.canvas.height);
++    } else {
++      this.queueResize();
++    }
++    this.onDisplayStateChange?.();
++  }
++
++  private queueResize(fallback?: { width: number; height: number }): void {
+     if (this.resizeTimeout !== null) {
+       this.clearTimeoutFn(this.resizeTimeout);
+     }
+ 
+     this.resizeTimeout = this.setTimeoutFn(() => {
+       this.resizeTimeout = null;
+-      const dims = this.getContainerResizeDims({ width, height });
++      if (this.destroyed || this.resolutionLocked) return;
++      const dims = this.getContainerResizeDims(fallback);
++      const sameSize = this.canvas.width === dims.width && this.canvas.height === dims.height;
+       this.applyCanvasSize(dims.width, dims.height);
+       this.markDisplayDirty();
+-      this.sendResizeRequest(dims.width, dims.height);
++      if (!this.captureSize || !sameSize) this.sendResizeRequest(dims.width, dims.height);
++      this.lastScale = this.computeScale();
++      this.onDisplayStateChange?.();
+     }, this.resizeDebounceMs);
+   }
+ 
+   applyClientAccessState(flags: number, width: number, height: number): void {
++    if (this.destroyed) return;
+     const resizeLocked = (flags & 0x02) !== 0;
+ 
+     if (resizeLocked) {
+@@ -117,11 +179,15 @@ export class SessionResizeRuntime {
+         this.setResolutionLock(width, height);
+       } else {
+         this.resolutionLocked = true;
++        if (this.resizeTimeout !== null) this.clearTimeoutFn(this.resizeTimeout);
++        this.resizeTimeout = null;
+       }
++      this.onDisplayStateChange?.();
+       return;
+     }
+ 
+     this.unlockResolution();
++    this.onDisplayStateChange?.();
+   }
+ 
+   isResolutionLocked(): boolean {
+@@ -129,6 +195,8 @@ export class SessionResizeRuntime {
+   }
+ 
+   destroy(): void {
++    this.destroyed = true;
++    this.stopWatchingDevicePixelRatio();
+     if (this.resizeTimeout !== null) {
+       this.clearTimeoutFn(this.resizeTimeout);
+       this.resizeTimeout = null;
+@@ -149,6 +217,15 @@ export class SessionResizeRuntime {
+     }
+ 
+     this.applyCanvasSize(width, height);
++    this.applyLockedContainerSize(width, height);
++    this.onResolutionChange?.(width, height);
++  }
++
++  private applyLockedContainerSize(width: number, height: number): void {
++    this.clearContainerSizing();
++    // Explicit physical resolution is fitted/centered by the caller. Never
++    // overwrite that container policy with shared-session lock bookkeeping.
++    if (this.captureSize) return;
+ 
+     const scale = this.computeScale();
+     const cssW = Math.ceil(width / scale);
+@@ -156,18 +233,18 @@ export class SessionResizeRuntime {
+     const rect = this.container.getBoundingClientRect();
+ 
+     if (rect.width >= cssW && rect.height >= cssH) {
++      this.savedContainerSizing = Object.fromEntries(CONTAINER_SIZING.map(key => [key, this.container.style[key]])) as Record<typeof CONTAINER_SIZING[number], string>;
+       this.container.style.flex = 'none';
+       this.container.style.width = `${cssW}px`;
+       this.container.style.height = `${cssH}px`;
+       this.container.style.resize = 'none';
+       this.container.style.maxWidth = `${cssW}px`;
+       this.container.style.maxHeight = `${cssH}px`;
++      this.appliedContainerSizing = Object.fromEntries(CONTAINER_SIZING.map(key => [key, this.container.style[key]])) as Record<typeof CONTAINER_SIZING[number], string>;
+       console.log(`[bpane] resolution locked to ${width}x${height} (container fixed to ${cssW}x${cssH}px)`);
+     } else {
+       console.log(`[bpane] resolution locked to ${width}x${height} (scaled to local container)`);
+     }
+-
+-    this.onResolutionChange?.(width, height);
+   }
+ 
+   private unlockResolution(): void {
+@@ -186,14 +263,33 @@ export class SessionResizeRuntime {
+   }
+ 
+   private applyCanvasSize(width: number, height: number): void {
+-    if (this.widthAlignment > 1 || this.heightAlignment > 1) {
++    this.applyCanvasCssSize(width, height);
++    // A CSS-only fit/density change must not erase a valid lossless bitmap.
++    if (this.canvas.width !== width || this.canvas.height !== height) {
++      this.canvas.width = width;
++      this.canvas.height = height;
++      this.rendererSizeInitialized = false;
++    }
++    if (!this.rendererSizeInitialized) {
++      this.resizeRenderer(width, height);
++      this.rendererSizeInitialized = true;
++    }
++    if (this.cursorEl && (this.cursorEl.width !== width || this.cursorEl.height !== height)) {
++      this.cursorEl.width = width;
++      this.cursorEl.height = height;
++    }
++  }
++
++  private applyCanvasCssSize(width: number, height: number): void {
++    if (this.captureSize || this.widthAlignment > 1 || this.heightAlignment > 1) {
+       // Never stretch a rounded capture across the extra CSS pixel: that would
+       // blur text and misalign its cursor/input surface. Leave the parent flex
+       // layout untouched, so ResizeObserver keeps measuring available space.
+       // Locked viewers must retain the existing fit-to-container behavior.
+       const scale = this.computeScale();
+-      const cssWidth = this.resolutionLocked ? '100%' : `${width / scale}px`;
+-      const cssHeight = this.resolutionLocked ? '100%' : `${height / scale}px`;
++      const callerFitsCanvas = this.captureSize || this.resolutionLocked;
++      const cssWidth = callerFitsCanvas ? '100%' : `${width / scale}px`;
++      const cssHeight = callerFitsCanvas ? '100%' : `${height / scale}px`;
+       this.canvas.style.width = cssWidth;
+       this.canvas.style.height = cssHeight;
+       if (this.cursorEl) {
+@@ -201,29 +297,56 @@ export class SessionResizeRuntime {
+         this.cursorEl.style.height = cssHeight;
+       }
+     }
+-    this.canvas.width = width;
+-    this.canvas.height = height;
+-    this.resizeRenderer(width, height);
+-    if (this.cursorEl) {
+-      this.cursorEl.width = width;
+-      this.cursorEl.height = height;
+-    }
+   }
+ 
+   private clearContainerSizing(): void {
+-    this.container.style.flex = '';
+-    this.container.style.width = '';
+-    this.container.style.height = '';
+-    this.container.style.resize = '';
+-    this.container.style.maxWidth = '';
+-    this.container.style.maxHeight = '';
++    if (!this.savedContainerSizing) return;
++    // Restore only styles still owned by this lock. A caller may already have
++    // installed a new fitted layout before switching to explicit captureSize.
++    for (const key of CONTAINER_SIZING) {
++      if (this.container.style[key] === this.appliedContainerSizing?.[key]) {
++        this.container.style[key] = this.savedContainerSizing[key];
++      }
++    }
++    this.savedContainerSizing = null;
++    this.appliedContainerSizing = null;
+   }
+ 
+   private computeScale(): number {
++    if (this.captureScale !== undefined) return this.captureScale;
+     if (!this.hiDpi) {
+       return 1;
+     }
+-    return Math.max(1, Math.min(3, this.getDevicePixelRatio()));
++    const ratio = this.getDevicePixelRatio();
++    return Number.isFinite(ratio) && ratio > 0 ? Math.max(1, Math.min(3, ratio)) : 1;
++  }
++
++  private applyScaleChange(): void {
++    const scale = this.computeScale();
++    if (scale === this.lastScale) return;
++    this.lastScale = scale;
++    if (this.resolutionLocked) {
++      this.applyCanvasCssSize(this.canvas.width, this.canvas.height);
++      this.applyLockedContainerSize(this.canvas.width, this.canvas.height);
++    } else if (this.captureSize) {
++      this.applyCanvasCssSize(this.canvas.width, this.canvas.height);
++    } else {
++      this.queueResize();
++    }
++    this.onDisplayStateChange?.();
++  }
++
++  private stopWatchingDevicePixelRatio(): void {
++    this.dprQuery?.removeEventListener('change', this.onDprChange);
++    this.dprQuery = null;
++  }
++
++  private watchDevicePixelRatio(): void {
++    this.stopWatchingDevicePixelRatio();
++    if (this.destroyed || !this.hiDpi || this.captureScale !== undefined || !this.matchMedia) return;
++    const ratio = this.getDevicePixelRatio();
++    this.dprQuery = this.matchMedia(`(resolution: ${Number.isFinite(ratio) && ratio > 0 ? ratio : 1}dppx)`);
++    this.dprQuery.addEventListener('change', this.onDprChange);
+   }
+ 
+   private getResizeSource(fallback?: { width: number; height: number }): { width: number; height: number } {
+diff --git a/code/web/bpane-client/js/session-runtime-factory.ts b/code/web/bpane-client/js/session-runtime-factory.ts
+index c5599c7..b66c08c 100644
+--- a/code/web/bpane-client/js/session-runtime-factory.ts
++++ b/code/web/bpane-client/js/session-runtime-factory.ts
+@@ -13,7 +13,7 @@ import { SessionSurfaceRuntime } from './session-surface-runtime.js';
+ import { SessionTransportRuntime } from './session-transport-runtime.js';
+ import { SessionVideoDecoderRuntime } from './session-video-decoder-runtime.js';
+ import { TileCompositor } from './tile-compositor.js';
+-import type { SessionResizeSourcePreference, SessionResizeAlignmentPreference } from './bpane-types.js';
++import type { SessionResizeSourcePreference, SessionResizeAlignmentPreference, SessionCaptureSize } from './bpane-types.js';
+ 
+ type SendFrame = (channelId: number, payload: Uint8Array) => void;
+ type SendCameraFrame = (payload: Uint8Array) => 'sent' | 'queued' | 'replaced';
+@@ -22,6 +22,8 @@ interface SessionRuntimeFactoryOptions {
+   audioEnabled: boolean;
+   fileTransferEnabled: boolean;
+   hiDpi: boolean;
++  captureScale?: number;
++  captureSize?: SessionCaptureSize;
+   pingIntervalMs: number;
+   renderBackend?: 'auto' | 'canvas2d' | 'webgl2';
+   resizeSource?: SessionResizeSourcePreference;
+@@ -41,6 +43,7 @@ export interface SessionRuntimeFactoryContext {
+   getInputController(): InputController | null;
+   setRemoteSize(width: number, height: number): void;
+   onResolutionChange(width: number, height: number): void;
++  onDisplayStateChange?(): void;
+   setSessionFlags(flags: number): void;
+   setMicrophoneSupported(supported: boolean): void;
+   setCameraSupported(supported: boolean): void;
+@@ -215,6 +218,8 @@ export class SessionRuntimeFactory {
+       container: params.container,
+       tileCompositor: params.tileCompositor,
+       hiDpi: params.options.hiDpi,
++      captureScale: params.options.captureScale,
++      captureSize: params.options.captureSize,
+       renderBackend: params.options.renderBackend,
+       resizeSource: params.options.resizeSource,
+       resizeAlignment: params.options.resizeAlignment,
+@@ -225,6 +230,7 @@ export class SessionRuntimeFactory {
+       sendResizeRequest: params.context.sendResizeRequest,
+       setRemoteSize: params.context.setRemoteSize,
+       onResolutionChange: params.context.onResolutionChange,
++      onDisplayStateChange: params.context.onDisplayStateChange,
+     });
+     const frameRouterRuntime = this.deps.createSessionFrameRouterRuntime({
+       tileCompositor: params.tileCompositor,
+diff --git a/code/web/bpane-client/js/session-surface-runtime.ts b/code/web/bpane-client/js/session-surface-runtime.ts
+index e316cb0..c7f52d6 100644
+--- a/code/web/bpane-client/js/session-surface-runtime.ts
++++ b/code/web/bpane-client/js/session-surface-runtime.ts
+@@ -1,6 +1,6 @@
+ import type { TileInfo } from './nal.js';
+ import type { CacheMissEvent } from './render/tile-draw-runtime.js';
+-import type { SessionResizeAlignmentPreference } from './bpane-types.js';
++import type { SessionResizeAlignmentPreference, SessionCaptureSize } from './bpane-types.js';
+ import { SessionCursorRuntime } from './session-cursor-runtime.js';
+ import { SessionRecordingSurfaceRuntime } from './session-recording-surface-runtime.js';
+ import { SessionResizeRuntime, type SessionResizeSource } from './session-resize-runtime.js';
+@@ -27,6 +27,8 @@ export interface SessionSurfaceRuntimeInput {
+   container: HTMLElement;
+   tileCompositor: SessionSurfaceTileCompositor;
+   hiDpi: boolean;
++  captureScale?: number;
++  captureSize?: SessionCaptureSize;
+   renderBackend?: SessionSurfaceRenderBackendPreference;
+   resizeSource?: SessionResizeSource;
+   resizeAlignment?: SessionResizeAlignmentPreference;
+@@ -35,6 +37,7 @@ export interface SessionSurfaceRuntimeInput {
+   sendResizeRequest: (width: number, height: number) => void;
+   setRemoteSize: (width: number, height: number) => void;
+   onResolutionChange?: (width: number, height: number) => void;
++  onDisplayStateChange?: () => void;
+   createResizeObserver?: (callback: ResizeObserverCallback) => Pick<ResizeObserver, 'observe' | 'disconnect'>;
+   createWebGLRenderer?: (canvas: HTMLCanvasElement) => WebGLRendererCreationResult;
+ }
+@@ -163,6 +166,8 @@ export class SessionSurfaceRuntime {
+       canvas: this.canvas,
+       cursorEl: this.cursorEl,
+       hiDpi: input.hiDpi,
++      captureScale: input.captureScale,
++      captureSize: input.captureSize,
+       resizeSource: input.resizeSource,
+       resizeAlignment: input.resizeAlignment,
+       resizeObserver,
+@@ -177,6 +182,7 @@ export class SessionSurfaceRuntime {
+       sendResizeRequest: input.sendResizeRequest,
+       setRemoteSize: input.setRemoteSize,
+       onResolutionChange: input.onResolutionChange,
++      onDisplayStateChange: input.onDisplayStateChange,
+     });
+ 
+     this.resizeRuntime.initializeCanvasSize();
+@@ -211,6 +217,10 @@ export class SessionSurfaceRuntime {
+     return this.resizeRuntime.isResolutionLocked();
+   }
+ 
++  getCaptureScale(): number { return this.resizeRuntime.getCaptureScale(); }
++  setCaptureScale(scale: number | undefined): void { this.resizeRuntime.setCaptureScale(scale); }
++  setCaptureSize(size: SessionCaptureSize | undefined): void { this.resizeRuntime.setCaptureSize(size); }
++
+   applyClientAccessState(flags: number, width: number, height: number): void {
+     this.resizeRuntime.applyClientAccessState(flags, width, height);
+   }
+diff --git a/code/web/bpane-client/js/shared/connect-options-validator.ts b/code/web/bpane-client/js/shared/connect-options-validator.ts
+index e80dd67..e185ac0 100644
+--- a/code/web/bpane-client/js/shared/connect-options-validator.ts
++++ b/code/web/bpane-client/js/shared/connect-options-validator.ts
+@@ -1,4 +1,5 @@
+ import { ValidationError } from './errors.js';
++import { validateCaptureScale, validateCaptureSize } from './display-options-validator.js';
+ 
+ interface ConnectOptionsLike {
+   container?: unknown;
+@@ -6,6 +7,8 @@ interface ConnectOptionsLike {
+   accessToken?: unknown;
+   connectTicket?: unknown;
+   token?: unknown;
++  captureScale?: unknown;
++  captureSize?: unknown;
+ }
+ 
+ export class SessionConnectOptionsValidator {
+@@ -35,5 +38,7 @@ export class SessionConnectOptionsValidator {
+         'BpaneSession.connect requires a non-empty connectTicket, accessToken, or token',
+       );
+     }
++    validateCaptureScale(options.captureScale);
++    validateCaptureSize(options.captureSize);
+   }
+ }
+diff --git a/code/web/bpane-client/js/shared/display-options-validator.ts b/code/web/bpane-client/js/shared/display-options-validator.ts
+new file mode 100644
+index 0000000..ac8adce
+--- /dev/null
++++ b/code/web/bpane-client/js/shared/display-options-validator.ts
+@@ -0,0 +1,18 @@
++import type { SessionCaptureSize } from '../bpane-types.js';
++import { ValidationError } from './errors.js';
++
++export function validateCaptureScale(value: unknown): asserts value is number | undefined {
++  if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 1 || value > 3)) {
++    throw new ValidationError('bpane.display.invalid_capture_scale', 'captureScale must be a finite number from 1 through 3');
++  }
++}
++
++export function validateCaptureSize(value: unknown): asserts value is SessionCaptureSize | undefined {
++  if (value === undefined) return;
++  const size = value as Partial<SessionCaptureSize> | null;
++  if (typeof size !== 'object' || size === null
++    || typeof size.width !== 'number' || !Number.isInteger(size.width) || size.width < 1 || size.width > 65535
++    || typeof size.height !== 'number' || !Number.isInteger(size.height) || size.height < 1 || size.height > 65535) {
++    throw new ValidationError('bpane.display.invalid_capture_size', 'captureSize requires positive uint16 integer width and height');
++  }
++}

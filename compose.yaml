@@ -1,0 +1,108 @@
+name: browserpane-hermes
+
+services:
+  browserpane:
+    build: .
+    image: browserpane-hermes-browser:local
+    restart: unless-stopped
+    hostname: browserpane
+    env_file:
+      - ./runtime/host-runtime.env
+    environment:
+      TZ: ${TZ:-UTC}
+      BIND_ADDRESS: ${BIND_ADDRESS:-127.0.0.1}
+      VIEWER_HOST: ${VIEWER_HOST:-localhost}
+      VIEWER_ORIGIN: https://${VIEWER_HOST:-localhost}:${HTTPS_PORT:-8443}
+      VIEWER_BASE: /browser
+      GATEWAY_URL: https://${VIEWER_HOST:-localhost}:${GATEWAY_PORT:-4433}
+      BPANE_URL: about:blank
+      BPANE_DEVICE_SCALE: "1"
+      BPANE_CHROMIUM_SANDBOX_MODE: strict
+      BPANE_CHROMIUM_EXTRA_FLAGS: --disable-setuid-sandbox
+      BPANE_CHROMIUM_DEBUG_ADDRESS: 127.0.0.1
+      BPANE_CDP_PROXY_ENABLE: "0"
+      RUST_LOG: warn
+    ports:
+      - target: 4433
+        published: "${GATEWAY_PORT:-4433}"
+        host_ip: ${BIND_ADDRESS:-127.0.0.1}
+        protocol: udp
+    volumes:
+      - browser-data:/data
+      - shared-files:/shared
+    networks: [agent, viewer]
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./runtime/chromium-seccomp.json
+    shm_size: 512m
+    tmpfs:
+      - /tmp:size=256m,mode=1777,nosuid,nodev
+    mem_limit: 2300m
+    cpu_shares: 512
+    pids_limit: 512
+    stop_grace_period: 45s
+    logging: &bounded-logs
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  hermes:
+    build: ./hermes
+    image: browserpane-hermes-agent:local
+    restart: unless-stopped
+    working_dir: /shared
+    environment:
+      TZ: ${TZ:-UTC}
+      HERMES_HOME: /opt/data
+    volumes:
+      - hermes-data:/opt/data
+      - shared-files:/shared
+    networks: [agent]
+    depends_on:
+      browserpane:
+        condition: service_healthy
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    pids_limit: 256
+    stop_grace_period: 30s
+    logging: *bounded-logs
+
+  web:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      VIEWER_HOST: ${VIEWER_HOST:-localhost}
+    ports:
+      - target: 8443
+        published: "${HTTPS_PORT:-8443}"
+        host_ip: ${BIND_ADDRESS:-127.0.0.1}
+        protocol: tcp
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [viewer]
+    depends_on:
+      browserpane:
+        condition: service_healthy
+    cap_drop: [ALL]
+    # Official Caddy carries this executable file capability, even on port8443.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *bounded-logs
+
+networks:
+  agent: {}
+  viewer: {}
+
+volumes:
+  browser-data: {}
+  hermes-data: {}
+  shared-files: {}
+  caddy-data: {}
+  caddy-config: {}

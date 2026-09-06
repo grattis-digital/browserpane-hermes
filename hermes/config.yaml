@@ -1,0 +1,21 @@
+# Seeded only on first start. Edit /opt/data/config.yaml, not the image copy.
+_config_version: 40
+display:
+  interface: cli
+terminal:
+  backend: local
+  cwd: /shared
+agent:
+  disabled_toolsets: [browser]
+platform_toolsets:
+  cli: [terminal, file, skills, todo, memory, browserpane]
+mcp_servers:
+  browserpane:
+    url: http://browserpane:8931/mcp
+    timeout: 120
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    sampling:
+      enabled: false
+    tools:
+      exclude: [browser_close, browser_install]

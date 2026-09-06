@@ -1,0 +1,1019 @@
+diff --git a/code/apps/bpane-host/src/scroll/residual.rs b/code/apps/bpane-host/src/scroll/residual.rs
+--- a/code/apps/bpane-host/src/scroll/residual.rs
++++ b/code/apps/bpane-host/src/scroll/residual.rs
+@@ -146,9 +146,10 @@
+     grid: &tiles::TileGrid,
+     scroll_dy: i16,
+     emit_coords: &[tiles::TileCoord],
++    region_top: u16,
++    region_bottom: u16,
+ ) -> ScrollResidualCoords {
+     let dy = scroll_dy as i32;
+-    let screen_h = grid.screen_h as i32;
+     let ts = grid.tile_size;
+     let mut residual = Vec::with_capacity(emit_coords.len() / 2);
+     let mut exposed_strip = Vec::with_capacity((emit_coords.len() / 8).max(1));
+@@ -171,7 +172,7 @@
+ 
+         let shifted_top = y as i32 + dy;
+         let shifted_bottom = y as i32 + h as i32 - 1 + dy;
+-        if shifted_top < 0 || shifted_bottom >= screen_h {
++        if shifted_top < i32::from(region_top) || shifted_bottom >= i32::from(region_bottom) {
+             exposed_strip.extend_from_slice(row_coords);
+             residual.extend_from_slice(row_coords);
+             let row_area = row_coords
+@@ -299,6 +300,32 @@
+ /// Compares current pixels against previous shifted by `scroll_dy`;
+ /// only mismatches are included.
+ pub fn analyze_scroll_residual_emit_coords(
++    current: &[u8],
++    previous: &[u8],
++    stride: usize,
++    grid: &tiles::TileGrid,
++    grid_offset_y: u16,
++    scroll_dy: i16,
++    emit_coords: &[tiles::TileCoord],
++) -> ScrollResidualCoords {
++    analyze_scroll_residual_in_region(
++        current,
++        previous,
++        stride,
++        grid,
++        grid_offset_y,
++        scroll_dy,
++        emit_coords,
++        0,
++        grid.screen_h,
++    )
++}
++
++/// Compare only against pixels actually retained by ScrollCopy. Chrome beyond
++/// the clipped viewport is not a valid source even if its pixels happen to
++/// match newly exposed content (white margins are a common example).
++#[allow(clippy::too_many_arguments)]
++pub fn analyze_scroll_residual_in_region(
+     current: &[u8],
+     previous: &[u8],
+     stride: usize,
+@@ -306,7 +333,11 @@
+     grid_offset_y: u16,
+     scroll_dy: i16,
+     emit_coords: &[tiles::TileCoord],
++    region_top: u16,
++    region_bottom: u16,
+ ) -> ScrollResidualCoords {
++    let region_top = region_top.min(grid.screen_h);
++    let region_bottom = region_bottom.min(grid.screen_h).max(region_top);
+     if scroll_dy == 0 || emit_coords.is_empty() {
+         return ScrollResidualCoords {
+             residual: emit_coords.to_vec(),
+@@ -332,11 +363,12 @@
+             grid,
+             scroll_dy,
+             emit_coords,
++            region_top,
++            region_bottom,
+         );
+     }
+ 
+     let dy = scroll_dy as i32;
+-    let screen_h = grid.screen_h as i32;
+     let mut residual = Vec::with_capacity(emit_coords.len() / 2);
+     let mut exposed_strip = Vec::with_capacity((emit_coords.len() / 8).max(1));
+     let mut residual_area_px = 0usize;
+@@ -349,7 +381,7 @@
+         }
+         let shifted_top = rect.y as i32 + dy;
+         let shifted_bottom = rect.y as i32 + rect.h as i32 - 1 + dy;
+-        if shifted_top < 0 || shifted_bottom >= screen_h {
++        if shifted_top < i32::from(region_top) || shifted_bottom >= i32::from(region_bottom) {
+             exposed_strip.push(coord);
+             residual.push(coord);
+             let rect_area = rect.w as usize * rect.h as usize;
+diff --git a/code/apps/bpane-host/src/tile_loop/dirty_set.rs b/code/apps/bpane-host/src/tile_loop/dirty_set.rs
+--- a/code/apps/bpane-host/src/tile_loop/dirty_set.rs
++++ b/code/apps/bpane-host/src/tile_loop/dirty_set.rs
+@@ -3,8 +3,21 @@
+ 
+ use crate::tiles;
+ 
++fn tile_intersects_damage(
++    coord: tiles::TileCoord,
++    grid: &tiles::TileGrid,
++    offset_y: u16,
++    damage: tiles::Rect,
++) -> bool {
++    let intersects = |offset| {
++        let rect = crate::scroll::residual::offset_tile_rect_for_emit(coord, grid, offset);
++        rect.w > 0 && rect.h > 0 && rect.overlaps(&damage)
++    };
++    intersects(0) || (offset_y != 0 && intersects(offset_y))
++}
++
+ impl super::TileCaptureThread {
+-    fn refresh_full_emit_coords(&mut self) {
++    pub(super) fn refresh_full_emit_coords(&mut self) {
+         let emit_rows = if self.grid_offset_y > 0 {
+             self.grid.rows + 1
+         } else {
+@@ -27,19 +40,19 @@
+         let all_dirty: Vec<tiles::TileCoord> = if !force_refresh {
+             if self.damage.is_some() {
+                 if let Some((dx, dy, dw, dh)) = self.frame_damage_bounds {
+-                    let ts = self.tile_size as u16;
+-                    let dx2 = dx.saturating_add(dw);
+-                    let dy2 = dy.saturating_add(dh);
+                     self.full_emit_coords
+                         .iter()
+                         .copied()
+                         .filter(|coord| {
+-                            let tx = coord.col * ts;
+-                            let ty = coord.row * ts;
+-                            let tx2 = tx.saturating_add(ts);
+-                            let ty2 = ty.saturating_add(ts);
+-                            // AABB overlap test
+-                            tx < dx2 && tx2 > dx && ty < dy2 && ty2 > dy
++                            // Either draw grid may own this coordinate. In a
++                            // shifted grid the damaged pixel can be in the
++                            // next logical row, including the clipped bottom.
++                            tile_intersects_damage(
++                                *coord,
++                                &self.grid,
++                                self.grid_offset_y,
++                                tiles::Rect::new(dx, dy, dw, dh),
++                            )
+                         })
+                         .collect()
+                 } else {
+@@ -54,3 +67,37 @@
+         all_dirty
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn damage_filter_covers_shifted_rows_and_clipped_bottom_without_losing_static_pixels() {
++        let grid = tiles::TileGrid::new(128, 128, 64);
++        assert!(tile_intersects_damage(
++            tiles::TileCoord::new(0, 1),
++            &grid,
++            17,
++            tiles::Rect::new(0, 48, 1, 1)
++        ));
++        assert!(tile_intersects_damage(
++            tiles::TileCoord::new(0, 0),
++            &grid,
++            17,
++            tiles::Rect::new(0, 48, 1, 1)
++        ));
++        assert!(tile_intersects_damage(
++            tiles::TileCoord::new(0, 2),
++            &grid,
++            17,
++            tiles::Rect::new(0, 127, 1, 1)
++        ));
++        assert!(!tile_intersects_damage(
++            tiles::TileCoord::new(1, 2),
++            &grid,
++            17,
++            tiles::Rect::new(0, 127, 1, 1)
++        ));
++    }
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/scroll_emit.rs b/code/apps/bpane-host/src/tile_loop/scroll_emit.rs
+--- a/code/apps/bpane-host/src/tile_loop/scroll_emit.rs
++++ b/code/apps/bpane-host/src/tile_loop/scroll_emit.rs
+@@ -31,6 +31,25 @@
+         scroll_thin_mode_residual_ratio: f32,
+         scroll_thin_repair_quiet_frames: u8,
+     ) -> ScrollEmitResult {
++        self.refresh_full_emit_coords();
++        // A recovery capture is independent of the client's previous canvas.
++        // Residual equality proves only server pixels, not that the client has
++        // them; never overwrite this full repair with a scroll-pruned set.
++        if force_refresh {
++            self.scroll_thin_mode_active = false;
++            self.scroll_residual_was_active = false;
++            let residual = super::scroll_residual::ScrollResidualResult::forced_refresh(
++                self.build_dirty_set(true),
++            );
++            return self.send_scroll_frames(
++                detected_scroll_frame,
++                pending_scrolls,
++                pending_scroll_dy_sum,
++                input_scroll_dir,
++                cdp_scroll_dy_px,
++                residual,
++            );
++        }
+         // Phase 1: Build dirty set from XDamage
+         let all_dirty = if should_build_dirty_set_for_frame(
+             self.prev_frame.is_some(),
+@@ -98,4 +117,19 @@
+             &Some(detected_scroll_frame())
+         ));
+     }
++
++    #[test]
++    fn forced_repair_keeps_all_tiles_and_forbids_scroll_reuse() {
++        let coords = vec![
++            crate::tiles::TileCoord::new(0, 0),
++            crate::tiles::TileCoord::new(0, 1),
++        ];
++        let result =
++            super::super::scroll_residual::ScrollResidualResult::forced_refresh(coords.clone());
++        assert_eq!(result.all_dirty, coords);
++        assert!(!crate::scroll::should_emit_scroll_copy(
++            result.scroll_residual_fallback_full,
++            result.scroll_saved_tiles_frame
++        ));
++    }
+ }
+diff --git a/code/apps/bpane-host/src/tile_loop/scroll_residual.rs b/code/apps/bpane-host/src/tile_loop/scroll_residual.rs
+--- a/code/apps/bpane-host/src/tile_loop/scroll_residual.rs
++++ b/code/apps/bpane-host/src/tile_loop/scroll_residual.rs
+@@ -66,6 +66,23 @@
+     pub scroll_thin_repair_frame: bool,
+ }
+ 
++impl ScrollResidualResult {
++    pub(crate) fn forced_refresh(all_dirty: Vec<tiles::TileCoord>) -> Self {
++        Self {
++            all_dirty,
++            scroll_residual_ratio: None,
++            scroll_residual_fallback_full: true,
++            scroll_residual_tiles_frame: None,
++            scroll_potential_tiles_frame: None,
++            scroll_saved_tiles_frame: Some(0),
++            scroll_saved_ratio_frame: Some(0.0),
++            scroll_emit_ratio_frame: Some(1.0),
++            scroll_thin_mode_frame: false,
++            scroll_thin_repair_frame: false,
++        }
++    }
++}
++
+ impl super::TileCaptureThread {
+     /// Analyze scroll residual: partition content/chrome, build residual,
+     /// compute ratios, manage thin mode and repair scheduling.
+diff --git a/code/apps/bpane-host/src/tile_loop/scroll_partition.rs b/code/apps/bpane-host/src/tile_loop/scroll_partition.rs
+--- a/code/apps/bpane-host/src/tile_loop/scroll_partition.rs
++++ b/code/apps/bpane-host/src/tile_loop/scroll_partition.rs
+@@ -1,10 +1,12 @@
+ //! Scroll tile partitioning and residual comparison: split tiles into
+ //! content/chrome regions and compute residual dirty set.
+ 
+-use crate::scroll::residual::{offset_tile_rect_for_emit, summarize_shifted_tile_diff};
++use crate::scroll::residual::{
++    analyze_scroll_residual_in_region, offset_tile_rect_for_emit, summarize_shifted_tile_diff,
++};
+ use crate::scroll::{
+-    analyze_scroll_residual_emit_coords, can_emit_scroll_copy, has_scroll_region_split,
+-    is_content_tile_in_scroll_region, should_defer_scroll_repair,
++    can_emit_scroll_copy, has_scroll_region_split, is_content_tile_in_scroll_region,
++    should_defer_scroll_repair,
+ };
+ use crate::tiles;
+ 
+@@ -60,8 +62,8 @@
+         );
+     }
+ 
+-    let mut row_total = vec![0usize; grid.rows as usize];
+-    let mut row_residual = vec![0usize; grid.rows as usize];
++    let mut row_total = vec![0usize; grid.rows as usize + 1];
++    let mut row_residual = vec![0usize; grid.rows as usize + 1];
+     let mut col_total = vec![0usize; grid.cols as usize];
+     let mut col_residual = vec![0usize; grid.cols as usize];
+     let mut min_row = u16::MAX;
+@@ -215,7 +217,7 @@
+         (full_emit_coords.to_vec(), Vec::new())
+     };
+ 
+-    let initial_analysis = analyze_scroll_residual_emit_coords(
++    let initial_analysis = analyze_scroll_residual_in_region(
+         rgba,
+         prev,
+         stride,
+@@ -223,6 +225,8 @@
+         grid_offset_y,
+         scroll_dy,
+         &content_emit_coords,
++        srt_for_split,
++        srb_for_split,
+     );
+ 
+     let saved_tiles = content_emit_coords
+@@ -350,5 +354,67 @@
+         scroll_dy,
+         split_region: have_split,
+         sticky_band_active: sticky_bands.is_active(),
++    }
++}
++
++#[cfg(test)]
++mod integrity_tests {
++    use super::*;
++
++    #[test]
++    fn exposed_viewport_tiles_are_repaired_even_when_matching_outside_chrome() {
++        let grid = tiles::TileGrid::new(128, 320, 64);
++        let stride = 128 * 4;
++        let coords: Vec<_> = (0..grid.rows)
++            .flat_map(|row| (0..grid.cols).map(move |col| tiles::TileCoord::new(col, row)))
++            .collect();
++        for (top, bottom) in [(64, 256), (80, 271)] {
++            for dy in [-128i16, -64, 64, 128] {
++                let mut previous = vec![255u8; stride * 320];
++                for y in top..bottom {
++                    previous[y as usize * stride..(y as usize + 1) * stride].fill(y as u8);
++                }
++                let mut current = previous.clone();
++                for y in top..bottom {
++                    let source = i32::from(y) + i32::from(dy);
++                    let row = &mut current[y as usize * stride..(y as usize + 1) * stride];
++                    if source >= i32::from(top) && source < i32::from(bottom) {
++                        row.copy_from_slice(
++                            &previous[source as usize * stride..(source as usize + 1) * stride],
++                        );
++                    } else {
++                        row.fill(255); // same as chrome, but NOT copied by the client
++                    }
++                }
++                let scroll = DetectedScrollFrame {
++                    dy,
++                    confidence: 1.0,
++                    source: "test",
++                    direction_matches: true,
++                    min_confidence: None,
++                    row_shift: i32::from(dy) / 64,
++                    region_top: top,
++                    region_bottom: bottom,
++                    region_right: 128,
++                };
++                let result = partition_and_compare(
++                    &current, &previous, stride, &grid, 0, 64, 64, dy, &coords, &scroll, top, 320,
++                    128, 128,
++                );
++                for coord in &coords {
++                    if !is_content_tile_in_scroll_region(*coord, 64, top, bottom, 128) {
++                        continue;
++                    }
++                    let source_top = i32::from(coord.row) * 64 + i32::from(dy);
++                    if source_top < i32::from(top) || source_top + 64 > i32::from(bottom) {
++                        assert!(
++                            result.residual.contains(coord)
++                                || result.chrome_emit_coords.contains(coord),
++                            "exposed tile {coord:?} omitted for dy={dy}, region={top}..{bottom}"
++                        );
++                    }
++                }
++            }
++        }
+     }
+ }
+diff --git a/code/apps/bpane-host/src/tile_loop/mod.rs b/code/apps/bpane-host/src/tile_loop/mod.rs
+--- a/code/apps/bpane-host/src/tile_loop/mod.rs
++++ b/code/apps/bpane-host/src/tile_loop/mod.rs
+@@ -21,6 +21,8 @@
+ mod scroll_send;
+ mod scroll_trust;
+ 
++#[cfg(test)]
++mod integrity_tests;
+ #[cfg(test)]
+ mod tests;
+ 
+diff --git a/code/apps/bpane-host/src/tiles/emitter.rs b/code/apps/bpane-host/src/tiles/emitter.rs
+--- a/code/apps/bpane-host/src/tiles/emitter.rs
++++ b/code/apps/bpane-host/src/tiles/emitter.rs
+@@ -91,6 +91,9 @@
+     /// Last video region sideband sent to the client.
+     /// Used to send updates and a clearing VideoRegion(0,0,0,0) on exit.
+     last_video_region: Option<Rect>,
++    /// Current content-grid geometry, also used to invalidate overlapping
++    /// content positions after a static-grid draw.
++    current_offset_y: u16,
+     /// Reused scratch buffer for tile pixel extraction to reduce per-tile allocations.
+     tile_scratch: Vec<u8>,
+     /// Which lossless codec to use for non-solid tiles.
+@@ -116,6 +119,7 @@
+             sent_hash_evictions_total: 0,
+             snapshot_requested: false,
+             last_video_region: None,
++            current_offset_y: 0,
+             tile_scratch: Vec::new(),
+             codec,
+             zstd_encoder: TileZstdEncoder::default(),
+@@ -131,6 +135,7 @@
+         self.sent_hashes.clear();
+         self.sent_hash_evictions_total = 0;
+         self.last_video_region = None;
++        self.current_offset_y = 0;
+         self.tile_scratch.clear();
+     }
+ 
+@@ -155,7 +160,7 @@
+                 if region.overlaps(&Self::offset_tile_rect(coord, grid, offset_y))
+                     || region.overlaps(&Self::offset_tile_rect(coord, grid, 0))
+                 {
+-                    self.handle_cache_miss(col, row, 0);
++                    self.invalidate_position(col, row);
+                     repair.push(coord);
+                 }
+             }
+@@ -324,11 +329,24 @@
+         // snapshot, not an individual cache repair. The wire format is unchanged.
+         if col == u16::MAX && row == u16::MAX && hash == 0 {
+             self.snapshot_requested = true;
++            return;
++        }
++        if col >= self.cols
++            || row as usize >= self.last_hashes.len() / usize::from(self.cols.max(1))
++        {
+             return;
+         }
++        // A failed tile may already have moved under later ScrollCopy frames.
++        // Repainting its old coordinate cannot restore the current canvas.
++        // Coalesce reported desyncs into one fresh, independent snapshot.
++        self.snapshot_requested = true;
+         if hash != 0 {
+             self.sent_hashes.remove(hash);
+         }
++        self.invalidate_position(col, row);
++    }
++
++    fn invalidate_position(&mut self, col: u16, row: u16) {
+         let idx = row as usize * self.cols as usize + col as usize;
+         if idx < self.last_hashes.len() {
+             self.last_hashes[idx] = 0;
+@@ -338,6 +356,44 @@
+         }
+     }
+ 
++    /// Only successful draws update position hashes. The other grid can have
++    /// different row boundaries, so invalidate every overlapping position,
++    /// not just the same logical coordinate.
++    fn record_draw(
++        &mut self,
++        coord: TileCoord,
++        hash: u64,
++        rect: Rect,
++        grid: &TileGrid,
++        is_static: bool,
++    ) {
++        let index = usize::from(coord.row) * usize::from(self.cols) + usize::from(coord.col);
++        let (own, other, other_offset) = if is_static {
++            (
++                &mut self.static_last_hashes,
++                &mut self.last_hashes,
++                self.current_offset_y,
++            )
++        } else {
++            (&mut self.last_hashes, &mut self.static_last_hashes, 0)
++        };
++        if let Some(position) = own.get_mut(index) {
++            *position = hash;
++        }
++        if grid.tile_size == 0 || rect.w == 0 || rect.h == 0 {
++            return;
++        }
++        let first = (u32::from(rect.y) + u32::from(other_offset)) / u32::from(grid.tile_size);
++        let last = (u32::from(rect.y) + u32::from(rect.h) - 1 + u32::from(other_offset))
++            / u32::from(grid.tile_size);
++        for row in first..=last {
++            let index = row as usize * usize::from(self.cols) + usize::from(coord.col);
++            if let Some(position) = other.get_mut(index) {
++                *position = 0;
++            }
++        }
++    }
++
+     /// Begin a fresh capture snapshot after scroll analysis has finished.
+     /// GridConfig is the client epoch barrier: it discards pending ScrollCopy
+     /// commands/async work and clears caches before this independent repaint.
+@@ -417,6 +473,13 @@
+         force_qoi_bounds: Option<(u16, u16, u16, u16)>,
+         active_video_region: Option<Rect>,
+     ) -> EmitResult {
++        if self.current_offset_y != offset_y {
++            // In particular, an unchanged solid hash does not prove that the
++            // enlarged/clipped tile extent was painted at the new geometry.
++            self.last_hashes.fill(0);
++            self.static_last_hashes.fill(0);
++            self.current_offset_y = offset_y;
++        }
+         self.frame_seq = self.frame_seq.wrapping_add(1);
+         let mut frames = Vec::new();
+         let mut stats = EmitStats::default();
+@@ -466,11 +529,6 @@
+                 continue;
+             }
+ 
+-            // Update per-position hash.
+-            if idx < self.last_hashes.len() {
+-                self.last_hashes[idx] = hash;
+-            }
+-
+             // Level 2: content-addressable - if the client already has this hash
+             // cached (from a QOI tile at a different position), emit CacheHit.
+             // Skip for fills: Fill (9 bytes) < CacheHit (13 bytes).
+@@ -485,6 +543,7 @@
+                     .to_frame(),
+                 );
+                 stats.cache_hits += 1;
++                self.record_draw(coord, hash, rect, grid, false);
+                 continue;
+             }
+ 
+@@ -499,6 +558,7 @@
+                     .to_frame(),
+                 );
+                 stats.fills += 1;
++                self.record_draw(coord, hash, rect, grid, false);
+             } else {
+                 // Convert BGRA tile pixels to RGBA for encoding.
+                 // Only changed, non-solid tiles reach here - a small
+@@ -525,6 +585,7 @@
+                     frames.push(frame);
+                     stats.qoi_tiles += 1;
+                     self.track_sent_hash(hash);
++                    self.record_draw(coord, hash, rect, grid, false);
+                 }
+             }
+         }
+@@ -616,10 +677,6 @@
+             {
+                 continue; // unchanged since last static emit
+             }
+-            if idx < self.static_last_hashes.len() {
+-                self.static_last_hashes[idx] = hash;
+-            }
+-
+             // Level 2: content-addressable cache (shared with content tiles).
+             // Skip for fills: Fill (9 bytes) < CacheHit (13 bytes).
+             // Skip L1/L2 for boundary tiles - they mix chrome with viewport
+@@ -640,6 +697,7 @@
+                     }
+                     .to_frame(),
+                 );
++                self.record_draw(coord, hash, rect, grid, true);
+                 continue;
+             }
+ 
+@@ -653,6 +711,7 @@
+                     }
+                     .to_frame(),
+                 );
++                self.record_draw(coord, hash, rect, grid, true);
+             } else {
+                 // Convert BGRA tile pixels to RGBA for encoding.
+                 bgra_to_rgba_inplace(&mut self.tile_scratch);
+@@ -678,6 +737,7 @@
+                     if !is_boundary {
+                         self.track_sent_hash(hash);
+                     }
++                    self.record_draw(coord, hash, rect, grid, true);
+                 }
+             }
+         }
+@@ -981,9 +1041,67 @@
+         assert!(rgba.is_some());
+         // Output is RGBA u32 LE: R=0xFF, G=0x00, B=0x00, A=0xFF -> 0xFF0000FF
+         assert_eq!(rgba.unwrap(), 0xFF0000FF);
++    }
++
++    #[test]
++    fn content_and_static_writes_invalidate_each_others_position_assumptions() {
++        let grid = TileGrid::new(64, 64, 64);
++        let a = [1, 2, 3, 255].repeat(64 * 64);
++        let b = [4, 5, 6, 255].repeat(64 * 64);
++        let coords = [TileCoord::new(0, 0)];
++        let mut emitter = TileEmitter::new(1, 1);
++        emitter.emit_frame(&a, 256, &coords, &grid, 0, None, None);
++        assert_eq!(
++            emitter
++                .emit_static_tiles(&b, 256, &coords, &grid, None, None, None, None, None)
++                .len(),
++            1
++        );
++        let restored = emitter.emit_frame(&a, 256, &coords, &grid, 0, None, None);
++        assert_eq!(
++            restored.stats.fills, 1,
++            "content must repaint over newer static pixels"
++        );
++        let restored_static =
++            emitter.emit_static_tiles(&b, 256, &coords, &grid, None, None, None, None, None);
++        assert_eq!(
++            restored_static.len(),
++            1,
++            "static must repaint over newer content pixels"
++        );
+     }
+ 
+     #[test]
++    fn static_write_invalidates_both_overlapping_offset_rows() {
++        let grid = TileGrid::new(64, 128, 64);
++        let pixels = [1, 2, 3, 255].repeat(64 * 128);
++        let mut emitter = TileEmitter::new(1, 2);
++        let coords = [
++            TileCoord::new(0, 0),
++            TileCoord::new(0, 1),
++            TileCoord::new(0, 2),
++        ];
++        emitter.emit_frame(&pixels, 256, &coords, &grid, 17, None, None);
++        emitter.emit_static_tiles(
++            &pixels,
++            256,
++            &coords[1..2],
++            &grid,
++            None,
++            None,
++            None,
++            None,
++            None,
++        );
++        assert_ne!(emitter.last_hashes[0], 0);
++        assert_eq!(emitter.last_hashes[1], 0);
++        assert_eq!(emitter.last_hashes[2], 0);
++        let restored = emitter.emit_frame(&pixels, 256, &coords, &grid, 17, None, None);
++        assert_eq!(restored.stats.fills, 2);
++        assert_eq!(restored.stats.skipped, 1);
++    }
++
++    #[test]
+     fn sender_cache_evicts_true_lru_after_cache_miss() {
+         let mut emitter = TileEmitter::new(1, 1);
+         for hash in 1..=MAX_SENT_HASHES as u64 {
+@@ -1069,13 +1187,17 @@
+     }
+ 
+     #[test]
+-    fn ordinary_zero_hash_repair_does_not_trigger_full_snapshot() {
++    fn ordinary_repairs_request_fresh_snapshot_but_internal_invalidation_does_not() {
+         let grid = TileGrid::new(64, 64, 64);
+         let mut emitter = TileEmitter::new(grid.cols, grid.rows);
+         emitter.handle_cache_miss(0, 0, 0);
+-        assert!(emitter.begin_requested_snapshot(&grid, 0).is_none());
++        assert!(emitter.begin_requested_snapshot(&grid, 0).is_some());
++        emitter.handle_cache_miss(0, 0, 123);
++        assert!(emitter.begin_requested_snapshot(&grid, 0).is_some());
+         emitter.handle_cache_miss(u16::MAX, u16::MAX, 123);
+         assert!(emitter.begin_requested_snapshot(&grid, 0).is_none());
++        emitter.invalidate_video_region(&grid, 0, Rect::new(0, 0, 64, 64));
++        assert!(emitter.begin_requested_snapshot(&grid, 0).is_none());
+     }
+ 
+     #[test]
+diff --git a/code/apps/bpane-host/src/tile_loop/integrity_tests.rs b/code/apps/bpane-host/src/tile_loop/integrity_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/integrity_tests.rs
+@@ -0,0 +1,344 @@
++//! End-to-end host protocol model. Decode emitted tiles and replay exact
++//! clipped ScrollCopy operations, then compare EVERY pixel with fresh capture.
++use std::collections::HashMap;
++
++use bpane_protocol::{frame::Frame, TileMessage};
++
++use crate::scroll::residual::offset_tile_rect_for_emit;
++use crate::scroll::{can_emit_scroll_copy, is_content_tile_in_scroll_region};
++use crate::tiles::{emitter::TileEmitter, Rect, TileCoord, TileGrid};
++
++use super::frame_types::DetectedScrollFrame;
++use super::scroll_partition::partition_and_compare;
++
++struct Viewer {
++    pixels: Vec<u8>,
++    cache: HashMap<u64, Vec<u8>>,
++    offset: u16,
++    apply_offset: bool,
++}
++
++impl Viewer {
++    fn new(grid: &TileGrid) -> Self {
++        Self {
++            pixels: vec![0; usize::from(grid.screen_w) * usize::from(grid.screen_h) * 4],
++            cache: HashMap::new(),
++            offset: 0,
++            apply_offset: true,
++        }
++    }
++
++    fn paint(&mut self, rect: Rect, bytes: &[u8], grid: &TileGrid) {
++        assert_eq!(bytes.len(), usize::from(rect.w) * usize::from(rect.h) * 4);
++        let stride = usize::from(grid.screen_w) * 4;
++        let row_bytes = usize::from(rect.w) * 4;
++        for row in 0..usize::from(rect.h) {
++            let start = (usize::from(rect.y) + row) * stride + usize::from(rect.x) * 4;
++            self.pixels[start..start + row_bytes]
++                .copy_from_slice(&bytes[row * row_bytes..(row + 1) * row_bytes]);
++        }
++    }
++
++    fn apply(&mut self, frames: impl IntoIterator<Item = Frame>, grid: &TileGrid) {
++        for frame in frames {
++            match TileMessage::decode(&frame.payload).unwrap() {
++                TileMessage::GridConfig { .. } => {
++                    self.cache.clear();
++                    self.pixels.fill(0);
++                }
++                TileMessage::GridOffset { offset_y, .. } => self.offset = offset_y as u16,
++                TileMessage::TileDrawMode { apply_offset } => self.apply_offset = apply_offset,
++                TileMessage::Fill { col, row, rgba } => {
++                    let rect = offset_tile_rect_for_emit(
++                        TileCoord::new(col, row),
++                        grid,
++                        if self.apply_offset { self.offset } else { 0 },
++                    );
++                    self.paint(
++                        rect,
++                        &rgba
++                            .to_le_bytes()
++                            .repeat(usize::from(rect.w) * usize::from(rect.h)),
++                        grid,
++                    );
++                }
++                TileMessage::Qoi {
++                    col,
++                    row,
++                    hash,
++                    data,
++                } => {
++                    let (header, bytes) = qoi::decode_to_vec(&data).unwrap();
++                    let rect = offset_tile_rect_for_emit(
++                        TileCoord::new(col, row),
++                        grid,
++                        if self.apply_offset { self.offset } else { 0 },
++                    );
++                    assert_eq!(
++                        (header.width, header.height),
++                        (u32::from(rect.w), u32::from(rect.h))
++                    );
++                    self.paint(rect, &bytes, grid);
++                    if hash != 0 {
++                        self.cache.insert(hash, bytes);
++                    }
++                }
++                TileMessage::CacheHit { col, row, hash } => {
++                    let bytes = self
++                        .cache
++                        .get(&hash)
++                        .expect("sender referenced absent cache tile")
++                        .clone();
++                    let rect = offset_tile_rect_for_emit(
++                        TileCoord::new(col, row),
++                        grid,
++                        if self.apply_offset { self.offset } else { 0 },
++                    );
++                    self.paint(rect, &bytes, grid);
++                }
++                TileMessage::ScrollCopy {
++                    dy,
++                    region_top,
++                    region_bottom,
++                    region_right,
++                    ..
++                } => {
++                    let previous = self.pixels.clone();
++                    let stride = usize::from(grid.screen_w) * 4;
++                    for y in region_top..region_bottom {
++                        let source = i32::from(y) + i32::from(dy);
++                        for x in 0..region_right {
++                            let dest = usize::from(y) * stride + usize::from(x) * 4;
++                            if source >= i32::from(region_top) && source < i32::from(region_bottom)
++                            {
++                                let src = source as usize * stride + usize::from(x) * 4;
++                                self.pixels[dest..dest + 4]
++                                    .copy_from_slice(&previous[src..src + 4]);
++                            } else {
++                                // Exposed pixels are undefined: neither white
++                                // nor old framebuffer content is safe to trust.
++                                self.pixels[dest..dest + 4].copy_from_slice(&[251, 2, 217, 255]);
++                            }
++                        }
++                    }
++                }
++                TileMessage::BatchEnd { .. } | TileMessage::VideoRegion { .. } => {}
++                other => panic!("unexpected test command: {other:?}"),
++            }
++        }
++    }
++}
++
++fn rgba_from_bgra(bytes: &[u8]) -> Vec<u8> {
++    bytes
++        .chunks_exact(4)
++        .flat_map(|p| [p[2], p[1], p[0], p[3]])
++        .collect()
++}
++
++#[test]
++fn random_scroll_reversals_reconstruct_every_pixel_with_matching_chrome_and_offset_edges() {
++    let grid = TileGrid::new(193, 323, 64);
++    let stride = usize::from(grid.screen_w) * 4;
++    let mut random = 0x1234_5678_u32;
++    for (top, bottom, right, offset) in [
++        (64, 256, 192, 0),
++        (85, 289, 177, 0),
++        (0, 323, 193, 17),
++        (0, 323, 193, 63),
++    ] {
++        let coords: Vec<_> = (0..grid.rows + u16::from(offset > 0))
++            .flat_map(|row| (0..grid.cols).map(move |col| TileCoord::new(col, row)))
++            .collect();
++        let mut previous = vec![255u8; stride * usize::from(grid.screen_h)];
++        for y in top..bottom {
++            for x in 0..right {
++                let index = usize::from(y) * stride + usize::from(x) * 4;
++                previous[index..index + 4].copy_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]);
++            }
++        }
++        let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++        let mut viewer = Viewer::new(&grid);
++        viewer.offset = offset;
++        viewer.apply(
++            emitter
++                .emit_frame(&previous, stride, &coords, &grid, offset, None, None)
++                .tile_frames,
++            &grid,
++        );
++        let mut copy_count = 0;
++        for step in 0..80 {
++            random ^= random << 13;
++            random ^= random >> 17;
++            random ^= random << 5;
++            let dy = [64i16, -64, 128, -128, 7, -7, 1, -1][random as usize % 8];
++            let mut current = previous.clone();
++            for y in top..bottom {
++                for x in 0..right {
++                    let index = usize::from(y) * stride + usize::from(x) * 4;
++                    let source = i32::from(y) + i32::from(dy);
++                    if source >= i32::from(top) && source < i32::from(bottom) {
++                        let src = source as usize * stride + usize::from(x) * 4;
++                        current[index..index + 4].copy_from_slice(&previous[src..src + 4]);
++                    } else {
++                        current[index..index + 4].fill(255); // matches exterior chrome
++                    }
++                    // Sparse real changes exercise residuals/cache reuse,
++                    // rather than degenerating into a permanently blank page.
++                    if step % 3 == 0
++                        && u32::from(x) == random % u32::from(right)
++                        && u32::from(y) == u32::from(top) + (random / 17) % u32::from(bottom - top)
++                    {
++                        current[index..index + 4].copy_from_slice(&[step, x as u8, y as u8, 255]);
++                    }
++                }
++            }
++            let scroll = DetectedScrollFrame {
++                dy,
++                confidence: 1.0,
++                source: "test",
++                direction_matches: true,
++                min_confidence: None,
++                row_shift: if dy % 64 == 0 { i32::from(dy) / 64 } else { 0 },
++                region_top: top,
++                region_bottom: bottom,
++                region_right: right,
++            };
++            let partition = partition_and_compare(
++                &current,
++                &previous,
++                stride,
++                &grid,
++                offset,
++                64,
++                64,
++                dy,
++                &coords,
++                &scroll,
++                top,
++                grid.screen_h,
++                right,
++                grid.screen_w,
++            );
++            let copy = can_emit_scroll_copy(dy, 64, 64) && partition.saved_tiles > 0;
++            let dirty = if copy {
++                copy_count += 1;
++                emitter.shift_hashes(scroll.row_shift, grid.rows);
++                emitter.zero_exposed_strip(dy, top, bottom, 64, offset);
++                viewer.apply(
++                    [TileMessage::ScrollCopy {
++                        dx: 0,
++                        dy,
++                        region_top: top,
++                        region_bottom: bottom,
++                        region_right: right,
++                    }
++                    .to_frame()],
++                    &grid,
++                );
++                partition
++                    .residual
++                    .into_iter()
++                    .chain(partition.chrome_emit_coords)
++                    .collect::<Vec<_>>()
++            } else {
++                coords.clone()
++            };
++            // Nonzero-offset cases use a single full-screen content grid;
++            // zero-offset cases exercise actual mixed chrome/content emission.
++            let (content, chrome): (Vec<_>, Vec<_>) = dirty.into_iter().partition(|coord| {
++                offset > 0 || is_content_tile_in_scroll_region(*coord, 64, top, bottom, right)
++            });
++            viewer.apply(
++                emitter
++                    .emit_frame(&current, stride, &content, &grid, offset, None, None)
++                    .tile_frames,
++                &grid,
++            );
++            if !chrome.is_empty() {
++                viewer.apply(
++                    [TileMessage::TileDrawMode {
++                        apply_offset: false,
++                    }
++                    .to_frame()],
++                    &grid,
++                );
++                viewer.apply(
++                    emitter.emit_static_tiles(
++                        &current,
++                        stride,
++                        &chrome,
++                        &grid,
++                        (right % 64 != 0).then_some(right / 64),
++                        (top % 64 != 0).then_some(top / 64),
++                        (bottom % 64 != 0).then_some(bottom / 64),
++                        None,
++                        None,
++                    ),
++                    &grid,
++                );
++                viewer.apply(
++                    [TileMessage::TileDrawMode { apply_offset: true }.to_frame()],
++                    &grid,
++                );
++            }
++            let expected = rgba_from_bgra(&current);
++            assert!(viewer.pixels == expected, "pixel mismatch: region={top}..{bottom}/{right}, offset={offset}, step={step}, dy={dy}, copy={copy}; first={:?}",
++                viewer.pixels.iter().zip(&expected).position(|(a,b)| a != b));
++            previous = current;
++        }
++        assert!(
++            copy_count >= 10,
++            "model must exercise retained ScrollCopy, not only fallbacks"
++        );
++    }
++}
++
++#[test]
++fn delayed_cache_miss_recovers_moved_holes_with_one_fresh_snapshot() {
++    let grid = TileGrid::new(128, 145, 64);
++    let coords: Vec<_> = (0..grid.rows + 1)
++        .flat_map(|row| (0..grid.cols).map(move |col| TileCoord::new(col, row)))
++        .collect();
++    let pixels: Vec<_> = (0..145u16)
++        .flat_map(|y| (0..128u16).flat_map(move |x| [x as u8, y as u8, (x ^ y) as u8, 255]))
++        .collect();
++    let mut emitter = TileEmitter::new(grid.cols, grid.rows);
++    let mut viewer = Viewer::new(&grid);
++    viewer.offset = 17;
++    viewer.apply(
++        emitter
++            .emit_frame(&pixels, 512, &coords, &grid, 17, None, None)
++            .tile_frames,
++        &grid,
++    );
++    let missing_hash = *viewer.cache.keys().next().unwrap();
++    viewer.cache.clear();
++    viewer.pixels[..64 * 4].fill(0);
++    // The missing pixels move before the old-coordinate report reaches host.
++    viewer.apply(
++        [TileMessage::ScrollCopy {
++            dx: 0,
++            dy: -64,
++            region_top: 0,
++            region_bottom: 145,
++            region_right: 128,
++        }
++        .to_frame()],
++        &grid,
++    );
++    emitter.handle_cache_miss(0, 0, missing_hash);
++    emitter.handle_cache_miss(1, 1, missing_hash);
++    let prefix = emitter
++        .begin_requested_snapshot(&grid, 17)
++        .expect("desync requires snapshot");
++    viewer.apply(prefix, &grid);
++    let repaired = emitter.emit_frame(&pixels, 512, &coords, &grid, 17, None, None);
++    assert_eq!(repaired.stats.cache_hits, 0);
++    viewer.apply(repaired.tile_frames, &grid);
++    assert_eq!(viewer.pixels, rgba_from_bgra(&pixels));
++    assert!(
++        emitter.begin_requested_snapshot(&grid, 17).is_none(),
++        "reports must coalesce"
++    );
++}

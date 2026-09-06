@@ -1,0 +1,214 @@
+diff --git a/code/apps/bpane-host/src/cdp_video.rs b/code/apps/bpane-host/src/cdp_video.rs
+index 0b57d6df..a20c72f9 100644
+--- a/code/apps/bpane-host/src/cdp_video.rs
++++ b/code/apps/bpane-host/src/cdp_video.rs
+@@ -11,6 +11,10 @@ use tracing::{debug, trace};
+ 
+ use crate::capture::ffmpeg::CaptureRegion;
+ 
++#[cfg(test)]
++#[path = "cdp_video/resize_tests.rs"]
++mod resize_tests;
++
+ const DEFAULT_DEBUG_PORT: u16 = 9222;
+ const DEFAULT_POLL_MS: u64 = 80;
+ const EVAL_TIMEOUT_MS: u64 = 450;
+@@ -1321,7 +1325,7 @@ async fn resize_window_via_stream(
+         tokio::time::sleep(Duration::from_millis(WINDOW_STATE_SETTLE_MS)).await;
+     }
+ 
+-    if !cdp_set_window_bounds(
++    let bounds_applied = cdp_set_window_bounds(
+         stream,
+         request_id,
+         window.window_id,
+@@ -1332,11 +1336,10 @@ async fn resize_window_via_stream(
+             "height": dip_height
+         }),
+     )
+-    .await
+-    {
+-        return false;
+-    }
++    .await;
+ 
++    // A rejected or timed-out bounds request must not strand a window that we
++    // temporarily normalized. Preserve the failure result after this cleanup.
+     if let Some(window_state) = restore_state {
+         if !cdp_set_window_bounds(
+             stream,
+@@ -1351,7 +1354,7 @@ async fn resize_window_via_stream(
+         tokio::time::sleep(Duration::from_millis(WINDOW_STATE_SETTLE_MS)).await;
+     }
+ 
+-    true
++    bounds_applied
+ }
+ 
+ fn screen_px_to_window_dips(px: u32, scale_milli: u16) -> u32 {
+diff --git a/code/apps/bpane-host/src/cdp_video/resize_tests.rs b/code/apps/bpane-host/src/cdp_video/resize_tests.rs
+new file mode 100644
+index 00000000..85fed0c7
+--- /dev/null
++++ b/code/apps/bpane-host/src/cdp_video/resize_tests.rs
+@@ -0,0 +1,160 @@
++//! Real CDP WebSocket exchange against a private scripted peer; no Chromium.
++
++use super::*;
++use std::collections::VecDeque;
++use tokio::net::TcpListener;
++
++struct ResizeTrace {
++    state: String,
++    bounds_requests: Vec<Value>,
++}
++
++async fn scripted_resize(
++    initial_state: &str,
++    outcomes: &[bool],
++    resize_count: usize,
++) -> (Vec<bool>, ResizeTrace) {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let mut trace = ResizeTrace {
++        state: initial_state.to_owned(),
++        bounds_requests: Vec::new(),
++    };
++    let mut outcomes: VecDeque<bool> = outcomes.iter().copied().collect();
++    let peer = tokio::spawn(async move {
++        let (socket, _) = listener.accept().await.unwrap();
++        let mut stream = tokio_tungstenite::accept_async(socket).await.unwrap();
++        while let Some(message) = stream.next().await {
++            let message = message.unwrap();
++            if message.is_close() {
++                break;
++            }
++            let request: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
++            let result = match request["method"].as_str().unwrap() {
++                "Browser.getWindowForTarget" => Some(json!({
++                    "windowId": 42,
++                    "bounds": { "windowState": trace.state }
++                })),
++                "Browser.setWindowBounds" => {
++                    assert_eq!(request["params"]["windowId"], 42);
++                    let bounds = request["params"]["bounds"].clone();
++                    trace.bounds_requests.push(bounds.clone());
++                    let success = outcomes.pop_front().unwrap_or(true);
++                    if success {
++                        if let Some(state) = bounds["windowState"].as_str() {
++                            trace.state = state.to_owned();
++                        }
++                    }
++                    success.then(|| json!({}))
++                }
++                method => panic!("unexpected CDP command: {method}"),
++            };
++            let reply = match result {
++                Some(result) => json!({ "id": request["id"], "result": result }),
++                None => json!({ "id": request["id"], "error": {
++                    "code": -32000, "message": "scripted bounds rejection"
++                }}),
++            };
++            stream
++                .send(Message::Text(reply.to_string().into()))
++                .await
++                .unwrap();
++        }
++        trace
++    });
++    let (mut stream, _) = connect_async(format!("ws://{address}")).await.unwrap();
++    let mut results = Vec::new();
++    let mut request_id = 1;
++    for _ in 0..resize_count {
++        results.push(resize_window_via_stream(&mut stream, 1200, 766, 1000, &mut request_id).await);
++    }
++    stream.close(None).await.unwrap();
++    (results, peer.await.unwrap())
++}
++
++async fn resize_case(
++    initial_state: &str,
++    outcomes: &[bool],
++    resize_count: usize,
++) -> (Vec<bool>, ResizeTrace) {
++    tokio::time::timeout(
++        Duration::from_secs(5),
++        scripted_resize(initial_state, outcomes, resize_count),
++    )
++    .await
++    .expect("private CDP resize exchange timed out")
++}
++
++fn numeric_bounds() -> Value {
++    json!({ "left": 0, "top": 0, "width": 1200, "height": 766 })
++}
++
++#[tokio::test]
++async fn successful_resize_restores_prior_window_state() {
++    for state in ["maximized", "fullscreen"] {
++        let (results, trace) = resize_case(state, &[true, true, true], 1).await;
++        assert_eq!(results, [true]);
++        assert_eq!(trace.state, state);
++        assert_eq!(
++            trace.bounds_requests,
++            [
++                json!({ "windowState": "normal" }),
++                numeric_bounds(),
++                json!({ "windowState": state }),
++            ]
++        );
++    }
++}
++
++#[tokio::test]
++async fn failed_bounds_still_restores_prior_window_state() {
++    for state in ["maximized", "fullscreen"] {
++        let (results, trace) = resize_case(state, &[true, false, true], 1).await;
++        assert_eq!(results, [false]);
++        assert_eq!(trace.state, state);
++        assert_eq!(
++            trace.bounds_requests.last(),
++            Some(&json!({ "windowState": state }))
++        );
++    }
++}
++
++#[tokio::test]
++async fn failed_bounds_does_not_make_next_resize_permanently_normal() {
++    let (results, trace) = resize_case("maximized", &[true, false, true], 2).await;
++    assert_eq!(results, [false, true]);
++    assert_eq!(trace.state, "maximized");
++    assert_eq!(trace.bounds_requests.len(), 6);
++}
++
++#[tokio::test]
++async fn normal_and_minimized_windows_are_not_forced_maximized() {
++    for state in ["normal", "minimized"] {
++        for success in [false, true] {
++            let (results, trace) = resize_case(state, &[success], 1).await;
++            assert_eq!(results, [success]);
++            assert_eq!(trace.state, state);
++            assert_eq!(trace.bounds_requests, [numeric_bounds()]);
++        }
++    }
++}
++
++#[tokio::test]
++async fn failed_restore_is_not_reported_as_success() {
++    let (results, trace) = resize_case("maximized", &[true, true, false], 1).await;
++    assert_eq!(results, [false]);
++    assert_eq!(
++        trace.bounds_requests.last(),
++        Some(&json!({ "windowState": "maximized" }))
++    );
++}
++
++#[tokio::test]
++async fn failed_normalization_and_bounds_still_attempt_restore() {
++    let (results, trace) = resize_case("fullscreen", &[false, false, true], 1).await;
++    assert_eq!(results, [false]);
++    assert_eq!(
++        trace.bounds_requests.last(),
++        Some(&json!({ "windowState": "fullscreen" }))
++    );
++}

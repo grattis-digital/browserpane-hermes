@@ -1,0 +1,205 @@
+diff --git a/code/web/bpane-client/js/session-surface-runtime.ts b/code/web/bpane-client/js/session-surface-runtime.ts
+index c7f52d62..1850f85b 100644
+--- a/code/web/bpane-client/js/session-surface-runtime.ts
++++ b/code/web/bpane-client/js/session-surface-runtime.ts
+@@ -1,5 +1,6 @@
+ import type { TileInfo } from './nal.js';
+ import type { CacheMissEvent } from './render/tile-draw-runtime.js';
++import { SessionCanvasFactory } from './render/session-canvas-factory.js';
+ import type { SessionResizeAlignmentPreference, SessionCaptureSize } from './bpane-types.js';
+ import { SessionCursorRuntime } from './session-cursor-runtime.js';
+ import { SessionRecordingSurfaceRuntime } from './session-recording-surface-runtime.js';
+@@ -77,7 +78,15 @@ export class SessionSurfaceRuntime {
+     const computedContainerPosition = window.getComputedStyle(this.container).position;
+     this.managesContainerPosition = computedContainerPosition === '' || computedContainerPosition === 'static';
+ 
+-    this.canvas = document.createElement('canvas');
++    const drawable = SessionCanvasFactory.create({
++      document: this.container.ownerDocument,
++      renderBackend: input.renderBackend ?? 'auto',
++      createWebGLRenderer: input.createWebGLRenderer ?? WebGLTileRenderer.tryCreate,
++    });
++    this.canvas = drawable.canvas;
++    this.glRenderer = drawable.renderer;
++    this.renderDiagnostics = drawable.diagnostics;
++    this.ctx = drawable.ctx;
+     this.canvas.style.width = '100%';
+     this.canvas.style.height = '100%';
+     this.canvas.style.display = 'block';
+@@ -110,34 +119,15 @@ export class SessionSurfaceRuntime {
+       cursorCanvas: this.cursorEl,
+     });
+ 
+-    if ((input.renderBackend ?? 'auto') !== 'canvas2d') {
+-      const webgl = (input.createWebGLRenderer ?? WebGLTileRenderer.tryCreate)(this.canvas);
+-      this.glRenderer = webgl.renderer;
+-      this.renderDiagnostics = webgl.diagnostics;
+-    } else {
+-      this.renderDiagnostics = {
+-        backend: 'canvas2d',
+-        renderer: null,
+-        vendor: null,
+-        software: false,
+-        reason: 'forced-canvas2d',
+-      };
+-    }
+-
+-    let ctx: CanvasRenderingContext2D | null = null;
++    const ctx = this.ctx;
+     if (this.glRenderer) {
+       this.canvas.addEventListener('webglcontextlost', this.onContextLost);
+       this.tileCompositor.setWebGLRenderer(this.glRenderer);
+     } else {
+-      ctx = this.canvas.getContext('2d', {
+-        alpha: false,
+-        desynchronized: true,
+-      });
+       if (ctx) {
+         this.tileCompositor.setContext(ctx);
+       }
+     }
+-    this.ctx = ctx;
+ 
+     this.tileCompositor.setCacheMissHandler(input.onTileCacheMiss);
+ 
+diff --git a/code/web/bpane-client/js/render/session-canvas-factory.ts b/code/web/bpane-client/js/render/session-canvas-factory.ts
+new file mode 100644
+index 00000000..5c3bd124
+--- /dev/null
++++ b/code/web/bpane-client/js/render/session-canvas-factory.ts
+@@ -0,0 +1,58 @@
++import type {
++  WebGLRendererCreationResult,
++  WebGLRendererDiagnostics,
++  WebGLTileRenderer,
++} from '../webgl-compositor.js';
++
++type DrawableSessionCanvas = {
++  canvas: HTMLCanvasElement;
++  ctx: CanvasRenderingContext2D | null;
++  renderer: WebGLTileRenderer | null;
++  diagnostics: WebGLRendererDiagnostics;
++};
++
++/** Select a drawable canvas before any mounted surface holds a reference to it. */
++export class SessionCanvasFactory {
++  static create(input: {
++    document: Document;
++    renderBackend: 'auto' | 'canvas2d' | 'webgl2';
++    createWebGLRenderer: (canvas: HTMLCanvasElement) => WebGLRendererCreationResult;
++  }): DrawableSessionCanvas {
++    let canvas = input.document.createElement('canvas');
++    let renderer: WebGLTileRenderer | null = null;
++    let diagnostics: WebGLRendererDiagnostics = {
++      backend: 'canvas2d', renderer: null, vendor: null, software: false,
++      reason: 'forced-canvas2d',
++    };
++    if (input.renderBackend !== 'canvas2d') {
++      try {
++        const selected = input.createWebGLRenderer(canvas);
++        renderer = selected.renderer;
++        diagnostics = selected.diagnostics;
++      } catch {
++        diagnostics = { ...diagnostics, reason: 'initialization-failed' };
++      }
++      if (!renderer) {
++        // Creating WebGL permanently commits a canvas's context type, even
++        // after loseContext(). Never reuse a rejected/partially initialized
++        // WebGL canvas for the Canvas2D fallback.
++        SessionCanvasFactory.releaseContext(canvas);
++        canvas = input.document.createElement('canvas');
++      }
++    }
++    if (renderer) return { canvas, ctx: null, renderer, diagnostics };
++    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
++    // Nothing has been mounted or wired yet. Fail explicitly, without orphan
++    // canvases/listeners or a connected session that silently drops all tiles.
++    if (!ctx) throw new Error('Canvas2D rendering context unavailable');
++    return { canvas, ctx, renderer: null, diagnostics };
++  }
++
++  private static releaseContext(canvas: HTMLCanvasElement): void {
++    try {
++      canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext();
++    } catch {
++      // A failed driver must not prevent fallback on an independent canvas.
++    }
++  }
++}
+diff --git a/code/web/bpane-client/js/__tests__/session-surface-fallback.test.ts b/code/web/bpane-client/js/__tests__/session-surface-fallback.test.ts
+new file mode 100644
+index 00000000..7c0c4d00
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/session-surface-fallback.test.ts
+@@ -0,0 +1,71 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { SessionSurfaceRuntime } from '../session-surface-runtime.js';
++import { installCanvasGetContextMock } from './canvas-test-helpers.js';
++
++describe('SessionSurfaceRuntime drawable fallback', () => {
++  let contextSpy: ReturnType<typeof installCanvasGetContextMock>;
++  const observer = { observe: vi.fn(), disconnect: vi.fn() };
++
++  beforeEach(() => {
++    contextSpy = installCanvasGetContextMock();
++    vi.stubGlobal('ResizeObserver', vi.fn(() => observer));
++    observer.observe.mockClear();
++  });
++  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
++
++  function input() {
++    const container = document.createElement('div');
++    container.style.position = 'absolute';
++    container.innerHTML = '<span>Existing content</span>';
++    return { container, hiDpi: false, onTileCacheMiss: vi.fn(),
++      sendResizeRequest: vi.fn(), setRemoteSize: vi.fn(),
++      tileCompositor: { setContext: vi.fn(), setWebGLRenderer: vi.fn(),
++        setCacheMissHandler: vi.fn(), setVideoRegionChangeHandler: vi.fn(),
++        getGridConfig: vi.fn(() => null), getVideoRegion: vi.fn(() => null) } };
++  }
++
++  it.each(['rejected', 'throws'] as const)('replaces a context-committed WebGL canvas when selection %s', failure => {
++    const args = input();
++    const original = contextSpy.getMockImplementation()!;
++    let rejected: HTMLCanvasElement;
++    contextSpy.mockImplementation(function (this: HTMLCanvasElement, ...parameters: any[]) {
++      if (this === rejected) return null;
++      return original.apply(this, parameters);
++    });
++    const runtime = new SessionSurfaceRuntime({ ...args, createWebGLRenderer: canvas => {
++      rejected = canvas;
++      if (failure === 'throws') throw new Error('Shader initialization failed');
++      return { renderer: null, diagnostics: { backend: 'canvas2d', renderer: 'SwiftShader',
++        vendor: 'test', software: true, reason: 'software-renderer' } };
++    } });
++    const finalCanvas = runtime.getCanvas();
++    expect(finalCanvas).not.toBe(rejected!);
++    expect(rejected!.isConnected).toBe(false);
++    expect(args.container.querySelectorAll('canvas')).toHaveLength(2);
++    expect(args.container.querySelector('canvas')).toBe(finalCanvas);
++    expect(finalCanvas.tabIndex).toBe(0);
++    expect(finalCanvas.style.cursor).toBe('none');
++    expect(args.tileCompositor.setContext).toHaveBeenCalledOnce();
++    expect(args.tileCompositor.setWebGLRenderer).not.toHaveBeenCalled();
++    expect(runtime.getRenderDiagnostics().reason).toBe(failure === 'throws'
++      ? 'initialization-failed' : 'software-renderer');
++    runtime.destroy();
++    expect(args.container.innerHTML).toBe('<span>Existing content</span>');
++    expect(args.container.style.position).toBe('absolute');
++  });
++
++  it.each(['auto', 'canvas2d'] as const)('fails cleanly when %s has no drawable context', renderBackend => {
++    const args = input();
++    contextSpy.mockImplementation(() => null);
++    expect(() => new SessionSurfaceRuntime({ ...args, renderBackend,
++      createWebGLRenderer: () => ({ renderer: null, diagnostics: {
++        backend: 'canvas2d', renderer: null, vendor: null, software: false, reason: 'unsupported',
++      } }),
++    })).toThrow('Canvas2D rendering context unavailable');
++    expect(args.container.innerHTML).toBe('<span>Existing content</span>');
++    expect(args.container.style.position).toBe('absolute');
++    expect(observer.observe).not.toHaveBeenCalled();
++    expect(args.tileCompositor.setContext).not.toHaveBeenCalled();
++    expect(args.tileCompositor.setCacheMissHandler).not.toHaveBeenCalled();
++  });
++});
