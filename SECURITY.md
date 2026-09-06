@@ -4,6 +4,10 @@ This is a trusted-host/LAN, single-browser bundle, not an Internet-facing or
 multi-tenant service. Read [deployment boundaries and configuration](docs/SECURITY.md)
 before granting another device access. The shared browser profile contains
 credentials; anyone admitted to the viewer or MCP can operate that session.
+Compact MCP's leases, observation references, replay protection and file-path
+checks are accident guards, not user authentication or a hostile-tenant sandbox.
+Website text and tool results are untrusted data; never treat them as authority
+to disclose secrets, change instructions or bypass site access restrictions.
 
 For a suspected vulnerability, use GitHub's
 [private vulnerability report](https://github.com/grattis-digital/browserpane-hermes/security/advisories/new).

@@ -54,8 +54,10 @@ working directory. It has no Docker socket, host terminal, or privileged mode.
 Its file-write allowlist includes `/opt/data` and `/shared`. That allowlist is an
 accident-reduction guard for file tools, not a sandbox for arbitrary terminal code.
 
-Browser downloads belong in `/shared/downloads`; MCP screenshots, PDFs and logs
-belong in `/shared/mcp-artifacts`. Keeping diagnostics outside the watched
+Browser downloads belong in `/shared/downloads`; saved MCP screenshots, PDFs and
+legacy diagnostic logs belong in `/shared/mcp-artifacts`. Compact screenshots are
+returned on demand as image content, not automatically written after every action.
+Keeping diagnostics outside the watched
 downloads directory avoids accidental log downloads in the viewer. Because both
 containers see the same `/shared` path, MCP upload paths need no translation.
 Example file exchange:
@@ -108,8 +110,53 @@ tool names are prefixed `mcp__browserpane__`; the exclusion list uses the origin
 unprefixed names. Native Hermes browser tools are disabled. Parallel tool calls
 and server-initiated model sampling are not enabled for this shared browser.
 
-Excluding browser-close/install tools prevents common mistakes; it does not
+Compact MCP is the default. It advertises exactly five tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `pane_tabs` | List the human's shared tabs and obtain the current session lease |
+| `pane_view` | Read bounded accessibility text with observed element references |
+| `pane_act` | Run up to eight ordered browser actions with explicit outcomes |
+| `pane_read` | Read bounded text, table rows or a numeric summary from an observed element |
+| `pane_image` | Request a viewport or observed-element screenshot when text is insufficient |
+
+Select a tab from `pane_tabs`, then call `pane_view` for its latest `view` and refs.
+Existing-tab actions require that exact `tab`, `view`, session `lease`, and a
+strictly increasing `request` number. Creating a new tab uses the lease/request
+without a prior tab/view. An exact retry with the same request and arguments
+recovers its recorded outcome; never retry uncertain input with a new number.
+Old leases cannot authorize mutations after reconnect. Another client's input,
+navigation or changed targets can require a fresh observation. All clients and
+the viewer still share one browser; this is not tenant isolation.
+
+Observations have explicit pagination/truncation. Request the next slice when
+`next` is returned, and do not act on a target absent from the returned slice.
+Deltas are opt-in: only pass `since` while retaining that exact base; otherwise
+read a complete slice. A completed action is not rolled back if a later action or
+postcondition fails. Inspect the reported completion/error before proceeding.
+There is no default arbitrary-JavaScript tool, automatic console dump, model
+sampling, stealth patch or CAPTCHA bypass. Use the viewer for challenges and MFA.
+
+### Optional Playwright compatibility mode
+
+Set `BPANE_MCP_MODE=playwright` in the bundle's deployment `.env` to select the
+pinned legacy Playwright MCP surface instead of compact MCP. The URL and server
+key stay unchanged. Apply it with `docker compose up -d browserpane`; changing
+the service environment recreates that container and briefly disconnects the
+viewer, while keeping its named profile/shared volumes. Start a fresh Hermes
+session to rediscover the selected tool surface. Set the value back to `compact`
+to restore the default. Do not change Chromium flags or create a second browser.
+
+The seed file is not a migration: existing operator configs are never overwritten.
+The shipped `browser_close`/`browser_install` exclusions are harmless with compact
+tools and remain useful in compatibility mode. If an existing config instead has
+an explicit old-tool `include` list, update it deliberately for the chosen surface;
+do not replace the whole configuration or credentials. Scripts using legacy tool
+names need adaptation or the explicit compatibility mode.
+
+Excluding legacy browser-close/install tools prevents common mistakes; it does not
 prevent an agent with arbitrary-code tools from performing equivalent actions.
+Compact `pane_act` can close an individual tab, but refuses to close the last tab.
 Give the agent an explicit task and require confirmation for consequential
 actions. Human intervention and MFA stay in the viewer.
 
@@ -208,7 +255,10 @@ docker compose exec hermes python /opt/hermes-bundle/verify.py --mcp
 ```
 
 This checks the pinned revision, native imports, linked SQLite/FTS5, MCP
-connectivity and tool exclusions. It lists tools but does not navigate a page,
+connectivity and the exact five compact tools, including the absence of legacy
+close/install tools. For an intentionally configured legacy server, use
+`--mcp --mcp-mode playwright`; that option changes only verification expectations,
+not the server or saved config. The verifier lists tools but does not navigate a page,
 execute browser tools, or call a model. Import checks can initialize ordinary
 Hermes runtime files in its own home.
 

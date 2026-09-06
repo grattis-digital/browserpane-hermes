@@ -1,5 +1,4 @@
 // Stdin helper for scripts/test-runtime.mjs, never an operator/profile diagnostic.
-import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
 
@@ -9,24 +8,27 @@ assert.match(token ?? '', /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{
 const mode = process.argv[2];
 assert(['seed', 'verify'].includes(mode), 'Use the disposable launcher');
 const expectedUrl = 'http://fixture:9130/' + token;
-const browser = await chromium.connectOverCDP('http://127.0.0.1:9222', { timeout: 10000 });
+const browser = await RuntimeCdp.browser();
+let page;
 try {
-  const context = browser.contexts()[0];
   if (mode === 'seed') {
-    const page = await context.newPage();
-    await page.goto(expectedUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await context.addCookies([{ name: 'bpane_profile_test', value: token,
-      domain: 'fixture', path: '/', sameSite: 'Lax', expires: Math.floor(Date.now() / 1000) + 3600 }]);
+    const created = await browser.send('Target.createTarget', { url: expectedUrl });
+    await RuntimeCdp.until(async () => (await RuntimeCdp.pages()).some(target => target.id === created.targetId && target.url === expectedUrl), 'Owned seed tab did not navigate');
+    ({ page } = await RuntimeCdp.pageByUrl(expectedUrl));
+    await RuntimeCdp.until(() => page.evaluate(() => document.readyState !== 'loading'), 'Owned seed document did not load');
+    const cookie = await page.send('Network.setCookie', { name: 'bpane_profile_test', value: token,
+      url: expectedUrl, sameSite: 'Lax', expires: Math.floor(Date.now() / 1000) + 3600 });
+    assert.equal(cookie.success, true);
     await page.evaluate(value => localStorage.setItem('bpane-profile-test', value), token);
     await writeFile('/shared/profile-test-marker', token, { flag: 'wx' });
     console.log(JSON.stringify({ seededOwnedTab: true, cookie: true, localStorage: true, sharedFile: true }));
   } else {
-    const page = context.pages().find(candidate => candidate.url() === expectedUrl);
-    assert(page, 'Chromium did not restore the owned test tab automatically');
+    const restored = await RuntimeCdp.pageByUrl(expectedUrl);
+    page = restored.page;
     // Activation may load a lazily restored tab; do not navigate to hide lost session state.
-    await page.bringToFront();
-    await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-    const cookie = (await context.cookies(expectedUrl)).find(item => item.name === 'bpane_profile_test');
+    await browser.send('Target.activateTarget', { targetId: restored.id });
+    await RuntimeCdp.until(() => page.evaluate(expected => location.href === expected && document.readyState !== 'loading', expectedUrl), 'Restored document did not load without navigation');
+    const cookie = (await page.send('Network.getCookies', { urls: [expectedUrl] })).cookies.find(item => item.name === 'bpane_profile_test');
     assert.equal(cookie?.value, token, 'Persistent cookie lost');
     assert.equal(await page.evaluate(() => localStorage.getItem('bpane-profile-test')), token, 'Site storage lost');
     assert.equal(await readFile('/shared/profile-test-marker', 'utf8'), token, 'Shared folder lost');
@@ -36,6 +38,5 @@ try {
     console.log(JSON.stringify({ restoredOwnedTab: true, persistentCookie: true, localStorage: true, sharedFile: true, download: true }));
   }
 } finally {
-  // CDP attachment close disconnects this client, not the persistent browser.
-  await browser.close();
+  page?.close(); browser.close(); // Raw sockets only; no Browser.close or download-setting commands.
 }

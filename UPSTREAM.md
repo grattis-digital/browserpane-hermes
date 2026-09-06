@@ -56,6 +56,14 @@ project preserves the root license rather than changing upstream licensing.
 Playwright MCP uses Apache-2.0; other dependencies retain their own licenses.
 Corresponding source is served on the private LAN at `/browser/source`.
 
+The compact MCP experiment adds original wrapper code under `server/compact/`.
+It directly pins `playwright-core@1.59.0-alpha-1771104257000` (Apache-2.0) and
+`@modelcontextprotocol/sdk@1.30.0` (MIT), while keeping
+`@playwright/mcp@0.0.68` selectable for compatibility. The private accessibility
+adapter uses the same pinned Playwright implementation, not copied vendor source.
+No new Chromium/CDP/native patch is added; the 18-patch rendering baseline stays
+unchanged. Requalify the private snapshot/ref adapter when updating Playwright.
+
 ## Hermes integration
 
 Hermes Agent source: https://github.com/NousResearch/hermes-agent

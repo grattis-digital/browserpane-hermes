@@ -21,6 +21,7 @@ services:
       BPANE_CHROMIUM_EXTRA_FLAGS: --disable-setuid-sandbox
       BPANE_CHROMIUM_DEBUG_ADDRESS: 127.0.0.1
       BPANE_CDP_PROXY_ENABLE: "0"
+      BPANE_MCP_MODE: ${BPANE_MCP_MODE:-compact}
       RUST_LOG: warn
     ports:
       - target: 4433

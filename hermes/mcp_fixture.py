@@ -29,7 +29,8 @@ class Handler(BaseHTTPRequestHandler):
         elif method == "tools/list":
             result = {"tools": [{"name": name, "description": "Deterministic test fixture",
                                   "inputSchema": {"type": "object", "properties": {}}}
-                                 for name in ("browser_snapshot", "browser_close", "browser_install")]}
+                                 for name in ("pane_view", "pane_act", "pane_tabs", "pane_read", "pane_image",
+                                              "browser_close", "browser_install")]}
         elif method == "ping":
             result = {}
         else:

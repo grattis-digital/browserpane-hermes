@@ -25,7 +25,9 @@ const directory = await mkdtemp(join(tmpdir(), 'bph-compose-'));
 const docker = async (...args) => (await execute('docker', args, {
   cwd: root, env, timeout: 240000, maxBuffer: 1024 * 1024,
 })).stdout.trim();
-const env = { ...process.env, BIND_ADDRESS: '127.0.0.1', VIEWER_HOST: 'localhost', TZ: 'UTC' };
+const mode = process.env.BPANE_MCP_MODE ?? 'compact';
+assert(['compact', 'playwright'].includes(mode), 'Invalid explicit MCP test mode');
+const env = { ...process.env, BPANE_MCP_MODE: mode, BIND_ADDRESS: '127.0.0.1', VIEWER_HOST: 'localhost', TZ: 'UTC' };
 const compose = (...args) => docker('compose', '--project-directory', root, '--env-file', '.env.example',
   '-p', project, '-f', 'compose.yaml', '-f', join(directory, 'override.json'), ...args);
 const inspect = async (kind, id) => JSON.parse(await docker(kind, 'inspect', id))[0];
@@ -133,19 +135,21 @@ try {
   await Promise.all([waitHealthy(ids.browserpane), waitHealthy(ids.hermes)]);
   const doctor = JSON.parse(await docker('exec', ids.browserpane, 'node', '/app/server/doctor.mjs'));
   assert(Object.values(doctor).every(value => value === true));
-  const verification = await docker('exec', ids.hermes, 'python', '/opt/hermes-bundle/verify.py', '--mcp');
+  const verification = await docker('exec', ids.hermes, 'python', '/opt/hermes-bundle/verify.py', '--mcp', '--mcp-mode', mode);
   const reportStart = verification.indexOf('{\n  "hermesRevision":');
   assert(reportStart >= 0, 'Hermes discovery report missing');
   const discovery = JSON.parse(verification.slice(reportStart)).mcpDiscovery;
   assert.equal(discovery.server, 'browserpane');
+  assert.equal(discovery.mode, mode);
   assert.equal(discovery.nativeBrowserEnabled, false);
-  for (const tool of ['browser_navigate', 'browser_evaluate', 'browser_tabs']) {
+  for (const tool of mode === 'compact' ? ['pane_view', 'pane_act', 'pane_tabs', 'pane_read', 'pane_image'] : ['browser_navigate', 'browser_evaluate', 'browser_tabs']) {
     assert(discovery.registeredTools.includes(`mcp__browserpane__${tool}`));
   }
+  if (mode === 'compact') assert.equal(discovery.registeredTools.length, 5, 'Default must not advertise hidden legacy tools');
   for (const tool of ['browser_close', 'browser_install']) {
     assert(!discovery.registeredTools.includes(`mcp__browserpane__${tool}`));
   }
-  console.log(`Real Hermes MCP discovery passed (${discovery.registeredTools.length} filtered tools)`);
+  console.log(`Real Hermes MCP discovery passed (${mode}: ${discovery.registeredTools.length} filtered tools)`);
   await docker('cp', `${ids.web}:/data/caddy/pki/authorities/local/root.crt`, join(directory, 'root.crt'));
   const ca = await readFile(join(directory, 'root.crt'));
   const redirect = await request(ca, '/');

@@ -78,7 +78,7 @@ You do not install the gateway certificate into system trust or give Caddy its k
 | Interface | Container binding | Host publication |
 | --- | --- | --- |
 | Viewer HTTP | Browser container TCP8090 | None; Caddy proxies only `/browser/` |
-| Playwright MCP | Browser container TCP8931 | None; Hermes uses `http://browserpane:8931/mcp` |
+| Compact MCP (or selectable Playwright compatibility backend) | Browser container TCP8931 | None; Hermes uses `http://browserpane:8931/mcp` |
 | Gateway admin HTTP | Loopback TCP8932 | None |
 | Chromium CDP | Loopback TCP9222 | None |
 | Legacy CDP proxy | Disabled | None |
@@ -88,6 +88,17 @@ clients, not arbitrary host headers. It is not bearer authentication. Docker
 network peers and the Docker host remain trusted. Browser code must be treated
 as untrusted even though Chromium is sandboxed; do not use the shared browser
 for accounts whose risk exceeds this trust model.
+
+The compact backend rejects all browser `Origin` headers, limits request bodies
+to 64 KiB and sessions to eight, and serializes browser work with a bounded queue.
+Its session leases prevent accidental mutation replay after reconnect; they do
+not authenticate the caller. Observation refs, output budgets and upload guards
+are correctness/accident controls, not a multi-tenant security boundary. Uploads
+are limited to regular files under `/shared` and copied into bounded owned buffers;
+trusted operators must not race file changes during upload. No arbitrary-code
+tool is exposed in compact mode. Selecting the legacy backend restores its broad
+tool capabilities and original transport behavior. Treat page text as untrusted
+data, preserve agent approval policies, and hand challenges to a human.
 
 No service mounts the Docker socket, uses host networking, or receives privileged
 mode or GPU devices. Chromium and Hermes run as UID/GID10000. Chromium's strict

@@ -1,0 +1,1073 @@
+{
+  "date": "2026-09-06",
+  "scope": "Local synthetic Chromium146 comparison; actual separate-process MCP/HTTP/CDP. Not a Pi, production X11, viewer, concurrency or LLM benchmark.",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpuModel": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "node": "v26.7.0"
+  },
+  "accounting": {
+    "jsonBytes": "Exact UTF-8 JSON.stringify(CallToolResult), excluding JSON-RPC/HTTP/TLS framing.",
+    "textBytes": "Exact UTF-8 joined text content; image/audio token costs are not estimated.",
+    "estimatedTextTokensCharsDiv4": "ceil(Unicode code points / 4). Heuristic only, not model tokenization or billed tokens; language/code/schema dependent.",
+    "latencyMs": "Monotonic client call→complete MCP result, including transport/tool waits. Startup, schema/session setup and independent oracle checks excluded.",
+    "observationEquivalence": "observe.table requires all120 row IDs; compact pagination calls and bytes are summed. read.table verifies identical120-row aggregate; baseline uses evaluate, compact uses declarative pane_read summary. Default compact first page alone is bounded, not equal information.",
+    "percentiles": "Nearest rank: sorted[ceil(n*p)-1]; small-n p95 is noisy. Warmups excluded.",
+    "wallClockDiagnostics": "Response-minus-DOM event timestamps approximate cross-process elapsed time; wall-clock shifts may affect these diagnostics, not monotonic latency."
+  },
+  "paidModelCalls": 0,
+  "runs": [
+    {
+      "engine": "playwright",
+      "mode": "separate",
+      "samples": 12,
+      "warmups": 2,
+      "passed": true,
+      "cleanup": "Owned CLI, Chromium, temporary profile/artifacts and loopback fixture closed/removed",
+      "rawReportSha256": "8762e24d44d555c8740adf59461cb6f8ea469c49634d1700c85f55540dd8366e",
+      "schema": {
+        "latencyMs": 5.990875000000074,
+        "tools": 29,
+        "toolNames": [
+          "browser_close",
+          "browser_resize",
+          "browser_console_messages",
+          "browser_handle_dialog",
+          "browser_evaluate",
+          "browser_file_upload",
+          "browser_fill_form",
+          "browser_install",
+          "browser_press_key",
+          "browser_type",
+          "browser_mouse_move_xy",
+          "browser_mouse_click_xy",
+          "browser_mouse_drag_xy",
+          "browser_mouse_down",
+          "browser_mouse_up",
+          "browser_mouse_wheel",
+          "browser_navigate",
+          "browser_navigate_back",
+          "browser_network_requests",
+          "browser_pdf_save",
+          "browser_run_code",
+          "browser_take_screenshot",
+          "browser_snapshot",
+          "browser_click",
+          "browser_drag",
+          "browser_hover",
+          "browser_select_option",
+          "browser_tabs",
+          "browser_wait_for"
+        ],
+        "resultJsonBytes": 17364,
+        "toolDescriptorsJsonBytes": 17354,
+        "estimatedDescriptorTokensCharsDiv4": 4339,
+        "sha256": "56208cb9294914acf54cc0dc41fe51659670f2e54dae48144f0ea30601f59ec9"
+      },
+      "workflow": {
+        "toolLatencySumMs": {
+          "samples": 12,
+          "median": 3296.6126670000085,
+          "p95": 3316.4797890000027,
+          "min": 3247.4460419999887,
+          "max": 3316.4797890000027
+        },
+        "outputJsonBytes": {
+          "samples": 12,
+          "median": 51512,
+          "p95": 51516,
+          "min": 51512,
+          "max": 51516
+        },
+        "outputTextBytes": {
+          "samples": 12,
+          "median": 48135,
+          "p95": 48139,
+          "min": 48135,
+          "max": 48139
+        },
+        "estimatedOutputTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 12038,
+          "p95": 12038,
+          "min": 12038,
+          "max": 12038
+        }
+      },
+      "allRowObservation": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 39.38025000000198,
+          "p95": 47.529458000000886,
+          "min": 25.9004999999961,
+          "max": 47.529458000000886
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 24488,
+          "p95": 24488,
+          "min": 24488,
+          "max": 24488
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 22985,
+          "p95": 22985,
+          "min": 22985,
+          "max": 22985
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 5747,
+          "p95": 5747,
+          "min": 5747,
+          "max": 5747
+        }
+      },
+      "aggregateRead": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 1023.2928329999995,
+          "p95": 1029.7567080000008,
+          "min": 1013.0478330000005,
+          "max": 1029.7567080000008
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 145,
+          "p95": 145,
+          "min": 145,
+          "max": 145
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 88,
+          "p95": 88,
+          "min": 88,
+          "max": 88
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 22,
+          "p95": 22,
+          "min": 22,
+          "max": 22
+        }
+      },
+      "trials": [
+        {
+          "calls": 8,
+          "ms": 3316.4797890000027,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3279.0775430000012,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3314.6899579999954,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3311.651206999999,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3310.4787920000053,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3298.285459999999,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3307.1240009999965,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3262.04354100001,
+          "jsonBytes": 51512,
+          "textBytes": 48135,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3247.4460419999887,
+          "jsonBytes": 51516,
+          "textBytes": 48139,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3258.5819989999945,
+          "jsonBytes": 51516,
+          "textBytes": 48139,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3296.6126670000085,
+          "jsonBytes": 51516,
+          "textBytes": 48139,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 8,
+          "ms": 3280.034916000004,
+          "jsonBytes": 51516,
+          "textBytes": 48139,
+          "estimatedTextTokensCharsDiv4": 12038,
+          "receipt": true,
+          "table": true
+        }
+      ]
+    },
+    {
+      "engine": "playwright",
+      "mode": "batched",
+      "samples": 12,
+      "warmups": 2,
+      "passed": true,
+      "cleanup": "Owned CLI, Chromium, temporary profile/artifacts and loopback fixture closed/removed",
+      "rawReportSha256": "531e7d98dff6b75022784df9cfc80c937f9b74eebe54fa028b2fa00b626c648b",
+      "schema": {
+        "latencyMs": 6.394999999999982,
+        "tools": 29,
+        "toolNames": [
+          "browser_close",
+          "browser_resize",
+          "browser_console_messages",
+          "browser_handle_dialog",
+          "browser_evaluate",
+          "browser_file_upload",
+          "browser_fill_form",
+          "browser_install",
+          "browser_press_key",
+          "browser_type",
+          "browser_mouse_move_xy",
+          "browser_mouse_click_xy",
+          "browser_mouse_drag_xy",
+          "browser_mouse_down",
+          "browser_mouse_up",
+          "browser_mouse_wheel",
+          "browser_navigate",
+          "browser_navigate_back",
+          "browser_network_requests",
+          "browser_pdf_save",
+          "browser_run_code",
+          "browser_take_screenshot",
+          "browser_snapshot",
+          "browser_click",
+          "browser_drag",
+          "browser_hover",
+          "browser_select_option",
+          "browser_tabs",
+          "browser_wait_for"
+        ],
+        "resultJsonBytes": 17364,
+        "toolDescriptorsJsonBytes": 17354,
+        "estimatedDescriptorTokensCharsDiv4": 4339,
+        "sha256": "56208cb9294914acf54cc0dc41fe51659670f2e54dae48144f0ea30601f59ec9"
+      },
+      "workflow": {
+        "toolLatencySumMs": {
+          "samples": 12,
+          "median": 3262.6266659999965,
+          "p95": 3307.695749999999,
+          "min": 3227.5519169999898,
+          "max": 3307.695749999999
+        },
+        "outputJsonBytes": {
+          "samples": 12,
+          "median": 51012,
+          "p95": 51014,
+          "min": 51012,
+          "max": 51014
+        },
+        "outputTextBytes": {
+          "samples": 12,
+          "median": 47693,
+          "p95": 47695,
+          "min": 47693,
+          "max": 47695
+        },
+        "estimatedOutputTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 11927,
+          "p95": 11927,
+          "min": 11927,
+          "max": 11927
+        }
+      },
+      "allRowObservation": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 30.92699999999968,
+          "p95": 49.04429199999868,
+          "min": 10.867917000003217,
+          "max": 49.04429199999868
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 24488,
+          "p95": 24488,
+          "min": 24488,
+          "max": 24488
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 22985,
+          "p95": 22985,
+          "min": 22985,
+          "max": 22985
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 5747,
+          "p95": 5747,
+          "min": 5747,
+          "max": 5747
+        }
+      },
+      "aggregateRead": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 1026.0518749999974,
+          "p95": 1030.4473340000004,
+          "min": 1020.2216249999983,
+          "max": 1030.4473340000004
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 145,
+          "p95": 145,
+          "min": 145,
+          "max": 145
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 88,
+          "p95": 88,
+          "min": 88,
+          "max": 88
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 22,
+          "p95": 22,
+          "min": 22,
+          "max": 22
+        }
+      },
+      "trials": [
+        {
+          "calls": 7,
+          "ms": 3275.2259600000007,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3307.695749999999,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3268.923042000002,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3262.6266659999965,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3231.9872900000046,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3300.0594160000037,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3244.8362489999963,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3264.281750999995,
+          "jsonBytes": 51012,
+          "textBytes": 47693,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3227.5519169999898,
+          "jsonBytes": 51014,
+          "textBytes": 47695,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3234.574373999996,
+          "jsonBytes": 51014,
+          "textBytes": 47695,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3243.3365419999973,
+          "jsonBytes": 51014,
+          "textBytes": 47695,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 7,
+          "ms": 3295.787166000002,
+          "jsonBytes": 51014,
+          "textBytes": 47695,
+          "estimatedTextTokensCharsDiv4": 11927,
+          "receipt": true,
+          "table": true
+        }
+      ]
+    },
+    {
+      "engine": "compact",
+      "mode": "separate",
+      "samples": 12,
+      "warmups": 2,
+      "passed": true,
+      "cleanup": "Owned CLI, Chromium, temporary profile/artifacts and loopback fixture closed/removed",
+      "rawReportSha256": "457b6fde4a0a363aec2063095d5e7318ae858377e62c5681456eaf55112c2c10",
+      "schema": {
+        "latencyMs": 3.780665999999883,
+        "tools": 5,
+        "toolNames": [
+          "pane_view",
+          "pane_act",
+          "pane_tabs",
+          "pane_read",
+          "pane_image"
+        ],
+        "resultJsonBytes": 5124,
+        "toolDescriptorsJsonBytes": 5114,
+        "estimatedDescriptorTokensCharsDiv4": 1279,
+        "sha256": "33aafce18b2055a55174e10652c808416483798704197a341a7b29d188b1bd1b"
+      },
+      "workflow": {
+        "toolLatencySumMs": {
+          "samples": 12,
+          "median": 211.3412060000005,
+          "p95": 251.25579099999914,
+          "min": 208.50466600000027,
+          "max": 251.25579099999914
+        },
+        "outputJsonBytes": {
+          "samples": 12,
+          "median": 40658,
+          "p95": 40664,
+          "min": 40652,
+          "max": 40664
+        },
+        "outputTextBytes": {
+          "samples": 12,
+          "median": 36464,
+          "p95": 36470,
+          "min": 36458,
+          "max": 36470
+        },
+        "estimatedOutputTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 9120,
+          "p95": 9123,
+          "min": 9119,
+          "max": 9123
+        }
+      },
+      "allRowObservation": {
+        "calls": {
+          "samples": 12,
+          "median": 5,
+          "p95": 5,
+          "min": 5,
+          "max": 5
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 43.93466599999965,
+          "p95": 76.11045699999977,
+          "min": 37.79666700000007,
+          "max": 76.11045699999977
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 28909,
+          "p95": 28909,
+          "min": 28909,
+          "max": 28909
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 26072,
+          "p95": 26072,
+          "min": 26072,
+          "max": 26072
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 6520,
+          "p95": 6520,
+          "min": 6520,
+          "max": 6520
+        }
+      },
+      "aggregateRead": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 8.671041999999943,
+          "p95": 9.223500000000058,
+          "min": 8.273041999999805,
+          "max": 9.223500000000058
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 414,
+          "p95": 414,
+          "min": 414,
+          "max": 414
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 319,
+          "p95": 319,
+          "min": 319,
+          "max": 319
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 80,
+          "p95": 80,
+          "min": 80,
+          "max": 80
+        }
+      },
+      "trials": [
+        {
+          "calls": 12,
+          "ms": 210.4556260000004,
+          "jsonBytes": 40652,
+          "textBytes": 36458,
+          "estimatedTextTokensCharsDiv4": 9119,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 211.3412060000005,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 247.22620900000038,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 210.2788740000001,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 211.24124900000015,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 213.21841799999993,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 251.25579099999914,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 208.50466600000027,
+          "jsonBytes": 40658,
+          "textBytes": 36464,
+          "estimatedTextTokensCharsDiv4": 9120,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 212.47416799999974,
+          "jsonBytes": 40664,
+          "textBytes": 36470,
+          "estimatedTextTokensCharsDiv4": 9123,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 208.88987599999882,
+          "jsonBytes": 40664,
+          "textBytes": 36470,
+          "estimatedTextTokensCharsDiv4": 9123,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 225.3401670000021,
+          "jsonBytes": 40664,
+          "textBytes": 36470,
+          "estimatedTextTokensCharsDiv4": 9123,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 12,
+          "ms": 230.79812400000174,
+          "jsonBytes": 40664,
+          "textBytes": 36470,
+          "estimatedTextTokensCharsDiv4": 9123,
+          "receipt": true,
+          "table": true
+        }
+      ],
+      "engineSha256": {
+        "action-runner.mjs": "9871a7feab4facffce7cd4837a70dd91a6161046de4c5188f5370addbea4f3c4",
+        "action-steps.mjs": "d56fc163aaf6c0b1211519b11acdfe934f100f1914d30da13615a47b8c860d01",
+        "browser.mjs": "773a294c4011c3f134bb36783266efd260512553b84521b7a4f923fcbc614b74",
+        "element-guard.mjs": "d37b2c01b709a6bb3cd09aa2968d16bbadd4212a4fe2be51aaa3952a419a2240",
+        "entry.mjs": "e938c7d167c9483f1f9ea5388ef012442ee98b583493464aa4327f797b01b6e4",
+        "errors.mjs": "0a48ad4c45af9dd3236303a8fd2b157ea4f2f8a5768ecc673f612c3595d2f24b",
+        "executor.mjs": "bc6d2b124352d25d9e444c289b27356402bfafaf87298b694ee88ba52149a3a5",
+        "http-request.mjs": "b969c20f8e50402d51d5fbc9720d20d020ef785b3eaaa8bcd391c84dd38b8771",
+        "http-server.mjs": "3126b0b1c1a1caa418d89336875fd269a1d45112855f1bdf6783b3152a00fb7c",
+        "http-session.mjs": "3578495e913ec7087dd0c9ace60ffadf5dea22c6e1afbf934a1029446e24f7e7",
+        "main.mjs": "02aedab0c7b639e823215c7f82944a1a268f90eb8f49de451b77aa7da3e57928",
+        "observation-error.mjs": "23a09bafa6eba97864e2f90df6debe8571ea03a03e02438e44c116c2b5b80379",
+        "observation-input.mjs": "cb9ed4ab7526a45aad166dfcd87ca9cd402740fd62b4e1b6a59f4443a6fa2723",
+        "observation-projection.mjs": "f2e3ed7226677b599fba16e7c67f28c0542b0244967f19b3f74421adab1cce3a",
+        "observation-refs.mjs": "ae24fa441dd0d11ba36d62100fdd49e66e59e23ed84f5fb4b8cbcd8f192167f9",
+        "observations.mjs": "5254d28982d334bf5a0db02396bef71516fcc3b5aa58b5d695a452b93555d6fd",
+        "reader.mjs": "c997d98ac75a80f114aa7b92f037ce9a15b3aa6d362d1355530d9fceec4c8060",
+        "request-ledger.mjs": "f1e8e70bb0e9480641436e12662bb03ebe47942b85f312b691eb331b55a8adfa",
+        "schemas.mjs": "6dade1214fdf42ce2fc5b2376ea12940db0e5f02d4c821f7f6436bcb1210c749",
+        "session.mjs": "0884134cc0ed4bee69e15e7416647b9a161de98229fe3b6c667c3ab98cccafe3",
+        "tab-state.mjs": "d9c2ef6b7c1f5a47396c2a8d206d454714256ceb2abbbee510318e0776530da7",
+        "uploads.mjs": "41e71b99de22f8cd4e9ebc463dc400a8c2f8a1dc3f8900765dbe71f8ce17c01d",
+        "validation.mjs": "7fbb995ed26a8d63beb51f2d7ea9e82236d6c654978c7b6fff85bd49ee4f20ce"
+      }
+    },
+    {
+      "engine": "compact",
+      "mode": "batched",
+      "samples": 12,
+      "warmups": 2,
+      "passed": true,
+      "cleanup": "Owned CLI, Chromium, temporary profile/artifacts and loopback fixture closed/removed",
+      "rawReportSha256": "f59b0fa2896d27104e657ec7a4497c24eefca3798d439ce293907613f69204a7",
+      "schema": {
+        "latencyMs": 3.62179100000003,
+        "tools": 5,
+        "toolNames": [
+          "pane_view",
+          "pane_act",
+          "pane_tabs",
+          "pane_read",
+          "pane_image"
+        ],
+        "resultJsonBytes": 5124,
+        "toolDescriptorsJsonBytes": 5114,
+        "estimatedDescriptorTokensCharsDiv4": 1279,
+        "sha256": "33aafce18b2055a55174e10652c808416483798704197a341a7b29d188b1bd1b"
+      },
+      "workflow": {
+        "toolLatencySumMs": {
+          "samples": 12,
+          "median": 212.59604100000115,
+          "p95": 250.6290410000006,
+          "min": 205.65170900000066,
+          "max": 250.6290410000006
+        },
+        "outputJsonBytes": {
+          "samples": 12,
+          "median": 39605,
+          "p95": 39609,
+          "min": 39598,
+          "max": 39609
+        },
+        "outputTextBytes": {
+          "samples": 12,
+          "median": 35545,
+          "p95": 35549,
+          "min": 35538,
+          "max": 35549
+        },
+        "estimatedOutputTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 8890,
+          "p95": 8892,
+          "min": 8889,
+          "max": 8892
+        }
+      },
+      "allRowObservation": {
+        "calls": {
+          "samples": 12,
+          "median": 5,
+          "p95": 5,
+          "min": 5,
+          "max": 5
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 47.335083999999824,
+          "p95": 64.8512910000004,
+          "min": 36.87829000000056,
+          "max": 64.8512910000004
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 28909,
+          "p95": 28909,
+          "min": 28909,
+          "max": 28909
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 26072,
+          "p95": 26072,
+          "min": 26072,
+          "max": 26072
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 6520,
+          "p95": 6520,
+          "min": 6520,
+          "max": 6520
+        }
+      },
+      "aggregateRead": {
+        "calls": {
+          "samples": 12,
+          "median": 1,
+          "p95": 1,
+          "min": 1,
+          "max": 1
+        },
+        "latencyMs": {
+          "samples": 12,
+          "median": 8.509000000000015,
+          "p95": 9.825374999999894,
+          "min": 8.330333999999766,
+          "max": 9.825374999999894
+        },
+        "jsonBytes": {
+          "samples": 12,
+          "median": 414,
+          "p95": 414,
+          "min": 414,
+          "max": 414
+        },
+        "textBytes": {
+          "samples": 12,
+          "median": 319,
+          "p95": 319,
+          "min": 319,
+          "max": 319
+        },
+        "estimatedTextTokensCharsDiv4": {
+          "samples": 12,
+          "median": 80,
+          "p95": 80,
+          "min": 80,
+          "max": 80
+        }
+      },
+      "trials": [
+        {
+          "calls": 11,
+          "ms": 248.3434580000005,
+          "jsonBytes": 39598,
+          "textBytes": 35538,
+          "estimatedTextTokensCharsDiv4": 8889,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 211.37058399999978,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 245.67158199999994,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 205.65170900000066,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 215.92212599999993,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 207.40766699999995,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 214.39158199999974,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 250.6290410000006,
+          "jsonBytes": 39605,
+          "textBytes": 35545,
+          "estimatedTextTokensCharsDiv4": 8890,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 212.62616599999956,
+          "jsonBytes": 39609,
+          "textBytes": 35549,
+          "estimatedTextTokensCharsDiv4": 8892,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 212.59604100000115,
+          "jsonBytes": 39609,
+          "textBytes": 35549,
+          "estimatedTextTokensCharsDiv4": 8892,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 207.38108500000044,
+          "jsonBytes": 39609,
+          "textBytes": 35549,
+          "estimatedTextTokensCharsDiv4": 8892,
+          "receipt": true,
+          "table": true
+        },
+        {
+          "calls": 11,
+          "ms": 209.2350419999998,
+          "jsonBytes": 39609,
+          "textBytes": 35549,
+          "estimatedTextTokensCharsDiv4": 8892,
+          "receipt": true,
+          "table": true
+        }
+      ],
+      "engineSha256": {
+        "action-runner.mjs": "9871a7feab4facffce7cd4837a70dd91a6161046de4c5188f5370addbea4f3c4",
+        "action-steps.mjs": "d56fc163aaf6c0b1211519b11acdfe934f100f1914d30da13615a47b8c860d01",
+        "browser.mjs": "773a294c4011c3f134bb36783266efd260512553b84521b7a4f923fcbc614b74",
+        "element-guard.mjs": "d37b2c01b709a6bb3cd09aa2968d16bbadd4212a4fe2be51aaa3952a419a2240",
+        "entry.mjs": "e938c7d167c9483f1f9ea5388ef012442ee98b583493464aa4327f797b01b6e4",
+        "errors.mjs": "0a48ad4c45af9dd3236303a8fd2b157ea4f2f8a5768ecc673f612c3595d2f24b",
+        "executor.mjs": "bc6d2b124352d25d9e444c289b27356402bfafaf87298b694ee88ba52149a3a5",
+        "http-request.mjs": "b969c20f8e50402d51d5fbc9720d20d020ef785b3eaaa8bcd391c84dd38b8771",
+        "http-server.mjs": "3126b0b1c1a1caa418d89336875fd269a1d45112855f1bdf6783b3152a00fb7c",
+        "http-session.mjs": "3578495e913ec7087dd0c9ace60ffadf5dea22c6e1afbf934a1029446e24f7e7",
+        "main.mjs": "02aedab0c7b639e823215c7f82944a1a268f90eb8f49de451b77aa7da3e57928",
+        "observation-error.mjs": "23a09bafa6eba97864e2f90df6debe8571ea03a03e02438e44c116c2b5b80379",
+        "observation-input.mjs": "cb9ed4ab7526a45aad166dfcd87ca9cd402740fd62b4e1b6a59f4443a6fa2723",
+        "observation-projection.mjs": "f2e3ed7226677b599fba16e7c67f28c0542b0244967f19b3f74421adab1cce3a",
+        "observation-refs.mjs": "ae24fa441dd0d11ba36d62100fdd49e66e59e23ed84f5fb4b8cbcd8f192167f9",
+        "observations.mjs": "5254d28982d334bf5a0db02396bef71516fcc3b5aa58b5d695a452b93555d6fd",
+        "reader.mjs": "c997d98ac75a80f114aa7b92f037ce9a15b3aa6d362d1355530d9fceec4c8060",
+        "request-ledger.mjs": "f1e8e70bb0e9480641436e12662bb03ebe47942b85f312b691eb331b55a8adfa",
+        "schemas.mjs": "6dade1214fdf42ce2fc5b2376ea12940db0e5f02d4c821f7f6436bcb1210c749",
+        "session.mjs": "0884134cc0ed4bee69e15e7416647b9a161de98229fe3b6c667c3ab98cccafe3",
+        "tab-state.mjs": "d9c2ef6b7c1f5a47396c2a8d206d454714256ceb2abbbee510318e0776530da7",
+        "uploads.mjs": "41e71b99de22f8cd4e9ebc463dc400a8c2f8a1dc3f8900765dbe71f8ce17c01d",
+        "validation.mjs": "7fbb995ed26a8d63beb51f2d7ea9e82236d6c654978c7b6fff85bd49ee4f20ce"
+      }
+    }
+  ]
+}

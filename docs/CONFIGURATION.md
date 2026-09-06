@@ -24,6 +24,13 @@ boundary](SECURITY.md#default-and-lan-settings). Setup never changes your firewa
 DNS or system certificate stores. Configure model access inside the persistent
 agent volume using the [Hermes guide](HERMES.md), not Compose's public `.env`.
 
+`BPANE_MCP_MODE=compact` is the experimental branch's default: five compact tools,
+bounded observations and batched input. `BPANE_MCP_MODE=playwright` selects the
+original tool vocabulary on the same private endpoint. After a change, recreate
+the browser service and reconnect Hermes; retain all volumes. Existing custom
+tool allowlists/instructions may need adjustment and are never automatically
+overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
+
 ## Trust the viewer certificate
 
 Follow [root-certificate export](SECURITY.md#https-trust-export-only-the-root-certificate)

@@ -30,7 +30,7 @@ def verify_image() -> dict:
             "mcp": importlib.metadata.version("mcp"), "imports": "passed", "sharedFileWrites": "allowed"}
 
 
-def verify_mcp() -> dict:
+def verify_mcp(mode: str = "compact") -> dict:
     from hermes_cli.config import load_config
     from hermes_cli.tools_config import _get_platform_tools
     from tools.mcp_tool_discovery import discover_mcp_tools, get_mcp_status
@@ -45,8 +45,14 @@ def verify_mcp() -> dict:
         assert browser_names, "BrowserPane MCP did not register tools"
         for forbidden in ("browser_close", "browser_install"):
             assert f"mcp__browserpane__{forbidden}" not in browser_names
+        if mode == "compact":
+            expected = [f"mcp__browserpane__{name}" for name in ("pane_view", "pane_act", "pane_tabs", "pane_read", "pane_image")]
+            assert browser_names == sorted(expected), "Expected exactly the five compact BrowserPane tools"
+        else:
+            for required in ("browser_navigate", "browser_evaluate", "browser_tabs"):
+                assert f"mcp__browserpane__{required}" in browser_names, "Expected the explicitly selected legacy tools"
         assert any(row.get("name") == "browserpane" and row.get("connected") for row in get_mcp_status())
-        return {"server": "browserpane", "registeredTools": browser_names, "nativeBrowserEnabled": False}
+        return {"server": "browserpane", "mode": mode, "registeredTools": browser_names, "nativeBrowserEnabled": False}
     finally:
         shutdown_mcp_servers()
 
@@ -54,8 +60,9 @@ def verify_mcp() -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mcp", action="store_true", help="Also initialize/list the configured BrowserPane MCP; never navigate or call a tool")
+    parser.add_argument("--mcp-mode", choices=("compact", "playwright"), default="compact", help="Expected tool surface; does not change the server or operator config")
     args = parser.parse_args()
     report = verify_image()
     if args.mcp:
-        report["mcpDiscovery"] = verify_mcp()
+        report["mcpDiscovery"] = verify_mcp(args.mcp_mode)
     print(json.dumps(report, indent=2))

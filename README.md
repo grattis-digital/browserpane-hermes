@@ -30,6 +30,9 @@ The page is a synthetic demo; no private browsing data or live model response is
 - **Human and agent see the same browser.** No second browser hidden behind MCP.
 - **Persistent by default.** Separate volumes hold the browser profile, Hermes
   configuration/memory, and shared downloads.
+- **Compact agent control.** This experimental branch adds five focused MCP
+  tools, bounded observations and guarded action batches. The original Playwright
+  MCP remains selectable; see the [protocol and limits](docs/COMPACT_MCP.md).
 - **Designed around a little always-on box.** ARM64 support, CPU/X11 capture,
   a 720p-oriented automatic display policy, and carefully paired rendering fixes.
 - **Small administration surface.** No separate database service, identity provider, broker,

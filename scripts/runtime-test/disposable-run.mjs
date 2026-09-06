@@ -7,7 +7,9 @@ import { RuntimeSafety } from './safety.mjs';
 
 /** Owns all resources, pins container/image IDs, and never uses existing volumes. */
 export class DisposableRun {
-  constructor(root, image) {
+  constructor(root, image, mcpMode = 'compact') {
+    assert(['compact', 'playwright'].includes(mcpMode), 'Unknown MCP test mode');
+    this.mcpMode = mcpMode;
     this.root = root;
     this.token = randomUUID();
     this.prefix = `bpane-runtime-${this.token}`;
@@ -63,6 +65,7 @@ export class DisposableRun {
       '--env-file', join(this.root, 'runtime/host-runtime.env'),
       '-e', 'VIEWER_ORIGIN=https://viewer.test', '-e', 'GATEWAY_URL=https://viewer.test:4433',
       '-e', 'BPANE_PIPELINE_TEST=1', '-e', `BPANE_RUNTIME_TEST_ID=${this.token}`,
+      '-e', `BPANE_MCP_MODE=${this.mcpMode}`,
       '-e', 'BPANE_URL=about:blank', '-e', 'BPANE_DEVICE_SCALE=1',
       '-e', 'BPANE_CHROMIUM_SANDBOX_MODE=strict', '-e', 'BPANE_CHROMIUM_EXTRA_FLAGS=--disable-setuid-sandbox',
       '-e', 'BPANE_CHROMIUM_DEBUG_ADDRESS=127.0.0.1', '-e', 'RUST_LOG=warn', this.image]);

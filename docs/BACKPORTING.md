@@ -8,6 +8,12 @@ license.
 
 ## Patch map
 
+The [compact MCP experiment](COMPACT_MCP.md) is original wrapper code, not patch
+0019. Its observation, replay and transport layers can be reviewed independently
+of these rendering patches. The pinned generic Playwright MCP settlement-timer
+issue is documented with measurements; this branch bypasses that orchestration,
+without modifying or claiming to fix all later upstream releases.
+
 Paths below are relative to upstream `code/`. Host means
 `apps/bpane-host/src`, gateway means `apps/bpane-gateway/src`, and client means
 `web/bpane-client/js`. Patches include their focused regression tests.
