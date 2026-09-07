@@ -12,6 +12,7 @@ import { ObservationStore } from '../server/compact/observations.mjs';
 import { SharedUploads } from '../server/compact/uploads.mjs';
 import { ActionSteps } from '../server/compact/action-steps.mjs';
 import { ActionRunner } from '../server/compact/action-runner.mjs';
+import { FlowRunner } from '../server/compact/flow-runner.mjs';
 import { PaneSession } from '../server/compact/session.mjs';
 
 /** Owns a fresh profile and CDP attachment; accepts no existing browser endpoint. */
@@ -56,8 +57,11 @@ export class CompactEngineFixture {
 
   session() {
     const lease = `test-lease-${++this.#counter}`;
+    const observations = new ObservationStore();
     const session = { lease, request: 0, engine: new PaneSession({ browser: this.#browser, executor: this.#executor,
-      actions: this.#actions, observations: new ObservationStore(), ledger: new RequestLedger(), lease }) };
+      actions: this.#actions, observations,
+      flow: new FlowRunner({ browser: this.#browser, actions: this.#actions, observations }),
+      ledger: new RequestLedger(), lease }) };
     this.#sessions.push(session); return session;
   }
 
@@ -71,6 +75,11 @@ export class CompactEngineFixture {
   act(session, view, steps, extra = {}) {
     return this.call(session, 'pane_act', { lease: session.lease, request: ++session.request,
       ...(view ? { tab: view.tab, view: view.view } : {}), steps, ...extra });
+  }
+
+  flow(session, stages, extra = {}) {
+    return this.call(session, 'pane_flow', { lease: session.lease, request: ++session.request,
+      stages, ...extra });
   }
 
   static ref(view, name) {

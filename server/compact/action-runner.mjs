@@ -8,13 +8,17 @@ export class ActionRunner {
   #now;
   constructor(browser, steps, now) { this.#browser = browser; this.#steps = steps; this.#now = now; }
 
-  async wait(tab, condition) { await this.#steps.wait(tab, condition); }
+  async wait(tab, condition, trace) {
+    if (trace) await trace.span('waitMs', () => this.#steps.wait(tab, condition));
+    else await this.#steps.wait(tab, condition);
+  }
 
-  async #guards(tab, steps, observation) {
+  async #guards(tab, steps, observation, trace) {
     const refs = [...new Set(steps.flatMap(step => [step.ref, step.to].filter(Boolean)))];
     const guards = new Map();
     if (!refs.length) return guards;
-    const current = ObservationRefs.from(await tab.snapshot());
+    const snapshot = trace ? await trace.span('guardSnapshotMs', () => tab.snapshot()) : await tab.snapshot();
+    const current = ObservationRefs.from(snapshot);
     try {
       for (const ref of refs) {
         const signature = observation.refs.get(ref);
@@ -31,23 +35,25 @@ export class ActionRunner {
     } catch (error) { await Promise.allSettled([...guards.values()].map(guard => guard.dispose())); throw error; }
   }
 
-  async run(tab, args, observation, signal) {
+  async run(tab, args, observation, signal, trace) {
     const outcome = { completed: 0 };
-    const guards = await this.#guards(tab, args.steps, observation);
-    if (tab.document !== observation.document) {
+    const popups = observation.popupVersion ?? this.#browser.popupVersion;
+    const guards = trace
+      ? await trace.span('guardMs', () => this.#guards(tab, args.steps, observation, trace))
+      : await this.#guards(tab, args.steps, observation);
+    if (tab.document !== observation.document && this.#browser.popupVersion === popups) {
       await Promise.allSettled([...guards.values()].map(guard => guard.dispose()));
       throw new PaneError('STALE_VIEW', 'Document changed during preflight; no input was started.');
     }
     const document = tab.document;
-    const popups = this.#browser.popupVersion;
     const deadline = this.#now() + 15000;
     try {
       for (const [index, step] of args.steps.entries()) {
         let issued = false;
         try {
           if (signal?.aborted) throw new PaneError('CANCELLED', 'Cancelled; remaining steps were not started.');
-          if (tab.document !== document) { outcome.stopped = 'navigation'; break; }
           if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
+          if (tab.document !== document) { outcome.stopped = 'navigation'; break; }
           if (tab.dialog) { outcome.stopped = 'dialog'; break; }
           const timeout = Math.min(step.op === 'navigate' || step.op === 'back' ? 10000 : 3000, deadline - this.#now());
           if (timeout <= 0) throw new PaneError('BATCH_TIMEOUT', 'Batch deadline reached; remaining steps were not started.');
@@ -55,26 +61,34 @@ export class ActionRunner {
           if (step.to) await guards.get(step.to).assert();
           if (signal?.aborted) throw new PaneError('CANCELLED', 'Cancelled before input; remaining steps were not started.');
           if (this.#now() >= deadline) throw new PaneError('BATCH_TIMEOUT', 'Batch deadline reached before input.');
+          if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
           if (tab.document !== document) throw new PaneError('STALE_VIEW', 'Document changed while checking target.');
           if (tab.dialog) { outcome.stopped = 'dialog'; break; }
-          if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
           issued = true;
-          const result = await tab.act(() => this.#steps.perform(tab, step, guards, timeout, signal));
+          const perform = () => tab.act(() => this.#steps.perform(tab, step, guards, timeout, signal));
+          const result = trace ? await trace.span('inputMs', perform) : await perform();
           if (result.modal) { outcome.stopped = 'dialog'; outcome.pendingStep = index; break; }
           outcome.completed++;
           if (step.op === 'close') { outcome.stopped = tab.page.isClosed() ? 'tab_closed' : 'close_requested'; break; }
           if (tab.page.isClosed()) { outcome.stopped = 'tab_closed'; break; }
-          if (tab.document !== document) { outcome.stopped = 'navigation'; break; }
           if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
+          if (tab.document !== document) { outcome.stopped = 'navigation'; break; }
         } catch (error) {
           outcome.error = PaneError.describe(error); outcome.failedStep = index;
           outcome.mayHaveActed = issued; break;
         }
       }
-      if (!outcome.error && !tab.dialog && !tab.page.isClosed() && args.wait) {
-        try { await this.#steps.wait(tab, args.wait); }
+      if (!outcome.error && (!outcome.stopped || outcome.stopped === 'navigation') &&
+        !tab.dialog && !tab.page.isClosed() && args.wait) {
+        try {
+          if (trace) await trace.span('waitMs', () => this.#steps.wait(tab, args.wait));
+          else await this.#steps.wait(tab, args.wait);
+        }
         catch (error) { outcome.error = { ...PaneError.describe(error), code: 'POSTCONDITION_FAILED' }; outcome.mayHaveActed = true; }
       }
+      if (this.#browser.popupVersion !== popups) outcome.stopped = 'new_tab';
+      else if (tab.dialog) outcome.stopped = 'dialog';
+      else if (tab.page.isClosed()) outcome.stopped = 'tab_closed';
       return outcome;
     } finally { await tab.releaseWhenSettled(() => Promise.allSettled([...guards.values()].map(guard => guard.dispose()))); }
   }

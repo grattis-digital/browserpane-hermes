@@ -24,12 +24,19 @@ boundary](SECURITY.md#default-and-lan-settings). Setup never changes your firewa
 DNS or system certificate stores. Configure model access inside the persistent
 agent volume using the [Hermes guide](HERMES.md), not Compose's public `.env`.
 
-`BPANE_MCP_MODE=compact` is the experimental branch's default: five compact tools,
-bounded observations and batched input. `BPANE_MCP_MODE=playwright` selects the
+`BPANE_MCP_MODE=compact` is the default: six compact tools, bounded/state-reusable
+observations and batched semantic input. `BPANE_MCP_MODE=playwright` selects the
 original tool vocabulary on the same private endpoint. After a change, recreate
 the browser service and reconnect Hermes; retain all volumes. Existing custom
 tool allowlists/instructions may need adjustment and are never automatically
 overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
+
+`BPANE_MCP_TIMINGS=1` enables one content-free JSON timing record per compact MCP
+call in the browser container's bounded logs. Records contain phase durations,
+counts, output bytes and stable error codes, but no URL, page text, semantic
+query, selector or input value. It is off by default and has no effect in the
+Playwright compatibility backend. Inspect it with
+`docker compose logs browserpane`; disable it after a diagnostic run.
 
 The shared browser uses the persistent `Default` Chromium profile. A fresh
 profile opens `BPANE_URL` (the bundle defaults to `about:blank`); later launches

@@ -65,3 +65,42 @@ agent prompt or API bill.
 See [contributor commands](../../CONTRIBUTING.md) and [protocol design](../COMPACT_MCP.md).
 Full synthetic logs stay in ignored `test-results/`; this curated record contains
 no operator profiles, credentials, browsing history or personal page content.
+
+## Semantic fast-path follow-up
+
+The [curated fast-path result](semantic-fast-path-2026-09-06.json) exercises the
+same synthetic 120-row table after adding immutable `state` projection. On the
+same class of local machine, 20 cached continuation calls measured **0.772 ms
+median / 1.056 ms p95** after the first Chromium capture. The complete five-call
+table observation measured **27.69 ms median**, versus **47.34 ms** in the earlier
+run: a directional 41.51% reduction while preserving all 120 row IDs.
+
+This is not a paired run and uses five measured trials rather than twelve. The
+whole mixed workflow measured 193.06 ms versus the historical 212.60 ms median;
+the small unpaired samples do not isolate a whole-workflow speedup because
+navigation/input dominate the other operations. Result
+JSON for the complete table grew from 28,909 to 29,044 median bytes due to state
+metadata. The sixth `pane_flow` tool raises descriptors from 5,114 to 7,558 bytes
+(1,279 to 1,890 character-estimated tokens); that fixed schema cost must be
+weighed against avoided model/tool turns in real agent evaluations.
+
+Real disposable-Chromium qualification separately executes a two-stage flow
+with three inputs in one MCP call, verifies both transitions, replays with zero
+extra input, and rejects an ambiguous target before input. This proves browser
+state and call-count behavior, not model latency, model success, billed tokens or
+Raspberry Pi performance. Use the recorded command to reproduce the tool-only
+benchmark; a future model-router experiment must report its own success, cost,
+latency and escalation rate.
+
+### Pre-merge cursor and flow corrections
+
+The [September 7 qualification](semantic-cursor-2026-09-07.json) uses cursor
+paging, preserving query/filter/detail/budgets while reusing the raw snapshot.
+All 120 rows are verified. Cached calls measured 0.809 ms median / 1.032 ms p95
+locally; the complete five-call observation measured 45.624 ms median. Fresh
+capture varied substantially versus the earlier unpaired run, so this does not
+establish a whole-workflow speedup. Descriptors are now 7,661 bytes and the table
+results total 29,156 median bytes: cursor metadata has a cost, not free tokens.
+The primary benefit is correct continuation with one input handle, plus stopping
+flows on delayed popups and rejecting malformed stages before input. Model cost
+and latency still require a separate controlled agent evaluation.

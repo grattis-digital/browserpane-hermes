@@ -17,7 +17,7 @@ export class CompactTabChecks {
         clients.push(client);
         const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
         await client.connect(transport);
-        assert.equal((await client.listTools()).tools.length, 5);
+        assert.equal((await client.listTools()).tools.length, 6);
         return { client, transport };
       };
       const call = async (client, name, args = {}) =>
@@ -25,12 +25,18 @@ export class CompactTabChecks {
       const a = await connect(), b = await connect();
       const initial = await call(a.client, 'pane_view');
       assert(initial.view && initial.tab);
+      const page = await fixture.reset('<button id="http-flow">HTTP flow</button><p role="status"></p><script>window.httpFlowClicks=0;document.getElementById("http-flow").onclick=()=>{window.httpFlowClicks++;document.querySelector("[role=status]").textContent="HTTP done";};</script>');
+      const flow = await call(a.client, 'pane_flow', { lease: initial.lease, request: 1, observe: 'none',
+        stages: [{ steps: [{ op: 'click', target: { role: 'button', name: 'HTTP flow' } }],
+          wait: { text: 'HTTP done', timeoutMs: 1000 } }] });
+      assert.equal(flow.completed, 1); assert.equal(flow.stages, 1);
+      assert.equal(await page.evaluate(() => window.httpFlowClicks), 1);
       await fixture.waitForTabs(1);
-      const created = await call(a.client, 'pane_act', { lease: initial.lease, request: 1,
+      const created = await call(a.client, 'pane_act', { lease: initial.lease, request: 2,
         steps: [{ op: 'new', url: 'about:blank' }] });
       assert.equal(created.completed, 1); assert.notEqual(created.tab, initial.tab);
       await fixture.waitForTabs(2);
-      for (let request = 2; request <= 4; request++) {
+      for (let request = 3; request <= 5; request++) {
         const view = await call(a.client, 'pane_view');
         assert.equal(view.tab, initial.tab);
         const navigated = await call(a.client, 'pane_act', { lease: view.lease, request, tab: view.tab, view: view.view,

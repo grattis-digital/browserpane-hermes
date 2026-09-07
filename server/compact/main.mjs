@@ -8,8 +8,10 @@ import { ObservationStore } from './observations.mjs';
 import { SharedUploads } from './uploads.mjs';
 import { ActionSteps } from './action-steps.mjs';
 import { ActionRunner } from './action-runner.mjs';
+import { FlowRunner } from './flow-runner.mjs';
 import { PaneSession } from './session.mjs';
 import { CompactMcpHttpServer } from './http-server.mjs';
+import { PaneMetrics } from './metrics.mjs';
 
 export class CompactRuntime {
   #http;
@@ -29,11 +31,13 @@ export class CompactRuntime {
     const uploads = new SharedUploads(sharedDirectory);
     const steps = new ActionSteps(browser, uploads);
     const actions = new ActionRunner(browser, steps, () => performance.now());
-    const http = new CompactMcpHttpServer({ host, port, allowedHosts, createSession: () => new PaneSession({
-      browser, executor, actions, ledger: new RequestLedger(64),
-      lease: randomBytes(12).toString('base64url'),
-      observations: new ObservationStore({ idFactory: () => randomBytes(9).toString('base64url') }),
-    }) });
+    const metrics = new PaneMetrics();
+    const http = new CompactMcpHttpServer({ host, port, allowedHosts, createSession: () => {
+      const observations = new ObservationStore({ idFactory: () => randomBytes(9).toString('base64url') });
+      const flow = new FlowRunner({ browser, actions, observations });
+      return new PaneSession({ browser, executor, actions, flow, observations, ledger: new RequestLedger(64),
+        lease: randomBytes(12).toString('base64url'), metrics });
+    } });
     return new CompactRuntime(http, browser, executor);
   }
 

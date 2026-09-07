@@ -46,8 +46,8 @@ def verify_mcp(mode: str = "compact") -> dict:
         for forbidden in ("browser_close", "browser_install"):
             assert f"mcp__browserpane__{forbidden}" not in browser_names
         if mode == "compact":
-            expected = [f"mcp__browserpane__{name}" for name in ("pane_view", "pane_act", "pane_tabs", "pane_read", "pane_image")]
-            assert browser_names == sorted(expected), "Expected exactly the five compact BrowserPane tools"
+            expected = [f"mcp__browserpane__{name}" for name in ("pane_view", "pane_act", "pane_flow", "pane_tabs", "pane_read", "pane_image")]
+            assert browser_names == sorted(expected), "Expected exactly the six compact BrowserPane tools"
         else:
             for required in ("browser_navigate", "browser_evaluate", "browser_tabs"):
                 assert f"mcp__browserpane__{required}" in browser_names, "Expected the explicitly selected legacy tools"

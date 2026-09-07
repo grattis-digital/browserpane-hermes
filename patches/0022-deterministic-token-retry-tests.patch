@@ -1,0 +1,92 @@
+diff --git a/code/apps/bpane-gateway/tests/compose_api_surface/support.rs b/code/apps/bpane-gateway/tests/compose_api_surface/support.rs
+index b6e1231..014d1f5 100644
+--- a/code/apps/bpane-gateway/tests/compose_api_surface/support.rs
++++ b/code/apps/bpane-gateway/tests/compose_api_surface/support.rs
+@@ -4,7 +4,7 @@ use std::io::Write;
+ use std::path::{Path, PathBuf};
+ use std::process::Command;
+ use std::sync::{Arc, OnceLock};
+-use std::time::{Duration, Instant};
++use std::time::Duration;
+ 
+ use anyhow::{anyhow, bail, Context, Result};
+ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+@@ -12,7 +12,7 @@ use reqwest::{Method, StatusCode};
+ use serde_json::{json, Value};
+ use tempfile::{Builder, TempDir};
+ use tokio::sync::Mutex;
+-use tokio::time::sleep;
++use tokio::time::{sleep, Instant};
+ use uuid::Uuid;
+ 
+ const DEFAULT_API_BASE_URL: &str = "http://localhost:8932";
+@@ -1461,8 +1461,9 @@ mod tests {
+ 
+     use super::*;
+ 
+-    #[tokio::test]
++    #[tokio::test(start_paused = true)]
+     async fn token_fetch_retries_transient_failures() {
++        let started = Instant::now();
+         let attempts = AtomicUsize::new(0);
+         let token = retry_token_fetch(
+             "test token endpoint",
+@@ -1484,22 +1485,55 @@ mod tests {
+ 
+         assert_eq!(token, "test-token");
+         assert_eq!(attempts.load(Ordering::SeqCst), 3);
++        assert_eq!(started.elapsed(), Duration::from_millis(2));
+     }
+ 
+-    #[tokio::test]
++    #[tokio::test(start_paused = true)]
+     async fn token_fetch_timeout_preserves_last_failure() {
++        let started = Instant::now();
++        let attempts = AtomicUsize::new(0);
+         let error = retry_token_fetch(
+             "test token endpoint",
+             Duration::from_millis(5),
+             Duration::from_millis(1),
+-            || async { Err(anyhow!("token endpoint remains unavailable")) },
++            || {
++                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
++                async move {
++                    Err(anyhow!(
++                        "token endpoint remains unavailable: attempt {attempt}"
++                    ))
++                }
++            },
+         )
+         .await
+         .unwrap_err();
+         let detail = format!("{error:#}");
+ 
+         assert!(detail.contains("timed out waiting for test token endpoint"));
+-        assert!(detail.contains("token endpoint remains unavailable"));
++        assert!(detail.contains("token endpoint remains unavailable: attempt 5"));
++        assert_eq!(attempts.load(Ordering::SeqCst), 6);
++        assert_eq!(started.elapsed(), Duration::from_millis(5));
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn token_fetch_success_does_not_wait_or_retry() {
++        let started = Instant::now();
++        let attempts = AtomicUsize::new(0);
++        let token = retry_token_fetch(
++            "test token endpoint",
++            Duration::from_millis(100),
++            Duration::from_millis(1),
++            || {
++                attempts.fetch_add(1, Ordering::SeqCst);
++                async { Ok("test-token".to_string()) }
++            },
++        )
++        .await
++        .unwrap();
++
++        assert_eq!(token, "test-token");
++        assert_eq!(attempts.load(Ordering::SeqCst), 1);
++        assert_eq!(started.elapsed(), Duration::ZERO);
+     }
+ 
+     #[test]

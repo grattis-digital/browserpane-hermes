@@ -34,6 +34,47 @@ export class ObservationRefs {
     return /^(button|link|textbox|searchbox|combobox|checkbox|radio|switch|slider|spinbutton|option|menuitem|menuitemcheckbox|menuitemradio|tab|treeitem)(?: |$)/.test(this.#key(line));
   }
 
+  /** Parses only Playwright's role/name key prefix. Page values never become selectors. */
+  static semantic(line) {
+    const key = this.#key(line), match = key.match(/^([a-z][a-z0-9-]*)(?: |$)/);
+    if (!match) return undefined;
+    const ref = this.reference(line), rest = key.slice(match[0].length);
+    let name = '';
+    if (rest.startsWith('"')) {
+      let escaped = false, end = -1;
+      for (let index = 1; index < rest.length; index++) {
+        if (escaped) { escaped = false; continue; }
+        if (rest[index] === '\\') { escaped = true; continue; }
+        if (rest[index] === '"') { end = index; break; }
+      }
+      if (end > 0) {
+        try { name = JSON.parse(rest.slice(0, end + 1)); } catch { return undefined; }
+      }
+    }
+    return { role: match[1], name, ref };
+  }
+
+  static matches(line, query) {
+    const semantic = this.semantic(line);
+    if (!semantic?.ref) return false;
+    if (query.role !== undefined && semantic.role !== query.role) return false;
+    if (query.name === undefined) return true;
+    const actual = semantic.name.toLocaleLowerCase('en-US'), expected = query.name.toLocaleLowerCase('en-US');
+    return query.exact !== false ? actual === expected : actual.includes(expected);
+  }
+
+  static find(snapshot, query, limit = 2) {
+    const matches = new Map();
+    for (const line of ObservationInput.snapshot(snapshot)) {
+      if (!this.matches(line, query)) continue;
+      const ref = this.reference(line);
+      if (matches.has(ref)) throw new ObservationError('ambiguous_ref', 'Snapshot contains a duplicate structural reference.');
+      matches.set(ref, line);
+      if (matches.size >= limit) break;
+    }
+    return matches;
+  }
+
   static #key(line) {
     if (typeof line !== 'string') return '';
     const prefix = line.match(/^ *- /);

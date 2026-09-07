@@ -31,8 +31,8 @@ The page is a synthetic demo; no private browsing data or live model response is
 - **Persistent by default.** Separate volumes hold the browser profile, Hermes
   configuration/memory, and shared downloads. Restart restores the saved browser
   session without appending another startup tab.
-- **Compact agent control.** This experimental branch adds five focused MCP
-  tools, bounded observations and guarded action batches. Untargeted observations
+- **Compact agent control.** Six focused MCP tools provide bounded observations,
+  immutable-state pagination, semantic flows and guarded action batches. Untargeted observations
   reuse one shared default tab; normal navigation stays in that tab, while extra
   tabs require an explicit request. The original Playwright
   MCP remains selectable; see the [protocol and limits](docs/COMPACT_MCP.md).

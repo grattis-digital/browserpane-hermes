@@ -51,10 +51,30 @@ test('cancelling active input never releases its lock before the native operatio
 });
 
 test('all compact tool schemas are bounded and only input is annotated as mutating', () => {
-  const tools = PaneSchemas.tools(); assert.equal(tools.length, 5);
-  assert.deepEqual(tools.filter(tool => !tool.annotations.readOnlyHint).map(tool => tool.name), ['pane_act']);
-  assert(Buffer.byteLength(JSON.stringify(tools)) < 6500);
+  const tools = PaneSchemas.tools(); assert.equal(tools.length, 6);
+  assert.deepEqual(tools.filter(tool => !tool.annotations.readOnlyHint).map(tool => tool.name), ['pane_act', 'pane_flow']);
+  assert(Buffer.byteLength(JSON.stringify(tools)) < 8000);
   tools[0].inputSchema.properties.injected = {}; assert(!PaneSchemas.tools()[0].inputSchema.properties.injected);
+});
+
+test('semantic flow schema requires bounded unique targets and verified stage transitions', () => {
+  const flow = { lease: 'lease', request: 2, stages: [{ steps: [
+    { op: 'fill', target: { role: 'textbox', name: 'Email' }, text: 'test@example.invalid' },
+    { op: 'click', target: { role: 'button', name: 'Continue' } },
+  ], wait: { url: 'https://example.test/next' } }, { steps: [
+    { op: 'click', target: { role: 'button', name: 'Finish', exact: true } },
+  ] }] };
+  assert.deepEqual(PaneValidation.parse('pane_flow', flow), flow);
+  const invalid = [
+    { ...flow, stages: [{ steps: [{ op: 'click', target: {} }] }] },
+    { ...flow, stages: [{ steps: [{ op: 'click', target: { role: 'Button' } }] }] },
+    { ...flow, stages: [{ steps: [{ op: 'click', target: { role: 'button' }, text: 'ignored' }] }] },
+    { ...flow, stages: [{ steps: [{ op: 'navigate', url: 'file:///tmp/x' }] }] },
+    { ...flow, stages: [{ steps: [{ op: 'navigate', url: 'about:blank' }, { op: 'click', target: { role: 'button' } }] }] },
+    { ...flow, stages: [{ steps: [{ op: 'click', target: { role: 'button' } }] }, { steps: [{ op: 'click', target: { role: 'button' } }] }] },
+    { ...flow, stages: Array.from({ length: 3 }, () => ({ steps: Array.from({ length: 3 }, () => ({ op: 'click', target: { role: 'button' } })), wait: { text: 'ok' } })) },
+  ];
+  for (const args of invalid) assert.throws(() => PaneValidation.parse('pane_flow', args), { code: 'INVALID_ARGUMENT' });
 });
 
 test('validation rejects unknown fields, unsafe schemes, implicit replay and unbounded batches', () => {

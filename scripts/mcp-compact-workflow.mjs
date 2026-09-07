@@ -76,12 +76,14 @@ export class CompactMcpBenchmarkBackend {
     assert(['true', 'false'].includes(String(consent))); return { fullName, email, plan, consent: String(consent) === 'true' };
   }
   async #table(operation, options = {}) {
-    const pages = []; let offset = 0;
+    const pages = []; let offset = 0, cursor;
     for (let page = 0; page < 20; page++) {
-      const view = await this.#call(operation, 'pane_view', { tab: this.#view.tab, ...options, offset }, { page, projection: options });
+      const input = cursor ? { cursor } : { tab: this.#view.tab, ...options };
+      const view = await this.#call(operation, 'pane_view', input, { page, projection: options, stateReuse: Boolean(cursor) });
       this.#accept(view); assert(!view.truncatedLines?.length, 'No shortened row may count toward equal-information reads'); pages.push(this.#text);
       if (view.next === undefined) { const text = pages.join('\n'); McpBenchmarkWorkflow.verifyTableObservation(text); return text; }
       assert(Number.isInteger(view.next) && view.next > offset, 'Pagination must make forward progress'); offset = view.next;
+      assert.equal(typeof view.cursor, 'string'); cursor = view.cursor;
     }
     throw new Error('Synthetic table unexpectedly exceeded 20 bounded pages');
   }

@@ -142,10 +142,10 @@ try {
   assert.equal(discovery.server, 'browserpane');
   assert.equal(discovery.mode, mode);
   assert.equal(discovery.nativeBrowserEnabled, false);
-  for (const tool of mode === 'compact' ? ['pane_view', 'pane_act', 'pane_tabs', 'pane_read', 'pane_image'] : ['browser_navigate', 'browser_evaluate', 'browser_tabs']) {
+  for (const tool of mode === 'compact' ? ['pane_view', 'pane_act', 'pane_flow', 'pane_tabs', 'pane_read', 'pane_image'] : ['browser_navigate', 'browser_evaluate', 'browser_tabs']) {
     assert(discovery.registeredTools.includes(`mcp__browserpane__${tool}`));
   }
-  if (mode === 'compact') assert.equal(discovery.registeredTools.length, 5, 'Default must not advertise hidden legacy tools');
+  if (mode === 'compact') assert.equal(discovery.registeredTools.length, 6, 'Default must not advertise hidden legacy tools');
   for (const tool of ['browser_close', 'browser_install']) {
     assert(!discovery.registeredTools.includes(`mcp__browserpane__${tool}`));
   }

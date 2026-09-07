@@ -15,21 +15,40 @@ export class ObservationInput {
   static capture(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input))
       throw new ObservationError('invalid_observation', 'Observation input must be an object.');
-    const { tab, document, url, title, snapshot, detail = 'full', filter = '', offset = 0,
-      limit = 120, maxChars = 6000, since } = input;
+    const { tab, document, mutation = 0, url, title, snapshot, detail = 'full', filter = '', query,
+      offset = 0, limit = 120, maxChars = 6000, since } = input;
     this.#string(tab, 'tab', 128, false);
     this.#integer(document, 'document', 1, Number.MAX_SAFE_INTEGER);
+    this.#integer(mutation, 'mutation', 0, Number.MAX_SAFE_INTEGER);
     this.#string(url, 'url', 8192);
     this.#string(title, 'title', 4096);
     if (detail !== 'full' && detail !== 'controls')
       throw new ObservationError('invalid_projection', 'Detail must be full or controls.');
     this.#string(filter, 'filter', 256);
+    const semantic = this.#query(query);
     this.#integer(offset, 'offset', 0, 32768);
     this.#integer(limit, 'limit', 1, 500);
     this.#integer(maxChars, 'maxChars', 64, 24576);
     if (since !== undefined) this.#string(since, 'since', 128, false);
-    return { tab, document, url, title, snapshot, lines: this.snapshot(snapshot), since,
-      projection: { detail, filter, offset, limit, maxChars } };
+    return { tab, document, mutation, url, title, snapshot, lines: this.snapshot(snapshot), since,
+      projection: { detail, filter, ...(semantic ? { query: semantic } : {}), offset, limit, maxChars } };
+  }
+
+  static #query(query) {
+    if (query === undefined) return undefined;
+    if (!query || Array.isArray(query) || typeof query !== 'object' ||
+      Object.keys(query).some(key => !['role', 'name', 'exact'].includes(key)))
+      throw new ObservationError('invalid_projection', 'Invalid semantic query.');
+    const { role, name, exact = true } = query;
+    if (role === undefined && name === undefined)
+      throw new ObservationError('invalid_projection', 'Semantic query requires role or name.');
+    if (role !== undefined && (typeof role !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(role)))
+      throw new ObservationError('invalid_projection', 'Invalid semantic role.');
+    if (name !== undefined && (typeof name !== 'string' || !name.length || name.length > 200 || name.includes('\0')))
+      throw new ObservationError('invalid_projection', 'Invalid semantic name.');
+    if (typeof exact !== 'boolean' || (name === undefined && exact !== true))
+      throw new ObservationError('invalid_projection', 'Invalid semantic match mode.');
+    return { ...(role === undefined ? {} : { role }), ...(name === undefined ? {} : { name }), exact };
   }
 
   static #string(value, field, maximum, empty = true) {

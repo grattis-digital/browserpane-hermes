@@ -43,7 +43,7 @@ async function call(name,args={}) {
 }
 try {
  await client.connect(transport);
- assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name).sort(),['pane_act','pane_image','pane_read','pane_tabs','pane_view']);
+ assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name).sort(),['pane_act','pane_flow','pane_image','pane_read','pane_tabs','pane_view']);
  const initial=await call('pane_tabs');
  if(process.env.BPANE_DEMO_STAGE==='setup') {
   const opened=await call('pane_act',{lease:initial.lease,request:1,steps:[{op:'new',url:'http://127.0.0.1:8765/'}],observe:'full'});

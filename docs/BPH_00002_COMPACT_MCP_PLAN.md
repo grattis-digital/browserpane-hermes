@@ -42,9 +42,11 @@ and browser event outcomes; batching and observation omission must be reported
 separately from execution-engine improvements. Keep all test resources disposable.
 
 Status: implementation, paired benchmarks and local ARM64 Docker qualification
-complete. The protocol has five tools, including a targeted read/aggregate tool
+complete. The base protocol had five tools, including a targeted read/aggregate tool
 added after the benchmark exposed the cost of sending entire tables for tiny
 summaries. See [measured results and tradeoffs](benchmarks/README.md).
+The follow-up [semantic fast path](BPH_00006_SEMANTIC_FAST_PATH_PLAN.md) adds one
+replay-safe flow tool plus immutable-state projection.
 
 Local qualification: 195 wrapper/CI-guard tests; 22 real-browser compact checks; compact
 and legacy runtime/download checks; original tab, cookie, local storage and shared

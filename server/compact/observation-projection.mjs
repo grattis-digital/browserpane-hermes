@@ -3,7 +3,7 @@ import { ObservationRefs } from './observation-refs.mjs';
 /** Pure line projection; source YAML and reference identities are never rewritten. */
 export class ObservationProjection {
   static create(lines, options) {
-    const parents = this.#parents(lines), selected = this.#select(lines, parents, options);
+    const parents = this.#parents(lines), selection = this.#select(lines, parents, options), selected = selection.indices;
     const { offset, limit, maxChars } = options;
     const items = this.#items(lines, parents, selected, offset, limit);
     const rendered = [], refs = new Map(), truncatedLines = [];
@@ -23,7 +23,8 @@ export class ObservationProjection {
       }
     }
     const next = offset + consumed < selected.length ? offset + consumed : undefined;
-    return { text: rendered.join('\n'), refs, total: selected.length, next,
+    return { text: rendered.join('\n'), refs, total: selected.length,
+      ...(options.query ? { matches: selection.matches } : {}), next,
       truncated: stopped || truncatedLines.length > 0, truncatedLines };
   }
 
@@ -38,17 +39,20 @@ export class ObservationProjection {
     return parents;
   }
 
-  static #select(lines, parents, { detail, filter }) {
+  static #select(lines, parents, { detail, filter, query }) {
     const selected = new Uint8Array(lines.length), needle = filter.toLowerCase();
+    let matches = 0;
     for (let index = 0; index < lines.length; index++) {
       if (detail === 'controls' && !ObservationRefs.isControl(lines[index])) continue;
       if (needle && !lines[index].toLowerCase().includes(needle)) continue;
+      if (query && !ObservationRefs.matches(lines[index], query)) continue;
+      matches++;
       // Each ancestor is marked at most once, including deeply nested snapshots.
       for (let row = index; row >= 0 && !selected[row]; row = parents[row]) selected[row] = 1;
     }
     const indices = [];
     for (let index = 0; index < selected.length; index++) if (selected[index]) indices.push(index);
-    return indices;
+    return { indices, matches };
   }
 
   static #items(lines, parents, selected, offset, limit) {

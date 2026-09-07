@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { CompactEngineFixture as Fixture } from './compact-engine-fixture.mjs';
 import { CompactTabChecks } from './compact-tab-checks.mjs';
+import { CompactBoundaryChecks } from './compact-boundary-checks.mjs';
 
 const fixture = new Fixture(), checks = [];
 const check = (name, result) => { assert(!result?.isError, `${name}: ${JSON.stringify(result)}`); checks.push(name); };
@@ -9,6 +10,10 @@ try {
   await fixture.start();
   await CompactTabChecks.run(fixture);
   check('actual MCP HTTP clients reuse the default across navigation/reconnect and reject stale closed-tab input');
+  await CompactBoundaryChecks.run(fixture);
+  check('delayed popup stops semantic flow and replay does not click again');
+  check('cursor preserves query pagination and does not authorize unreturned refs');
+  check('missing stage steps fail validation before browser work');
   const session = fixture.session(), observer = fixture.session();
   let page = await fixture.reset(`<label>Name<input id="name"></label><label>Agree<input id="agree" type="checkbox"></label>
     <button id="save">Save</button><p role="status" id="status"></p><script>window.events=[];
@@ -28,13 +33,48 @@ try {
   assert.equal((await fixture.act(observer, stale, [{ op: 'click', ref: Fixture.ref(stale, 'Save') }])).error.code, 'STALE_VIEW');
   assert.equal((await fixture.call(observer, 'pane_act', args)).error.code, 'STALE_SESSION'); check('other-client stale view and old lease are rejected');
 
-  view = await fixture.view(session); const oldRef = Fixture.ref(view, 'Save');
+  page = await fixture.reset(`<label>Email<input id="email"></label><button id="continue">Continue</button>
+    <script>window.flowClicks=0;document.getElementById('continue').onclick=()=>{window.flowClicks++;
+    window.emailValue=document.getElementById('email').value;document.body.innerHTML='<button id="finish">Finish</button><p role="status"></p>';
+    document.getElementById('finish').onclick=()=>{window.flowClicks++;document.querySelector('[role=status]').textContent='Done';};};</script>`);
+  const flowArgs = [{ steps: [
+    { op: 'fill', target: { role: 'textbox', name: 'Email' }, text: 'flow@example.invalid' },
+    { op: 'click', target: { role: 'button', name: 'Continue' } },
+  ], wait: { text: 'Finish', timeoutMs: 1000 } }, { steps: [
+    { op: 'click', target: { role: 'button', name: 'Finish' } },
+  ], wait: { text: 'Done', timeoutMs: 1000 } }];
+  const flowed = await fixture.flow(session, flowArgs); check('semantic flow crosses a verified DOM transition', flowed);
+  assert.equal(flowed.completed, 3); assert.equal(flowed.stages, 2);
+  assert.equal(await page.evaluate(() => window.emailValue), 'flow@example.invalid');
+  assert.equal(await page.evaluate(() => window.flowClicks), 2);
+  const replayedFlow = await fixture.call(session, 'pane_flow', { lease: session.lease, request: session.request, stages: flowArgs });
+  assert.deepEqual(replayedFlow, flowed); assert.equal(await page.evaluate(() => window.flowClicks), 2);
+  check('semantic flow replay does not duplicate input');
+
+  page = await fixture.reset('<button id="one">Save</button><button id="two">Save</button><script>window.ambiguousClicks=0;one.onclick=two.onclick=()=>ambiguousClicks++;</script>');
+  const ambiguous = await fixture.flow(session, [{ steps: [{ op: 'click', target: { role: 'button', name: 'Save' } }] }], { observe: 'none' });
+  assert.equal(ambiguous.error.code, 'AMBIGUOUS_TARGET'); assert.equal(await page.evaluate(() => ambiguousClicks), 0);
+  check('ambiguous semantic flow fails before input');
+
+  page = await fixture.reset('<button id="first">First</button><button id="second">Second</button><script>window.flowStops=[0,0];first.onclick=()=>flowStops[0]++;second.onclick=()=>flowStops[1]++;</script>');
+  const stoppedFlow = await fixture.flow(session, [
+    { steps: [{ op: 'click', target: { role: 'button', name: 'First' } }], wait: { text: 'Never appears', timeoutMs: 30 } },
+    { steps: [{ op: 'click', target: { role: 'button', name: 'Second' } }] },
+  ], { observe: 'none' });
+  assert.equal(stoppedFlow.error.code, 'POSTCONDITION_FAILED'); assert.equal(stoppedFlow.failedStage, 0);
+  assert.deepEqual(await page.evaluate(() => window.flowStops), [1, 0]);
+  check('failed flow postcondition prevents every later stage');
+
+  page = await fixture.reset('<button id="save">Save</button>');
+  const cached = await fixture.view(session);
+  view = await fixture.view(session, { state: cached.state, query: { role: 'button', name: 'Save' } });
+  const oldRef = Fixture.ref(view, 'Save');
   await page.locator('#save').evaluate(element => { element.textContent = 'Purchase'; });
   assert.equal((await fixture.act(session, view, [{ op: 'click', ref: oldRef }])).error.code, 'STALE_REF');
   view = await fixture.view(session); const replacedRef = Fixture.ref(view, 'Purchase');
   await page.locator('#save').evaluate(element => { element.outerHTML = element.outerHTML; });
   assert.equal((await fixture.act(session, view, [{ op: 'click', ref: replacedRef }])).error.code, 'STALE_REF');
-  check('renamed and replaced nodes cannot inherit old action permission');
+  check('cached, renamed and replaced nodes cannot inherit old action permission');
 
   page = await fixture.reset('<button>First</button><button>Hidden target</button>');
   const full = await fixture.view(session); view = await fixture.view(session, { limit: 1 });
