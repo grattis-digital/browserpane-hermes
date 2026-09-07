@@ -24,7 +24,7 @@ The source import comes from the qualified single-browser wrapper. Fourteen
 rendering/display patches plus listener-isolation patch 0015, CDP resize cleanup
 and connection-ownership patches 0016–0017, and drawable renderer-fallback patch
 0018, opt-in VNC-0 exact geometry patch 0019, external-X11 startup patch 0020,
-and saved-session startup-tab patch 0021
+and saved-session startup-tab patch 0021, plus deterministic test-clock patch 0022,
 target upstream 91e0e1b0c772f8ac333b9ccd6fa09ea35b2673e3.
 The public specialization
 is implemented in PR #2: portable Compose, lean pinned Hermes packaging, setup and

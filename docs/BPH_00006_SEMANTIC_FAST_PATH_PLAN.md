@@ -50,6 +50,14 @@ in this experiment.
 
 ## Promotion gates
 
+CI follow-up: the amd64 native job exposed a wall-clock-dependent token-retry
+unit test in the inherited Compose test helper. Add ordered test-only patch
+0022: use Tokio's clock for its async retry deadline, pause the test runtimes,
+and assert exact virtual elapsed time, retry counts and final error retention.
+Reproduce a delayed runner in an owned fixture, then run pristine patch replay,
+the local Linux suite and the hosted architecture matrix. Do not increase
+timeouts, skip native tests or change the deployed browser for this test fix.
+
 - No input on zero or multiple semantic matches.
 - No replayed input after a lost/duplicate response.
 - No continuation to another stage without its required postcondition.

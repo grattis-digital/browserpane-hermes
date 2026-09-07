@@ -41,6 +41,7 @@ Paths below are relative to upstream `code/`. Host means
 | 0019 opt-in virtual GPU display | Host `capture/ffmpeg.rs`, `capture/ffmpeg/xvnc_tests.rs` | Explicit VNC-0 backend with the same exact-root/sole-output geometry gate; default DUMMY0 behavior retained |
 | 0020 external X11 startup | Upstream `deploy/start-host.sh` | Opt-in DRI3 display readiness without deleting another server's socket or spawning dummy Xorg |
 | 0021 restore without extra tab | Upstream `deploy/start-host.sh` | Recheck saved session state on every supervised launch; keep initial URL only for a fresh shared profile |
+| 0022 deterministic token retry tests | Gateway tests `apps/bpane-gateway/tests/compose_api_surface/support.rs` | Use one Tokio clock for retry deadlines/sleeps; paused-clock retry, timeout and immediate-success assertions |
 
 Patch names are descriptive; use the actual ordered filenames, not this table,
 as the application manifest. The bundle sets the 0015 gateway API bind to loopback
@@ -120,6 +121,16 @@ The video wire format still has no ownership generation identifier. Immediate
 re-entry into the same rectangle can admit an older in-flight frame within that
 newly authorized region; the bounded retirement checks are not a new wire-level
 ordering guarantee.
+
+Patch 0022 is an independent, test-only correction, not a rendering or runtime
+change. The inherited retry unit test could spend its entire 100 ms wall-clock
+budget descheduled on a loaded CI runner. Its async sleep and deadline now use
+Tokio's clock; unit runtimes start paused and assert exact virtual elapsed time,
+attempt counts and the final failure cause. The existing `test-util` dev feature
+is sufficient. Do not change only the test attribute: Tokio's paused clock does
+not affect `std::time::Instant` ([Tokio 1.50 clock documentation](https://docs.rs/tokio/1.50.0/tokio/time/fn.pause.html)).
+Real Compose callers retain real-time waits and the same timeout/retry settings.
+No native regression is skipped and no CI timing budget is enlarged.
 
 ## Rebuild and verify from the pin
 
