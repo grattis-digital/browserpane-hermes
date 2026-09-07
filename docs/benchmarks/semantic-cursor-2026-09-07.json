@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-07",
+  "branch": "experiment/semantic-fast-path",
+  "reviewedBase": "a712d77b56787bd3fc5fadf56299dd7392686eb5",
+  "environment": { "platform": "darwin", "arch": "arm64", "cpuModel": "Apple M4 Pro", "node": "v26.7.0", "chromium": "146.0.7680.0" },
+  "scope": "Fresh sandboxed synthetic Chromium over separate-process MCP/HTTP/CDP. Five measured trials after one warmup, after other local test suites completed. No paid model, Raspberry Pi, production profile, X11 viewer or model-latency measurement.",
+  "cachedCursorPages": {
+    "samples": 20,
+    "latencyMs": { "median": 0.809, "p95": 1.032, "min": 0.546, "max": 1.096 }
+  },
+  "freshFirstPages": {
+    "samples": 5,
+    "latencyMs": { "median": 42.121, "p95": 46.040, "min": 32.399, "max": 46.040 }
+  },
+  "complete120RowObservation": {
+    "calls": 5,
+    "latencyMs": { "median": 45.624, "p95": 49.070, "min": 35.637, "max": 49.070 },
+    "resultJsonBytes": { "median": 29156 },
+    "estimatedOutputTextTokensCharsDiv4": { "median": 6572 }
+  },
+  "wholeMixedWorkflow": {
+    "toolLatencySumMs": { "median": 211.965, "p95": 249.413 },
+    "resultJsonBytes": { "median": 40015 },
+    "estimatedOutputTextTokensCharsDiv4": { "median": 8977 }
+  },
+  "schema": {
+    "tools": 6, "descriptorJsonBytes": 7661, "estimatedDescriptorTokensCharsDiv4": 1916,
+    "reviewedBaseDescriptorJsonBytes": 7558
+  },
+  "interpretation": "Correctness hardening, not a demonstrated whole-workflow speedup or billed-token reduction. Cursors preserve projection options with one input handle; metadata adds bytes. Fresh capture varied considerably versus the unpaired prior run; cached calls remain approximately 1 ms locally. Character-divided-by-four token estimates are not model tokenization.",
+  "command": "node scripts/benchmark-mcp-baseline.mjs semantic-cursor-qualified 5 1 batched compact",
+  "raw": "Full synthetic output remains in ignored test-results; this curated summary contains no operator data."
+}

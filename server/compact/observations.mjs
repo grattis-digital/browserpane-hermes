@@ -44,6 +44,13 @@ export class ObservationStore {
       mutation: source.mutation, url: source.url, title: source.title } : undefined;
   }
 
+  /** A view-bound cursor retains its projection; interleaved queries cannot change it. */
+  continuation(cursor) {
+    const stored = this.#views.get(cursor);
+    if (!stored || stored.next === undefined || !this.#states.has(stored.state)) return undefined;
+    return { state: stored.state, ...structuredClone(stored.projection), offset: stored.next };
+  }
+
   #project(capture, state, view) {
     const projected = ObservationProjection.create(capture.lines, capture.projection);
     const stored = { view, state, tab: capture.tab, document: capture.document, url: capture.url, title: capture.title,
@@ -89,7 +96,7 @@ export class ObservationStore {
     if (projection.offset) wire.offset = projection.offset;
     if (projection.limit !== 120) wire.limit = projection.limit;
     if (projection.maxChars !== 6000) wire.maxChars = projection.maxChars;
-    if (next !== undefined) wire.next = next;
+    if (next !== undefined) { wire.next = next; wire.cursor = view; }
     if (truncated) { wire.truncated = true; wire.truncatedLines = [...truncatedLines]; }
     const base = since === undefined ? undefined : this.#views.get(since);
     if (!base || base.tab !== tab || base.document !== document ||

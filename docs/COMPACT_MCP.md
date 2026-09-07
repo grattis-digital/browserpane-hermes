@@ -103,19 +103,32 @@ additional tabs.
 
 ### Immutable state and semantic queries
 
-When a view returns `next`, pass its `state` and the next offset rather than
-recapturing the page:
+When a view returns `cursor`, pass it alone to continue the exact same projection
+without recapturing the page:
 
 ```json
-{"state":"STATE_FROM_REPLY","offset":120}
+{"cursor":"CURSOR_FROM_REPLY"}
 ```
 
-The server reprojects the same validated raw accessibility snapshot, so pages
-cannot be swallowed or duplicated by a dynamic DOM changing between pagination
-calls. Four raw states per client are retained with LRU eviction. An unknown,
+The cursor preserves the query, filter, detail and budgets, even if another query
+is issued between pages. Repeating a retained cursor returns the same slice.
+`next` is the numeric position in that projection, not in the raw snapshot.
+Only `limit` and `maxChars` may accompany a cursor; increase them if structural
+context exhausts the budget without advancing `next`. No cursor means the last
+page. Cursors share the bounded four-view history; expired/foreign cursors return
+`STALE_CURSOR`, never an implicit recapture. Returned refs remain slice-scoped.
+
+The server reprojects the same validated raw accessibility snapshot, so dynamic
+DOM changes cannot shift rows between continuation calls. Four raw states per
+client are retained with LRU eviction. An unknown,
 cross-tab, navigated or locally mutated state fails closed; capture a fresh view.
 Do not combine `state` with `since`: state selects an immutable source, while
 since describes a delta against a retained rendered slice.
+
+`state` identifies raw text, not a remembered query. Use it to make independent
+projections with different options. Manual `state` + `offset` pagination remains
+available, but must repeat the same query/filter/detail and budgets on every
+call; prefer `cursor` for continuation.
 
 For a narrow lookup, add a closed semantic query:
 
@@ -173,6 +186,8 @@ The whole flow is covered by the same lease/request replay ledger as `pane_act`.
 Missing or ambiguous targets cause no input; partial input, dialogs, popups and
 unexpected transitions stop the flow with an exact completed prefix. Flow does
 not open tabs, force clicks, inject code or bypass site challenges.
+Popup detection spans the whole flow, including capture, preflight and waits;
+a later stage never resets the baseline and adopts an unexpected popup.
 
 `navigate`, `back`, `activate`, `close`, `new`, and `dialog` must be standalone.
 Navigation accepts HTTP(S) and `about:blank`, not executable URLs, file URLs or
@@ -210,8 +225,11 @@ a partial aggregate is complete; ARIA-only grids require ordinary observations.
 `mayHaveActed`, `error`, and `observationError` explain partial/uncertain outcomes.
 A failed wait does **not** mean a click or submission was undone. Inspect current
 state before creating a new request number. There is no automatic retry of input.
-`pane_flow` additionally reports completed stages and the failing stage when
-available; an exact replay recovers the recorded result without repeating input.
+`pane_flow` reports `stages` completed without interruption and the zero-based
+`failedStage` when available. A click followed by a popup during its wait counts
+as one completed input but zero verified stages. An exact replay recovers the
+recorded result without repeating input. Every stage requires nonempty `steps`;
+malformed stages fail with `INVALID_ARGUMENT` before browser work starts.
 
 `wait` supports visible literal text or an exact URL, with a bounded timeout.
 It expresses application readiness; action completion alone does not prove all

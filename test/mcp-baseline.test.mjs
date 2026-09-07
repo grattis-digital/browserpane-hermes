@@ -59,7 +59,7 @@ test('compact adapter sums full pagination then reads an exact observed table su
   const text = Array.from({ length: 120 }, (_, index) => `- row "ROW-${String(index).padStart(3, '0')} Synthetic inventory item ${index} ${index + 1}" [ref=e${index}]:`).join('\n');
   const payloads = [{ v: 1, lease: 'owned', tabs: [{ tab: 't1' }] },
     { v: 1, lease: 'owned', tab: 't1', view: 'view0', mode: 'full', text: '' },
-    { v: 1, lease: 'owned', tab: 't1', view: 'view1', mode: 'full', text: '- table [ref=e999]:\n' + text.split('\n').slice(0, 60).join('\n'), next: 60 },
+    { v: 1, lease: 'owned', tab: 't1', view: 'view1', cursor: 'view1', mode: 'full', text: '- table [ref=e999]:\n' + text.split('\n').slice(0, 60).join('\n'), next: 60 },
     { v: 1, lease: 'owned', tab: 't1', view: 'view2', mode: 'full', text: '- table [ref=e999]:\n' + text.split('\n').slice(60).join('\n') },
     { v: 1, lease: 'owned', tab: 't1', view: 'view2', data: { rows: 120, headers: ['Code', 'Description', 'Quantity'],
       first: ['ROW-000', 'Synthetic inventory item 0', '1'], last: ['ROW-119', 'Synthetic inventory item 119', '120'],
@@ -71,7 +71,7 @@ test('compact adapter sums full pagination then reads an exact observed table su
   await backend.initialize(); backend.trial(0, false);
   await backend.observeTable();
   assert.deepEqual(await backend.readTable(), { rows: 120, total: 7260, first: 'ROW-000', last: 'ROW-119' });
-  assert.equal(metrics.samples().length, 3); assert.equal(requests[3].arguments.offset, 60);
+  assert.equal(metrics.samples().length, 3); assert.deepEqual(requests[3].arguments, { cursor: 'view1' });
   assert.deepEqual(requests.at(-1), { name: 'pane_read', arguments: { tab: 't1', view: 'view2', ref: 'e999', mode: 'summary', column: 2 } });
   assert.equal(payloads.length, 0);
 });

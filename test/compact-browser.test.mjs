@@ -147,6 +147,7 @@ test('model-facing guidance leads with existing-tab reuse and leaves intentional
   assert.match(view.description, /Start with \{\}.*reuse/);
   assert.match(act.description, /navigate\(url\) in place/);
   assert.match(act.description, /new creates an extra tab/);
-  assert.match(view.description, /state reprojects/);
+  assert.match(view.description, /state requeries/);
+  assert.match(view.description, /cursor: reply.cursor/);
   assert.equal(act.inputSchema.properties.steps.items.properties.op.enum.at(-1), 'new');
 });

@@ -8,7 +8,7 @@ Branch: `experiment/semantic-fast-path`, based on merged `main` commit
 Reduce repeated Chromium accessibility serialization and model/browser round
 trips without replacing MCP, Playwright input, the shared browser, or the
 existing stale-target and replay protections. Establish protocol measurements
-before adding any model router. No paid model call, production deployment,
+before adding any model router. No paid model call, implicit production deployment,
 stealth behavior, arbitrary JavaScript, CSS selector or CAPTCHA handling belongs
 in this experiment.
 
@@ -31,6 +31,22 @@ in this experiment.
 5. Qualify pure projection/validation, fake-browser session behavior, real
    sandboxed Chromium over MCP, Compose configuration and the existing full
    wrapper/native matrix. Benchmark state reuse separately from model behavior.
+
+## Pre-merge review corrections
+
+- Keep one popup generation across the entire flow, including stage capture,
+  action preflight and postcondition waits. An interrupted stage retains its
+  applied-input prefix but does not count as a successfully verified stage.
+- Add a view-bound continuation cursor that preserves projection options across
+  pages and interleaved queries, within the existing four-view memory bound.
+  Keep raw `state` independently queryable; do not mutate per-state defaults.
+- Require `steps` in every stage at schema validation, before browser work or
+  request recording; malformed input returns `INVALID_ARGUMENT`.
+- Regress these boundaries in deterministic unit tests and disposable real
+  Chromium. Re-run the equal-information HTTP MCP benchmark with cursor paging.
+- After local checks, use the separately authorized local ARM64 build and Pi
+  rollout. Keep profile backups, GPU/display setup and rollback image intact;
+  production checks are read-only health/integration checks, not fixture tests.
 
 ## Promotion gates
 

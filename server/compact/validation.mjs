@@ -17,6 +17,7 @@ export class PaneValidation {
     if (name === 'pane_act') this.#actions(input);
     if (name === 'pane_flow') this.#flow(input);
     if (name === 'pane_view') {
+      if (input.cursor !== undefined && Object.keys(input).some(key => !['cursor', 'limit', 'maxChars'].includes(key))) this.#fail('cursor options');
       if (input.query) this.#query(input.query);
       if (input.state !== undefined && input.since !== undefined) this.#fail('state/since');
     }

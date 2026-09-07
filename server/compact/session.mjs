@@ -20,9 +20,7 @@ export class PaneSession {
   constructor({ browser, executor, observations, ledger, actions, flow, lease, metrics }) {
     this.#browser = browser; this.#executor = executor; this.#observations = observations;
     this.#ledger = ledger; this.#actions = actions;
-    this.#flow = flow;
-    this.#lease = lease;
-    this.#metrics = metrics;
+    this.#flow = flow; this.#lease = lease; this.#metrics = metrics;
   }
   listTools() { return PaneSchemas.tools(); }
 
@@ -61,6 +59,12 @@ export class PaneSession {
     if (this.#closed || signal?.aborted) throw new PaneError('CANCELLED', 'Session closed or request cancelled.');
     if (name === 'pane_tabs') return this.#result({ tabs: await this.#browser.list() });
     if (name === 'pane_view') {
+      if (args.cursor !== undefined) {
+        const projection = this.#observations.continuation(args.cursor);
+        if (!projection) throw new PaneError('STALE_CURSOR', 'Cursor expired. Capture a fresh pane_view.');
+        const { cursor: _cursor, ...overrides } = args;
+        args = { ...projection, ...overrides };
+      }
       let tab;
       if (args.state) {
         const source = this.#observations.source(args.state);

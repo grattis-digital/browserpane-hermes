@@ -91,3 +91,16 @@ state and call-count behavior, not model latency, model success, billed tokens o
 Raspberry Pi performance. Use the recorded command to reproduce the tool-only
 benchmark; a future model-router experiment must report its own success, cost,
 latency and escalation rate.
+
+### Pre-merge cursor and flow corrections
+
+The [September 7 qualification](semantic-cursor-2026-09-07.json) uses cursor
+paging, preserving query/filter/detail/budgets while reusing the raw snapshot.
+All 120 rows are verified. Cached calls measured 0.809 ms median / 1.032 ms p95
+locally; the complete five-call observation measured 45.624 ms median. Fresh
+capture varied substantially versus the earlier unpaired run, so this does not
+establish a whole-workflow speedup. Descriptors are now 7,661 bytes and the table
+results total 29,156 median bytes: cursor metadata has a cost, not free tokens.
+The primary benefit is correct continuation with one input handle, plus stopping
+flows on delayed popups and rejecting malformed stages before input. Model cost
+and latency still require a separate controlled agent evaluation.

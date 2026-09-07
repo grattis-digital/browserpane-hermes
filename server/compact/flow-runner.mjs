@@ -14,24 +14,31 @@ export class FlowRunner {
   }
 
   async run(args, signal, trace, observe) {
-    let tab;
+    let tab, activeStage = 0;
+    const popupVersion = this.#browser.popupVersion;
     const outcome = { request: args.request, completed: 0, stages: 0 };
     try {
       tab = this.#browser.tab(args.tab);
       for (const [stageIndex, stage] of args.stages.entries()) {
+        activeStage = stageIndex;
+        if (this.#browser.popupVersion !== popupVersion) { outcome.stopped = 'new_tab'; outcome.failedStage = stageIndex; break; }
         if (signal?.aborted) throw new PaneError('CANCELLED', 'Flow cancelled before the next stage.');
         if (tab.dialog) throw new PaneError('DIALOG_OPEN', 'Handle the dialog before starting a semantic flow.');
         const internal = await observe(tab, { detail: 'controls', limit: 1, maxChars: 64 }, trace);
+        if (this.#browser.popupVersion !== popupVersion) { outcome.stopped = 'new_tab'; outcome.failedStage = stageIndex; break; }
         const observed = this.#observations.inspect(internal.view);
         const { steps, refs } = this.#resolveSteps(observed.snapshot, stage.steps);
         tab.consume();
         const result = await this.#actions.run(tab, { steps, wait: stage.wait },
-          { document: observed.document, refs }, signal, trace);
+          { document: observed.document, refs, popupVersion }, signal, trace);
         this.#applyStageResult(outcome, result, stageIndex, steps.length);
         if (result.error || result.completed !== steps.length ||
           (result.stopped && result.stopped !== 'navigation')) break;
       }
-    } catch (error) { outcome.error = PaneError.describe(error); }
+    } catch (error) {
+      outcome.error = PaneError.describe(error); outcome.failedStage = activeStage;
+      if (this.#browser.popupVersion !== popupVersion) outcome.stopped = 'new_tab';
+    }
     if (tab) outcome.tab = tab.id;
     await this.#appendObservation(outcome, tab, args, signal, trace, observe);
     if (outcome.error || outcome.stopped || outcome.stages !== args.stages.length)
@@ -56,19 +63,19 @@ export class FlowRunner {
 
   #applyStageResult(outcome, result, stageIndex, stepCount) {
     outcome.completed += result.completed;
+    if (result.stopped && result.stopped !== 'navigation') outcome.stopped = result.stopped;
     if (result.error) {
       outcome.error = result.error; outcome.failedStage = stageIndex;
       if (result.failedStep !== undefined) outcome.failedStep = result.failedStep;
       if (result.mayHaveActed !== undefined) outcome.mayHaveActed = result.mayHaveActed;
       return;
     }
-    if (result.completed !== stepCount) {
+    if (result.completed !== stepCount || outcome.stopped) {
       outcome.stopped = result.stopped ?? 'partial_stage'; outcome.failedStage = stageIndex;
       if (result.pendingStep !== undefined) outcome.pendingStep = result.pendingStep;
       return;
     }
     outcome.stages++;
-    if (result.stopped && result.stopped !== 'navigation') outcome.stopped = result.stopped;
   }
 
   async #appendObservation(outcome, tab, args, signal, trace, observe) {

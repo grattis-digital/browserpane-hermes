@@ -147,8 +147,9 @@ not replace the instructions already present in an ongoing conversation.
 Existing custom instructions and seeded configuration are not overwritten.
 
 Observations have explicit pagination/truncation. Request the next slice when
-`next` is returned. Reuse the returned `state` with the next `offset` to avoid a
-new Chromium snapshot and keep pagination internally consistent. Use `query`
+`cursor` is returned, using `pane_view {"cursor":"CURSOR_FROM_REPLY"}`. This
+preserves query/filter/budgets and avoids a new Chromium snapshot. Use `state`
+with explicit options for an independent projection, not implicit continuation. Use `query`
 with a role and/or accessible name when the goal needs only a few controls. Do
 not act on a target absent from the returned slice.
 Deltas are opt-in: only pass `since` while retaining that exact base; otherwise

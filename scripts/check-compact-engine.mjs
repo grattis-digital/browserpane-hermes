@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { CompactEngineFixture as Fixture } from './compact-engine-fixture.mjs';
 import { CompactTabChecks } from './compact-tab-checks.mjs';
+import { CompactBoundaryChecks } from './compact-boundary-checks.mjs';
 
 const fixture = new Fixture(), checks = [];
 const check = (name, result) => { assert(!result?.isError, `${name}: ${JSON.stringify(result)}`); checks.push(name); };
@@ -9,6 +10,10 @@ try {
   await fixture.start();
   await CompactTabChecks.run(fixture);
   check('actual MCP HTTP clients reuse the default across navigation/reconnect and reject stale closed-tab input');
+  await CompactBoundaryChecks.run(fixture);
+  check('delayed popup stops semantic flow and replay does not click again');
+  check('cursor preserves query pagination and does not authorize unreturned refs');
+  check('missing stage steps fail validation before browser work');
   const session = fixture.session(), observer = fixture.session();
   let page = await fixture.reset(`<label>Name<input id="name"></label><label>Agree<input id="agree" type="checkbox"></label>
     <button id="save">Save</button><p role="status" id="status"></p><script>window.events=[];
