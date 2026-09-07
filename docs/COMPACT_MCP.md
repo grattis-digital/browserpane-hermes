@@ -25,6 +25,14 @@ generated code/console output, redundant all-tab metadata scans and per-step
 observations. A bounded batch has one final observation; applications that finish
 asynchronously should specify a real postcondition, not rely on an arbitrary sleep.
 
+Click completion includes Playwright's post-input CDP/navigation synchronization.
+Clicks therefore use the same maximum **10-second** operation budget as explicit
+navigation/back, capped by the remaining **15-second action-batch** budget after
+awaited target checks. Other inputs keep their three-second maximum. These are
+deadlines, not added sleeps; successful operations return as soon as they finish.
+An expired/failed action still stops the batch and never authorizes replay.
+See [the Pi completion investigation](WORKFLOW_CLICK_COMPLETION.md).
+
 This workload is mostly browser I/O and model context management. JavaScript
 avoids a second bridge into the existing engine. A native rewrite is not justified
 by the measured orchestration bottleneck; future CDP/native changes must have
@@ -76,6 +84,16 @@ atomic lock against every possible human or website change. Avoid competing
 input during a batch; navigation, dialogs, popups and target changes stop it.
 
 ### Default tab and resource use
+
+For a reviewed workflow's first semantic stage, `pane_flow` optionally accepts
+both `tab` and the latest `view`. It validates the same session/document/mutation
+conditions as `pane_act`, then compares the full underlying accessibility snapshot
+again at first-stage capture and preflight—even if the returned view was filtered.
+Changed state stops with `STALE_VIEW` before that stage's first input. Calls
+omitting `view` retain existing semantics; this adds no tool or browser reservation.
+Later stages retain their normal fresh-target and postcondition checks. Dynamic
+pages can conservatively invalidate a guarded view. See the
+[supervised recipe pilot](WORKFLOW_REPLAY.md) for its bounded use and limitations.
 
 All compact MCP clients share one default tab, not one tab per MCP connection.
 `pane_view {}` selects the first suitable existing tab in registration order,

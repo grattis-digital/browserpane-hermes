@@ -67,6 +67,7 @@ export class PaneValidation {
   }
 
   static #flow(input) {
+    if (input.view !== undefined && (!input.view || !input.tab)) this.#fail('flow tab/view');
     let count = 0;
     for (const [stageIndex, stage] of input.stages.entries()) {
       count += stage.steps.length;

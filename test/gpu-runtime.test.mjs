@@ -78,7 +78,7 @@ test('GPU readiness uses only private browser-level SystemInfo and rejects endpo
   assert.deepEqual(calls[1], { id: 1, method: 'SystemInfo.getInfo' });
   for (const endpoint of ['ws://example.org:9222/devtools/browser/test', 'ws://127.0.0.1:9222/devtools/page/test',
     'ws://user:pass@127.0.0.1:9222/devtools/browser/test', 'ws://127.0.0.1:9222/devtools/browser/test?token=x']) {
-    await assert.rejects(new GpuStatus(response(endpoint), Socket).check(), /not private/);
+    await assert.rejects(new GpuStatus(response(endpoint), Socket).check(), { code: 'GPU_CDP_ENDPOINT_NOT_PRIVATE' });
   }
   assert.equal(calls.length, 2);
 });

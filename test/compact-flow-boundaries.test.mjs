@@ -90,3 +90,33 @@ test('malformed stages return INVALID_ARGUMENT before snapshots, input or reques
     stages: [{ steps: [{ op: 'click', target: { name: 'Save' } }] }] });
   assert.equal(valid.completed, 1); assert.deepEqual(f.calls, ['e1']);
 });
+
+test('optional flow view binds the raw snapshot even when the returned view was filtered', async t => {
+  for (const boundary of [0, 2, 3]) {
+    const f = new FlowFixture(t), session = f.session();
+    f.pages[0].snapshotText += '\n- heading "Approved account"';
+    const view = await f.call(session, 'pane_view', { query: { role: 'button', name: 'Save', exact: true } });
+    assert(!view.text.includes('Approved account'));
+    const change = () => { f.pages[0].snapshotText = f.pages[0].snapshotText.replace('Approved account', 'Wrong account'); };
+    if (boundary === 0) change();
+    else f.onSnapshot = async count => { if (count === boundary) change(); };
+    const args = { lease: view.lease, tab: view.tab, view: view.view, request: 1, observe: 'none',
+      stages: [{ steps: [{ op: 'click', target: { role: 'button', name: 'Save', exact: true } }] }] };
+    const result = await f.call(session, 'pane_flow', args);
+    assert.equal(result.error.code, 'STALE_VIEW'); assert.equal(result.completed, 0);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(await f.call(session, 'pane_flow', args), result);
+  }
+});
+
+test('guarded flow requires explicit tab and latest view, while unguarded calls stay compatible', async t => {
+  const f = new FlowFixture(t), session = f.session();
+  const old = await f.call(session, 'pane_view'), fresh = await f.call(session, 'pane_view');
+  const args = { lease: old.lease, tab: old.tab, view: old.view, request: 1, observe: 'none',
+    stages: [{ steps: [{ op: 'click', target: { name: 'Save' } }] }] };
+  assert.equal((await f.call(session, 'pane_flow', args)).error.code, 'STALE_VIEW');
+  assert.deepEqual(f.calls, []);
+  assert.equal((await f.call(session, 'pane_flow', { ...args, tab: undefined })).error.code, 'INVALID_ARGUMENT');
+  assert.equal((await f.call(session, 'pane_flow', { ...args, view: fresh.view, request: 2 })).completed, 1);
+  assert.deepEqual(f.calls, ['e1']);
+});

@@ -7,3 +7,16 @@
 !entrypoint.sh
 !healthcheck.py
 !verify.py
+!verify_workflow.py
+!verify_recipe.py
+!verify_execution.py
+!bpane-workflow
+!workflow_runner/
+!workflow_runner/*.py
+!workflow_learning/
+!workflow_learning/*.py
+!workflow_learning/plugin.yaml
+!workflow_learning/SKILL.md
+!workflow_execution/
+!workflow_execution/*.py
+!workflow_execution/plugin.yaml

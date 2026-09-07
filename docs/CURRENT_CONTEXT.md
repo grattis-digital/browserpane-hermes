@@ -1,7 +1,47 @@
 # Current fork context
 
-Active development is now `experiment/semantic-fast-path`, based on merged main
-commit `70129e2c`. See BPH_00006_SEMANTIC_FAST_PATH_PLAN.md for immutable MCP
+The workflow series is prepared for review on `feature/supervised-workflows`,
+as one publication commit based on current `main`. The original development
+history remains local; historical checkpoint IDs in the qualification notes
+identify private test records, not separately published commits. See
+BPH_00007_WORKFLOW_LEARNING_PLAN.md, WORKFLOW_LEARNING.md, WORKFLOW_REPLAY.md and
+WORKFLOW_EXECUTION.md. The independent opt-in Hermes-local `workflow` tool selects
+reviewed catalog IDs, reuses a warm SDK connection, and adds durable cancellation;
+it is not protected enterprise execution or a seventh BrowserPane MCP tool.
+Branch publication and PR creation are approved; production deployment and merge
+are not. The separately approved, disposable Pi hardware
+pilot now passes fresh smoke/recovery and a separate uninterrupted 30-pair run
+with cancellation, restart/recreation and cleanup. Browser checkpoint `bb9d6d2e`
+and Hermes `538e4c55` retained one profile/tab and V3D/sandbox readiness; production
+services were unchanged. The long run recorded one `GPU_CDP_QUERY_TIMEOUT` from
+the 2.5-second readiness query; later checks passed. Do not silently discard it
+or claim it proves GPU loss. See WORKFLOW_PI_QUALIFICATION.md for complete results,
+scope and preserved historical failures whose original exceptions remain unknown.
+The fixes include truly read-only journal status, safe SQLite publication without
+raw-descriptor lock interference, typed diagnostics, bounded run/status waits and
+a lean pinned-helper health check retaining its deadline and PID/lock checks.
+The latest reproduced failure was a successful download followed by renderer-side
+CDP replies exceeding the three-second click-completion budget. Clicks now use
+the existing navigation budget within the unchanged action-batch deadline, with
+awaited guard time deducted before input. No retries or guard bypasses were added.
+The real-browser regression is red before/green after; see
+WORKFLOW_CLICK_COMPLETION.md and scripts/workflow-pilot/README.md. Passing this
+isolated gate does not authorize production rollout, a GitHub push or a merge.
+The vendor comparison and site pacing/challenge plan are in
+BPH_00008_WORKFLOW_SITE_POLICY_PLAN.md. The pacing-only increment is documented
+in WORKFLOW_PACING.md: reviewed exact-origin intervals/jitter, persistent shared
+cold/warm budgets, bounded cancellation-aware waits, and no automatic retry.
+It is explicitly off in standard tests/benchmarks; dedicated policy tests use
+virtual time or zero-delay policies and no interactive handoff. Automatic target
+HTTP backoff/challenge handling remains deferred. Pacing has local qualification
+only; the prior Pi evidence below does not qualify this new feature.
+Local ARM64 image/runtime and two separate one-profile
+61-export qualifications passed; longer endurance and the deeper Chromium/host
+cause of transient stalls remain unproven. Preserve the no-auto-approval/no-replay
+supervised boundary.
+
+The earlier semantic fast path was based on merged main commit `70129e2c`.
+See BPH_00006_SEMANTIC_FAST_PATH_PLAN.md for immutable MCP
 states, targeted semantic projections, content-free timing and bounded verified
 flows. Model routing is intentionally deferred until deterministic protocol
 effects are measured. See BPH_00004_GPU_RUNTIME_PLAN.md and GPU.md
@@ -17,7 +57,8 @@ session shared with Hermes. Issue #1 and BPH_00001_BUNDLE_PLAN.md are the curren
 bundle scope; BPH_00002_COMPACT_MCP_PLAN.md records the subsequent MCP experiment,
 BPH_00003_ADBLOCK_INSTALL_PLAN.md its managed-extension resource follow-up, and
 BPH_00004_GPU_RUNTIME_PLAN.md the later GPU integration request, and
-BPH_00006_SEMANTIC_FAST_PATH_PLAN.md the current MCP performance follow-up.
+BPH_00006_SEMANTIC_FAST_PATH_PLAN.md the semantic MCP performance follow-up, and
+BPH_00007_WORKFLOW_LEARNING_PLAN.md the current supervised workflow series.
 Upstream enterprise roadmap items are not implementation authority here.
 
 The source import comes from the qualified single-browser wrapper. Fourteen

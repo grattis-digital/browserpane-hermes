@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "version": 1,
+  "origin": "https://reports.example.test",
+  "minIntervalMs": 750,
+  "jitterMs": 250,
+  "maxActions": 20,
+  "windowMs": 60000,
+  "maxWaitMs": 5000
+}

@@ -100,6 +100,63 @@ tool is exposed in compact mode. Selecting the legacy backend restores its broad
 tool capabilities and original transport behavior. Treat page text as untrusted
 data, preserve agent approval policies, and hand challenges to a human.
 
+The optional [Hermes workflow recorder](WORKFLOW_LEARNING.md) is disabled by
+default and records only explicitly selected session/task intervals. Its closed
+projection omits page/field/credential content; bounded private SQLite evidence
+lives under the existing Hermes volume, not in shared downloads. Treat that
+volume and backups as sensitive nonetheless. Hooks can lose events and never
+constitute a complete audit or proof of business success. Captures expire/stop at
+limits; deleting an exact completed capture requires an explicit `forget` call.
+Deletion does not erase backups or Hermes's separate conversation history.
+
+The agent still has terminal/file access and can modify its own state. Capture
+ownership checks, skill write approvals and draft status are not enforceable
+enterprise authorization. The separate [supervised report-recipe pilot](WORKFLOW_REPLAY.md)
+adds a private, bounded SQLite execution journal and an explicit content/input-bound
+review acknowledgement. These are not protected grants: the same writable agent
+identity can bypass them. A worker lock prevents overlapping runners using the
+same local store, not raw MCP calls or viewer input. No protected approval store,
+cross-client browser reservation or automatic uncertain-write replay is added.
+An optional `pane_flow.view` guard rejects changed first-stage accessibility state;
+it does not make the page atomic or authenticate the account. Review link effects,
+supervise downloads, and do not use this pilot for consequential submissions.
+Journal/CSV fingerprints are not anonymization; back up sensitive state with
+writers stopped. Never restore or rotate journals to retry uncertain effects.
+Status uses read-only SQLite connections; mutation checkpoints retain FULL
+durability. Storage contention and hot-journal recovery errors fail closed with
+typed codes, not browser retries. Workflow diagnostics contain bounded codes,
+exception classes and SQLite numbers only, excluding raw messages and run inputs.
+MCP failure diagnostics can also include bounded progress counters and a
+`mayHaveActed` flag; these cannot relax uncertainty or authorize replay.
+The independent [Hermes execution plugin](WORKFLOW_EXECUTION.md) adds one lazy
+worker/SDK connection, not a listener or another browser. Its private catalog
+retains full reviewed URLs, target labels and bindings: protect it and backups
+as sensitive data. All tool-enabled sessions in the same Hermes home share
+execution IDs; this is not multi-tenant authorization. The tool cannot publish or
+approve, but the same agent's filesystem/terminal identity can bypass that limit.
+Cooperative cancellation stops later calls, not an already-sent fill/click batch;
+only explicit read-only reconciliation may resolve a cancelled uncertain export.
+
+Optional [workflow pacing](WORKFLOW_PACING.md) binds a policy to each reviewed
+contract and adds a private, bounded origin-digest ledger beside the run journal.
+It shares admission budgets across cold/warm processes with that same parent;
+it does not reserve the browser or constrain raw MCP, unpaced work or another home.
+Treat digest/timing metadata and backups as sensitive, stop writers for backups,
+and never reset budgets to bypass a site's limits. Trusted host time is required.
+Storage failure or excessive cooldown stops the run without automatic retry;
+uncertain issued input still requires read-only reconciliation. No challenge
+solver, hidden browser identity change or new permission is added.
+
+The separate [Pi qualification harness](../scripts/workflow-pilot/README.md) is
+an explicitly authorized, trusted-operator test. Its disposable browser, Hermes
+and fixed fixture share one owned internal network namespace, using loopback
+HTTP without published ports, host networking or operator firewall-policy edits. This deliberately
+does not qualify production bridge access controls or isolation between those
+test containers. Only the host runner has Docker authority; test images have no
+operator credentials or live profiles. Fixed-fixture approval must never be reused
+for arbitrary user workflows. Raw reports and their isolated failure logs stay
+private; cleanup validates exact ownership and removes only test resources.
+
 Optional `BPANE_MCP_TIMINGS=1` records only tool/phase names, monotonic durations,
 counts, result size and stable error code in the already bounded container log.
 It deliberately omits URLs, page text, accessible names, selectors and input

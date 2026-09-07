@@ -87,6 +87,35 @@ test('batch reports an exact applied prefix and never starts steps after failure
   assert.equal(result.completed, 1); assert.equal(result.stopped, 'navigation'); assert.equal(navigated.calls.length, 1);
 });
 
+test('click completion gets the navigation budget, bounded by the original batch deadline', async () => {
+  const fixture = runnerFixture(), budgets = [];
+  fixture.perform = async (_tab, _step, _guards, timeout) => {
+    budgets.push(timeout);
+    if (budgets.length === 2) fixture.time(14000);
+  };
+  const result = await fixture.run([{ op: 'fill', ref: 'e1', text: 'fixture' },
+    { op: 'click', ref: 'e1' }, { op: 'click', ref: 'e1' }]);
+  assert.equal(result.completed, 3);
+  assert.deepEqual(budgets, [3000, 10000, 1000]);
+  assert.equal(fixture.disposed(), 1);
+});
+
+test('expired batch never starts another click even with a longer completion budget', async () => {
+  const fixture = runnerFixture();
+  fixture.perform = async () => fixture.time(15000);
+  const result = await fixture.run([{ op: 'click', ref: 'e1' }, { op: 'click', ref: 'e1' }]);
+  assert.equal(result.completed, 1); assert.equal(result.error.code, 'BATCH_TIMEOUT');
+  assert.equal(result.mayHaveActed, false); assert.equal(fixture.calls.length, 1);
+});
+
+test('time spent in an awaited target guard is deducted before issuing a click', async () => {
+  const fixture = runnerFixture(); let budget;
+  fixture.evaluate = count => { if (count === 2) fixture.time(14900); return 'same'; };
+  fixture.perform = async (_tab, _step, _guards, timeout) => { budget = timeout; };
+  assert.equal((await fixture.run([{ op: 'click', ref: 'e1' }])).completed, 1);
+  assert.equal(budget, 100);
+});
+
 function sessionsFixture() {
   const executor = new SerialExecutor(), tab = { id: 't1', document: 1, mutation: 0,
     page: { url: () => 'https://fixture.invalid/', title: async () => 'Fixture', isClosed: () => false },

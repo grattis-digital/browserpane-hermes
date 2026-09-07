@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -19,6 +19,7 @@ export class McpBaselineSession {
   #transport;
   #client;
   #metadata;
+  #endpoint;
   #blockedRequests = [];
   #errors = [];
   static async deadline(operation, milliseconds = 3000) {
@@ -30,15 +31,19 @@ export class McpBaselineSession {
     } finally { clearTimeout(timer); }
   }
   async start(fixture, { engine = 'playwright' } = {}) {
+    assert(!this.#temporary, 'Use restart only for an already owned browser');
+    this.#temporary = await mkdtemp(join(tmpdir(), 'bpane-mcp-baseline-'));
+    this.#temporaryReal = await realpath(this.#temporary);
+    await mkdir(join(this.#temporaryReal, 'artifacts'));
+    await this.#launch(fixture, engine);
+  }
+  async #launch(fixture, engine) {
     assert(['playwright', 'compact'].includes(engine));
     const require = createRequire(import.meta.url);
     assert.equal(require('@playwright/mcp/package.json').version, '0.0.68', 'Requalify the benchmark when updating MCP');
     const sdk = JSON.parse(await readFile(new URL('../node_modules/@modelcontextprotocol/sdk/package.json', import.meta.url), 'utf8')).version;
     assert.equal(sdk, '1.30.0', 'Requalify the benchmark when updating the MCP client SDK');
-    this.#temporary = await mkdtemp(join(tmpdir(), 'bpane-mcp-baseline-'));
-    this.#temporaryReal = await realpath(this.#temporary);
-    const profile = join(this.#temporary, 'profile'), output = join(this.#temporary, 'artifacts');
-    await mkdir(output);
+    const profile = join(this.#temporary, 'profile'), output = join(this.#temporaryReal, 'artifacts');
     const args = ['--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--disable-background-networking'];
     this.#context = await chromium.launchPersistentContext(profile, { executablePath: chromium.executablePath(),
       headless: true, chromiumSandbox: true, viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1,
@@ -61,6 +66,7 @@ export class McpBaselineSession {
     this.#child = spawn(process.execPath, mcpArgs, { cwd: this.#temporary, stdio: ['ignore', 'ignore', 'pipe'],
       env: { PATH: process.env.PATH, LANG: 'C.UTF-8' } });
     const endpoint = await this.#waitForEndpoint();
+    this.#endpoint = endpoint + '/mcp';
     this.#client = new Client({ name: 'isolated-mcp-baseline', version: '1.0.0' });
     this.#transport = new StreamableHTTPClientTransport(new URL(endpoint + '/mcp'));
     const started = performance.now(); await this.#client.connect(this.#transport, { timeout: 10000 });
@@ -93,12 +99,36 @@ export class McpBaselineSession {
   }
   client() { assert(this.#client); assert.equal(this.#child.exitCode, null, 'Owned MCP process exited'); return this.#client; }
   metadata() { return this.#metadata; }
+  endpoint() { assert(this.#endpoint && this.#child.exitCode === null); return this.#endpoint; }
+  artifactDirectory() { assert(this.#temporaryReal); return join(this.#temporaryReal, 'artifacts'); }
+  initialPage() { assert.equal(this.#context.pages().length, 1); return this.#context.pages()[0]; }
+  async restart(fixture) {
+    assert(this.#temporary && this.#metadata.engine === 'compact');
+    assert.equal(await realpath(this.#temporary), this.#temporaryReal);
+    this.assertHealthy(); await this.#stop();
+    this.#client = undefined; this.#transport = undefined; this.#context = undefined; this.#child = undefined;
+    await this.#launch(fixture, 'compact');
+  }
+  async artifactFiles() {
+    assert(this.#temporary);
+    return (await readdir(join(this.#temporary, 'artifacts'), { withFileTypes: true }))
+      .filter(entry => entry.isFile()).map(entry => entry.name).sort();
+  }
+  async readArtifact(name) {
+    assert(this.#temporary && typeof name === 'string' && name === basename(name) && !name.startsWith('.'));
+    const directory = await realpath(join(this.#temporary, 'artifacts'));
+    assert.equal(directory, join(this.#temporaryReal, 'artifacts'));
+    const path = await realpath(join(directory, name));
+    assert.equal(dirname(path), directory, 'Read only this owned fixture artifact directory');
+    const info = await stat(path); assert(info.isFile() && info.size <= 32768);
+    return readFile(path, 'utf8');
+  }
   async page(fixture, kind) {
     const pages = this.#context.pages().filter(page => page.url() === fixture.url(kind));
     assert.equal(pages.length, 1, 'Exactly one owned fixture page must exist'); return pages[0];
   }
   assertHealthy() { assert.deepEqual(this.#blockedRequests, [], 'Unexpected browser network request'); assert.deepEqual(this.#errors, []); }
-  async close() {
+  async #stop() {
     const failures = [];
     const attempt = async operation => { try { await operation(); } catch (error) { failures.push(error); } };
     await attempt(() => McpBaselineSession.deadline(async () => { if (this.#transport?.sessionId) await this.#transport.terminateSession(); }));
@@ -110,12 +140,14 @@ export class McpBaselineSession {
       try { await exited; } finally { clearTimeout(timer); }
     });
     await attempt(async () => { await this.#context?.close(); });
-    await attempt(async () => {
-      if (!this.#temporary) return;
-      assert(basename(this.#temporary).startsWith('bpane-mcp-baseline-'));
-      assert.equal(await realpath(this.#temporary), this.#temporaryReal);
-      await rm(this.#temporary, { recursive: true }); this.#temporary = undefined;
-    });
     if (failures.length) throw new AggregateError(failures, 'Owned MCP benchmark cleanup failed');
+  }
+  async close() {
+    // Never delete the profile/artifacts if stopping the owned processes failed.
+    await this.#stop();
+    if (!this.#temporary) return;
+    assert(basename(this.#temporary).startsWith('bpane-mcp-baseline-'));
+    assert.equal(await realpath(this.#temporary), this.#temporaryReal);
+    await rm(this.#temporary, { recursive: true }); this.#temporary = undefined;
   }
 }

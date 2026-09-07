@@ -18,6 +18,8 @@ export class ActionRunner {
     const guards = new Map();
     if (!refs.length) return guards;
     const snapshot = trace ? await trace.span('guardSnapshotMs', () => tab.snapshot()) : await tab.snapshot();
+    if (observation.requiredSnapshot !== undefined && snapshot !== observation.requiredSnapshot)
+      throw new PaneError('STALE_VIEW', 'Page state changed during guarded-flow preflight; no input was started.');
     const current = ObservationRefs.from(snapshot);
     try {
       for (const ref of refs) {
@@ -55,8 +57,7 @@ export class ActionRunner {
           if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
           if (tab.document !== document) { outcome.stopped = 'navigation'; break; }
           if (tab.dialog) { outcome.stopped = 'dialog'; break; }
-          const timeout = Math.min(step.op === 'navigate' || step.op === 'back' ? 10000 : 3000, deadline - this.#now());
-          if (timeout <= 0) throw new PaneError('BATCH_TIMEOUT', 'Batch deadline reached; remaining steps were not started.');
+          if (this.#now() >= deadline) throw new PaneError('BATCH_TIMEOUT', 'Batch deadline reached; remaining steps were not started.');
           if (step.ref) await guards.get(step.ref).assert();
           if (step.to) await guards.get(step.to).assert();
           if (signal?.aborted) throw new PaneError('CANCELLED', 'Cancelled before input; remaining steps were not started.');
@@ -64,6 +65,13 @@ export class ActionRunner {
           if (this.#browser.popupVersion !== popups) { outcome.stopped = 'new_tab'; break; }
           if (tab.document !== document) throw new PaneError('STALE_VIEW', 'Document changed while checking target.');
           if (tab.dialog) { outcome.stopped = 'dialog'; break; }
+          // Click completion includes Playwright's post-input CDP/navigation
+          // fence. A loaded Pi can pause that fence beyond 3s after a successful
+          // download. Keep its checks; use the navigation budget, never a retry.
+          // Compute the remaining budget AFTER awaited target guards.
+          const navigates = step.op === 'navigate' || step.op === 'back' || step.op === 'click';
+          const timeout = Math.min(navigates ? 10000 : 3000, deadline - this.#now());
+          if (timeout <= 0) throw new PaneError('BATCH_TIMEOUT', 'Batch deadline reached before input.');
           issued = true;
           const perform = () => tab.act(() => this.#steps.perform(tab, step, guards, timeout, signal));
           const result = trace ? await trace.span('inputMs', perform) : await perform();

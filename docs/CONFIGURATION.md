@@ -46,6 +46,32 @@ or deduplicated, and corrupt session files are not repaired. Custom named Chromi
 profiles are not part of this single-profile startup contract. Explicit `--app=`
 startup retains its existing behavior without an additional positional URL.
 
+Workflow learning is a separate opt-in in **Hermes's existing config**, not a
+Compose environment flag. Enable `browserpane-workflows` and select the
+`workflow_learning` toolset only for intended channels; see the
+[recording controls, storage limits and accounting boundaries](WORKFLOW_LEARNING.md).
+Existing installations are not auto-enabled or migrated. The feature adds no
+listener and leaves the browser's six MCP tools unchanged.
+
+The separate [supervised recipe pilot](WORKFLOW_REPLAY.md) is an explicitly invoked
+`bpane-workflow` CLI, with private recipe/bindings, an exact MCP endpoint, shared
+download directory and `/opt/data/workflow-runs` journal. It needs matching images
+supporting optional `pane_flow.view`; the six tool names and unguarded callers
+remain compatible. No Compose flag, service, listener or automatic run is added.
+The independent `browserpane-replay` plugin / `workflow_execution` toolset adds
+one Hermes-local execution tool. It uses `mcp_servers.browserpane.url`, optional
+`plugins.entries.browserpane-replay.settings.downloads` (default `/shared/downloads`),
+and fixed private `workflow-runs` / `workflow-catalog` directories under the Hermes
+home. Follow the [review, registration and opt-in setup](WORKFLOW_EXECUTION.md);
+the catalog contains private parameter values, unlike the redacted recorder.
+
+Optional [workflow pacing](WORKFLOW_PACING.md) is selected per reviewed contract
+with `--pacing /opt/data/report-pacing.json`; the default is `--pacing off`.
+The warm tool inherits the registered policy, not ambient environment settings.
+An enabled execution creates a private `workflow-pacing` ledger beside the run
+journal directory (normally under `/opt/data`), shared across cold/warm restarts.
+No Compose flag, browser setting, listener or automatic test delay is introduced.
+
 For the separately opted-in V3D/X11 graphics configuration, see [GPU setup](GPU.md).
 The normal commands above do not enable GPU access.
 

@@ -45,7 +45,11 @@ LABEL org.opencontainers.image.title="BrowserPane Hermes agent" \
       io.browserpane.hermes.revision="ee5b5ec21e576ccf9b941f9ff71330418415a5cb"
 COPY --from=hermes-builder /opt/hermes /opt/hermes
 COPY --from=hermes-builder /opt/venv /opt/venv
-COPY bootstrap.py config.yaml healthcheck.py verify.py /opt/hermes-bundle/
+COPY bootstrap.py config.yaml healthcheck.py verify.py verify_workflow.py verify_recipe.py verify_execution.py /opt/hermes-bundle/
+COPY workflow_learning/ /opt/hermes/plugins/browserpane-workflows/
+COPY workflow_execution/ /opt/hermes/plugins/browserpane-replay/
+COPY workflow_runner/ /opt/hermes-bundle/workflow_runner/
+COPY --chmod=0755 bpane-workflow /usr/local/bin/bpane-workflow
 COPY --chmod=0755 entrypoint.sh /opt/hermes-bundle/entrypoint.sh
 RUN groupadd -g 10000 hermes && useradd -u 10000 -g hermes -m -d /opt/data -s /bin/bash hermes && \
     mkdir -p /opt/data /shared && chown 10000:10000 /opt/data /shared

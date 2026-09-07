@@ -3,7 +3,6 @@ import { PaneSchemas } from './schemas.mjs';
 import { PaneValidation } from './validation.mjs';
 import { PaneError } from './errors.mjs';
 import { PaneReader } from './reader.mjs';
-
 export class PaneSession {
   #browser;
   #executor;
@@ -76,8 +75,9 @@ export class PaneSession {
     }
     if (name === 'pane_act') return this.#act(args, signal, trace);
     if (name === 'pane_flow') {
+      const guard = args.view === undefined ? undefined : this.#view(args).view;
       const outcome = await this.#flow.run(args, signal, trace,
-        (tab, options, activeTrace) => this.#observe(tab, options, activeTrace));
+        (tab, options, activeTrace) => this.#observe(tab, options, activeTrace), guard);
       return this.#result(outcome, Boolean(outcome.error));
     }
     if (name === 'pane_read') return this.#read(args, trace);

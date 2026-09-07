@@ -1,0 +1,7 @@
+#!/opt/venv/bin/python
+"""Image-owned composition entrypoint, independent of the Hermes chat process."""
+import runpy
+import sys
+
+sys.path.insert(0, "/opt/hermes-bundle")
+runpy.run_module("workflow_runner.cli", run_name="__main__")

@@ -84,6 +84,11 @@ complete session. Compose starts the browser only after the display is healthy.
 An internal liveness watchdog exits a hung display sidecar; Docker health status
 alone would not restart it. Startup and periodic browser-level CDP checks reject
 software fallback, lost GPU sandbox or recorded GPU crashes without reading tabs.
+Failures now include a bounded `code=GPU_*` reason, distinguishing HTTP/CDP
+timeouts from renderer, sandbox, rasterization and recorded-crash failures. No
+page data or raw CDP error text is logged. The 2.5-second request deadlines and
+three-consecutive-failure watchdog policy remain unchanged; a timeout is not proof
+of a GPU crash, nor permission to ignore the readiness gate.
 Recreate both services together when changing the display container/IPC namespace;
 do not leave the browser attached to an abandoned display.
 

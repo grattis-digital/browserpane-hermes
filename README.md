@@ -138,6 +138,22 @@ toolset. Ask it, for example:
 
 See [Hermes setup, tool names, and existing-agent integration](docs/HERMES.md).
 
+For repeatable tasks, the optional [workflow-learning plugin](docs/WORKFLOW_LEARNING.md)
+records content-minimized operation evidence and helps Hermes author a parameterized
+skill. It is disabled by default; drafts are unverified guidance, not unattended
+automation or an approval system.
+The next, deliberately narrow [report-recipe pilot](docs/WORKFLOW_REPLAY.md) runs
+one explicitly reviewed export without intermediate model calls. It adds durable
+checkpoints and read-only reconciliation—not unattended authority or auto-repair.
+The optional [Hermes execution tool](docs/WORKFLOW_EXECUTION.md) adds discovery,
+run/status/cancel/reconcile for operator-registered executions and a warm MCP
+connection. It stays supervised and disabled by default. The
+[isolated Raspberry Pi pilot](docs/WORKFLOW_PI_QUALIFICATION.md) passed the repaired
+unpaced workflow gate, with a retained GPU-readiness warning and no production rollout.
+Optional [per-site pacing](docs/WORKFLOW_PACING.md) adds reviewed intervals, bounded
+jitter and a persistent cold/warm budget. It is off by default, including standard
+tests and benchmarks; it is not a bot-detection bypass and is locally qualified only.
+
 ## How it fits together
 
 ```text
