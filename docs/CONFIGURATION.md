@@ -30,6 +30,19 @@ original tool vocabulary on the same private endpoint. After a change, recreate
 the browser service and reconnect Hermes; retain all volumes. Existing custom
 tool allowlists/instructions may need adjustment and are never automatically
 overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
+Compact mode rejects explicit `new` while any tab exists: reuse the default and
+navigate in place. Existing human/site-created tabs are not automatically closed.
+Start large-page discovery with `pane_view {"capture":"outline"}`, then expand
+observed refs. Outline/subtree/full capture ceilings are 3/5/15 seconds (not added
+waits); target revalidation retains a 15-second ceiling. Input deadlines remain
+unchanged. Cached `state`/`cursor` projections avoid recapture, but cannot widen
+a captured scope. See [progressive capture](COMPACT_MCP.md#progressive-capture-for-large-pages).
+
+`npm ci` installs the pinned, hash-verified Playwright snapshot extension; Docker
+includes the same install hook. If installing with lifecycle scripts disabled,
+explicitly run `node scripts/playwright-patch/apply.mjs` before starting the server.
+`npm run check:playwright` checks all four patched files. Dependency drift requires
+requalification, not bypassing the hash check.
 
 `BPANE_MCP_TIMINGS=1` enables one content-free JSON timing record per compact MCP
 call in the browser container's bounded logs. Records contain phase durations,
@@ -46,8 +59,57 @@ or deduplicated, and corrupt session files are not repaired. Custom named Chromi
 profiles are not part of this single-profile startup contract. Explicit `--app=`
 startup retains its existing behavior without an additional positional URL.
 
+Workflow learning is a separate opt-in in **Hermes's existing config**, not a
+Compose environment flag. Enable `browserpane-workflows` and select the
+`workflow_learning` toolset only for intended channels; see the
+[recording controls, storage limits and accounting boundaries](WORKFLOW_LEARNING.md).
+Existing installations are not auto-enabled or migrated. The feature adds no
+listener and leaves the browser's six MCP tools unchanged.
+
+The separate [supervised recipe pilot](WORKFLOW_REPLAY.md) is an explicitly invoked
+`bpane-workflow` CLI, with private recipe/bindings, an exact MCP endpoint, shared
+download directory and `/opt/data/workflow-runs` journal. It needs matching images
+supporting optional `pane_flow.view`; the six tool names and unguarded callers
+remain compatible. No Compose flag, service, listener or automatic run is added.
+The independent `browserpane-replay` plugin / `workflow_execution` toolset adds
+one Hermes-local execution tool. It uses `mcp_servers.browserpane.url`, optional
+`plugins.entries.browserpane-replay.settings.downloads` (default `/shared/downloads`),
+and fixed private `workflow-runs` / `workflow-catalog` directories under the Hermes
+home. Follow the [review, registration and opt-in setup](WORKFLOW_EXECUTION.md);
+the catalog contains private parameter values, unlike the redacted recorder.
+
+Optional [workflow pacing](WORKFLOW_PACING.md) is selected per reviewed contract
+with `--pacing /opt/data/report-pacing.json`; the default is `--pacing off`.
+The warm tool inherits the registered policy, not ambient environment settings.
+An enabled execution creates a private `workflow-pacing` ledger beside the run
+journal directory (normally under `/opt/data`), shared across cold/warm restarts.
+No Compose flag, browser setting, listener or automatic test delay is introduced.
+
 For the separately opted-in V3D/X11 graphics configuration, see [GPU setup](GPU.md).
 The normal commands above do not enable GPU access.
+
+## Memory pressure and recovery
+
+The browser and display use Docker's `unless-stopped` restart policy. An individual
+renderer OOM can leave the container and browser-level health checks alive, so
+that policy alone is insufficient. On cgroup v2 the wrapper samples its own
+`memory.events` every five seconds. An OOM-kill counter change requests its normal
+graceful Chromium/profile shutdown and container exit, allowing Docker to restart
+the session. The baseline is captured before browser startup, and pre-existing
+counter history does not cause a permanent restart loop. Three consecutive
+counter-read failures also request recovery. Systems without readable cgroup v2
+memory events log that this additional watchdog is unavailable.
+
+Recovery never replays MCP requests or promises to retain unsaved forms/downloads.
+Repeated memory-heavy page loads can still cause repeated failures; stop the
+workload and inspect container/host memory rather than removing all limits.
+Increasing the container limit requires host headroom and a matching persistent
+Compose change. Keep browser, display, Hermes and host usage in the budget.
+
+Compact MCP already serializes tool calls and reuses the default tab. This is
+not whole-research-job isolation or a limit on post-navigation page activity.
+The [workload admission plan](MCP_WORKLOAD_ADMISSION_PLAN.md) specifies the next
+job-level queue, ownership and memory safeguards; it is not yet implemented.
 
 ## Managed ad blocking
 

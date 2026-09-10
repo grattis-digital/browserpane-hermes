@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) readonly uniform image2D frame;
+layout(set=0,binding=1,std430) writeonly buffer Raw { uint nv12[]; };
+layout(push_constant) uniform Params { uvec4 rect; uint stride; uint rows; } p;
+vec3 rgb(uint x,uint y) {
+    if (x>=p.rect.z || y>=p.rect.w) return vec3(0);
+    return imageLoad(frame,ivec2(p.rect.xy+uvec2(x,y))).rgb;
+}
+uint byte(float value) { return uint(clamp(round(value),0.0,255.0)); }
+uint luma(vec3 c) { return byte(16.0+dot(c,vec3(46.5594,156.6288,15.8118))); }
+uint chroma(vec3 c) {
+    uint u=byte(128.0+dot(c,vec3(-25.6642,-86.3358,112.0)));
+    uint v=byte(128.0+dot(c,vec3(112.0,-101.7303,-10.2697)));
+    return u|(v<<8);
+}
+void main() {
+    uint x=gl_GlobalInvocationID.x*4,y=gl_GlobalInvocationID.y*2;
+    if (x>=p.stride || y>=p.rows) return;
+    vec3 a=rgb(x,y),b=rgb(x+1,y),c=rgb(x+2,y),d=rgb(x+3,y);
+    vec3 e=rgb(x,y+1),f=rgb(x+1,y+1),g=rgb(x+2,y+1),h=rgb(x+3,y+1);
+    nv12[(y*p.stride+x)/4]=luma(a)|(luma(b)<<8)|(luma(c)<<16)|(luma(d)<<24);
+    nv12[((y+1)*p.stride+x)/4]=luma(e)|(luma(f)<<8)|(luma(g)<<16)|(luma(h)<<24);
+    nv12[(p.rows*p.stride+(y/2)*p.stride+x)/4]=chroma((a+b+e+f)*0.25)|(chroma((c+d+g+h)*0.25)<<16);
+}

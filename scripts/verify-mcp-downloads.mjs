@@ -13,6 +13,7 @@ const mode = process.env.BPANE_MCP_MODE ?? 'compact';
 assert(['compact', 'playwright'].includes(mode));
 const marker = `browserpane-download-check-${randomUUID()}`, filename = `${marker}.log`;
 const downloads = '/shared/downloads', artifacts = '/shared/mcp-artifacts';
+const startupUrl = `http://fixture:9130/${process.env.BPANE_RUNTIME_TEST_ID}#startup`;
 const client = new Client({ name: 'download-isolation-check', version: '2.0' });
 const transport = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8931/mcp'));
 
@@ -30,27 +31,36 @@ class DownloadDriver {
   }
   async open() {
     if (mode === 'playwright') return this.legacy(`async(page)=>{
-      const target=await page.context().newPage(); await target.goto(${JSON.stringify(this.url)}); await target.bringToFront();
+      const targets=page.context().pages().filter(p=>p.url()===${JSON.stringify(startupUrl)});
+      if(targets.length!==1)throw Error('One owned startup tab required');
+      await targets[0].goto(${JSON.stringify(this.url)}); await targets[0].bringToFront();
     }`);
-    const { lease } = await this.compact('pane_tabs'); this.lease = lease;
-    const result = await this.compact('pane_act', { lease, request: ++this.request,
-      steps: [{ op: 'new', url: this.url }], observe: 'full' });
-    assert.equal(result.completed, 1); this.tab = result.tab;
+    const { lease, tabs } = await this.compact('pane_tabs'); this.lease = lease;
+    const matches = tabs.filter(tab => tab.url === startupUrl);
+    assert.equal(matches.length, 1, 'One owned startup tab required');
+    this.tab = matches[0].tab;
+    // Both operations are standalone and require their own fresh view guard.
+    for (const step of [{ op: 'activate' }, { op: 'navigate', url: this.url }]) {
+      const view = await this.compact('pane_view', { tab: this.tab });
+      const result = await this.compact('pane_act', { lease, request: ++this.request,
+        tab: this.tab, view: view.view, steps: [step], observe: 'none' });
+      assert.equal(result.completed, 1); assert.equal(result.tab, this.tab);
+    }
   }
   async action(op, dy) {
     if (mode === 'playwright') return this.legacy(`async(page)=>{
       const target=page.context().pages().find(p=>p.url()===${JSON.stringify(this.url)});
       if(!target)throw Error('Own fixture missing');
-      ${op === 'close' ? 'await target.close();' : op === 'click'
+      ${op === 'restore' ? `await target.goto(${JSON.stringify(startupUrl)});` : op === 'click'
         ? "await target.getByRole('link',{name:'Download genuine log',exact:true}).click();"
         : `await target.getByRole('region',{name:'Scroll area',exact:true}).hover(); await target.mouse.wheel(0,${dy});`}
     }`);
     const view = await this.compact('pane_view', { tab: this.tab });
     const target = op === 'click' ? 'link "Download genuine log"' : 'region "Scroll area"';
     const matches = view.text.split('\n').filter(line => line.trimStart().startsWith(`- ${target} [`));
-    const ref = op === 'close' ? undefined : matches.length === 1 && matches[0].match(/\[ref=([a-zA-Z0-9]+)\]/)?.[1];
-    if (op !== 'close') assert(ref, `One exact observed ${target} ref is required`);
-    const step = op === 'close' ? { op } : { op, ref, ...(op === 'scroll' ? { dy } : {}) };
+    const ref = op === 'restore' ? undefined : matches.length === 1 && matches[0].match(/\[ref=([a-zA-Z0-9]+)\]/)?.[1];
+    if (op !== 'restore') assert(ref, `One exact observed ${target} ref is required`);
+    const step = op === 'restore' ? { op: 'navigate', url: startupUrl } : { op, ref, ...(op === 'scroll' ? { dy } : {}) };
     const result = await this.compact('pane_act', { lease: this.lease, request: ++this.request,
       tab: this.tab, view: view.view, steps: [step], observe: 'none' });
     assert.equal(result.completed, 1);
@@ -87,16 +97,20 @@ const fixture = createServer((request, response) => {
 });
 await new Promise((resolve, reject) => { fixture.once('error', reject); fixture.listen(0, '127.0.0.1', resolve); });
 const driver = new DownloadDriver(`http://127.0.0.1:${fixture.address().port}/${marker}`);
-let target, browser, originalPid, opened = false;
+let target, browser, originalPid, originalTabs, opened = false;
 const pid = async () => (await browser.send('SystemInfo.getProcessInfo')).processInfo.find(value => value.type === 'browser').id;
+const tabInventory = async () => (await RuntimeCdp.pages()).map(({ id, url }) => ({ id, url })).sort((a, b) => a.id.localeCompare(b.id));
+const sameTabIds = async () => assert.deepEqual((await tabInventory()).map(tab => tab.id), originalTabs.map(tab => tab.id), 'Download checks must not create or replace tabs');
 try {
   browser = await RuntimeCdp.browser(); originalPid = await pid();
+  originalTabs = await tabInventory();
   await client.connect(transport);
   const { tools } = await client.listTools();
   if (mode === 'compact') assert.deepEqual(tools.map(tool => tool.name).sort(), ['pane_act', 'pane_flow', 'pane_image', 'pane_read', 'pane_tabs', 'pane_view']);
   else assert(tools.some(tool => tool.name === 'browser_run_code'));
   const before = await inventory();
   await driver.open(); opened = true;
+  await sameTabIds();
   ({ page: target } = await RuntimeCdp.pageByUrl(driver.url));
   await driver.action('scroll', 900);
   await until(() => target.evaluate(() => document.querySelector('section').scrollTop > 0), 'MCP wheel did not scroll down');
@@ -114,14 +128,20 @@ try {
   await until(async () => (await readFile(join(downloads, filename), 'utf8').catch(() => '')) === marker, 'Genuine .log download was not forwarded');
   assert.equal(await target.evaluate(() => downloadCheck.click), true, 'Download requires genuine MCP browser input');
   const after = await inventory(); delete after[filename]; assert.deepEqual(after, before, 'Unexpected additional downloaded files');
+  await sameTabIds();
   assert.equal(await pid(), originalPid, 'MCP operations must reuse Chromium');
   console.log(JSON.stringify({ mode, mcpTools: tools.length, consoleIsolation: 'passed', scrollTop: 'passed',
     genuineLogDownload: 'passed', trustedWheelEvents: 2, browserPid: originalPid, testFilename: filename }));
 } finally {
-  try { if (opened) await driver.action('close'); }
+  try {
+    if (opened) {
+      await driver.action('restore');
+      assert.deepEqual(await tabInventory(), originalTabs, 'Restore every original tab identity and URL');
+    }
+  }
   finally {
     try {
-      target?.close(); // Only disconnect the page observer; MCP owns fixture-tab cleanup.
+      target?.close(); // Only disconnect the observer; MCP restores the borrowed fixture tab.
       await transport.terminateSession().catch(() => {}); await client.close();
       if (browser) assert.equal(await pid(), originalPid, 'MCP disconnect must not replace Chromium');
     } finally {

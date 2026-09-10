@@ -11,7 +11,7 @@ the paired build uses a reserved CacheMiss coordinate to request a full snapshot
 The original WebTransport, lossless tile, scroll-copy, H.264 and audio architecture
 remains; this is not a replacement streaming implementation.
 
-Reused without edits: bpane-protocol, Xorg dummy configuration, CSS extension,
+Reused without edits: Xorg dummy configuration, CSS extension,
 managed policies and Playwright MCP resolver. The host startup script additionally
 gets the private-listener patch. Tracked `runtime/host-runtime.env` retains the
 upstream capture/audio/codec values; single-browser display, startup URL and logging
@@ -43,8 +43,9 @@ temporarily changed window state. Its native tests use a scripted WebSocket peer
 it does not force maximization or change capture/transport protocols. Patch 0017
 keeps those window commands on browser-level CDP so the identifying tab can
 close without losing restoration. Patch 0018 finalizes a drawable canvas before
-mounting, using a fresh Canvas2D canvas when WebGL is rejected. Eighteen ordered
-patches now define the generated snapshot; see `docs/BACKPORTING.md`.
+mounting, using a fresh Canvas2D canvas when WebGL is rejected. The ordered
+series also contains opt-in GPU protocol/capture and paired video changes;
+see `docs/BACKPORTING.md` for the complete dependency map.
 
 Debian packaging includes a WirePlumber 0.4 override disabling its optional
 logind seat integration: there is no host system bus or Bluetooth device in
@@ -60,9 +61,26 @@ The compact MCP experiment adds original wrapper code under `server/compact/`.
 It directly pins `playwright-core@1.59.0-alpha-1771104257000` (Apache-2.0) and
 `@modelcontextprotocol/sdk@1.30.0` (MIT), while keeping
 `@playwright/mcp@0.0.68` selectable for compatibility. The private accessibility
-adapter uses the same pinned Playwright implementation, not copied vendor source.
-No new Chromium/CDP/native patch is added; the 18-patch rendering baseline stays
-unchanged. Requalify the private snapshot/ref adapter when updating Playwright.
+adapter uses the same pinned Playwright implementation. The scoped-observation
+follow-up applies an original four-file dependency extension from
+`scripts/playwright-patch/` during `npm ci`: client/server private snapshot options,
+protocol validation and the injected accessibility walker. Original version and
+SHA-256 preimages are verified; repeat installation verifies by exact reversal.
+This is separate from BrowserPane's ordered rendering patches and adds no
+Chromium/CDP/native patch. Preserve Playwright's Apache-2.0 notices. Requalify the
+private snapshot/ref adapter when updating Playwright; see
+[scope, limits and tests](docs/MCP_SCOPED_OBSERVATIONS.md).
+
+## Experimental Chromium source
+
+The later [Chromium source experiment](native/chromium-damage/README.md) is a
+separate, default-off dependency patch, not part of the compact MCP increment or
+the product image. It targets Chromium 152.0.7977.75 at
+`4999cc1efed37c4d91dc4ce6ec4b0a50e2a9a8cb`; original source, patch and overlay
+hashes are recorded in its manifest. Chromium's BSD-style license is retained
+in `native/chromium-damage/LICENSE.chromium`; the original standalone policy/test
+uses the scoped BSD-3-Clause `LICENSE.policy`. Root AGPL terms remain unchanged.
+The source patch is not a compiled/qualified browser or a new runtime version pin.
 
 ## Hermes integration
 

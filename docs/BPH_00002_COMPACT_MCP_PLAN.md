@@ -1,6 +1,6 @@
 # Compact MCP execution experiment
 
-Branch: `experiment/compact-mcp`, based on qualified bundle commit `4f406009`.
+Scope: the single-session bundle and compact MCP control.
 
 ## Objective and boundaries
 

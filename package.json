@@ -5,6 +5,8 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "scripts": {
+    "postinstall": "node scripts/playwright-patch/apply.mjs",
+    "check:playwright": "node scripts/playwright-patch/apply.mjs --check",
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
     "test:client": "node scripts/test-client.mjs",
@@ -13,8 +15,15 @@
     "test:scroll": "node scripts/check-scroll-integrity.mjs",
     "test:display": "node scripts/check-display-controls.mjs",
     "test:runtime": "node scripts/test-runtime.mjs",
-    "test:mcp": "node scripts/check-compact-engine.mjs",
+    "test:mcp": "node scripts/check-compact-engine.mjs && node scripts/check-click-completion.mjs",
     "bench:mcp": "node scripts/benchmark-mcp-baseline.mjs",
+    "bench:scoped": "node scripts/benchmark-scoped-mcp.mjs",
+    "bench:workflow": "node scripts/benchmark-workflow-learning.mjs",
+    "bench:replay": "node scripts/benchmark-workflow-replay.mjs",
+    "bench:warm": "node scripts/benchmark-workflow-warm.mjs",
+    "test:warm": "node scripts/check-workflow-warm.mjs",
+    "test:replay": "node scripts/check-workflow-replay.mjs",
+    "test:pacing": "node scripts/check-workflow-pacing.mjs",
     "start": "node server/main.mjs"
   },
   "dependencies": {

@@ -5,6 +5,11 @@ administration layer. It does not replace the transport with screenshots or VNC.
 The changes are recorded as ordered patches; [BACKPORTING.md](BACKPORTING.md)
 maps them to upstream files and recovery contracts.
 
+The current [whole-pipeline optimization plan](RENDER_PIPELINE_PLAN.md) prioritizes
+sharp low-latency updates, damage/cache/scroll reuse, minimal wire bytes and Pi
+resource use. Its real-viewer counter instrumentation separates cold/warm/recovery
+work; the experimental GPU driver's full-frame probe is not the application baseline.
+
 ## What changed
 
 | Area | Implementation | Purpose |
@@ -130,7 +135,7 @@ not whole-frame or Pi performance claims.
 
 ## GPU investigation is not the default configuration
 
-An isolated Pi rendering experiment used Xvnc/DRI3 and Mesa 25, without
+An isolated Pi rendering experiment used retired software-mirror display/DRI3 and Mesa 25, without
 BrowserPane capture or transport. Three runs per mode used 10-second phases
 after a 2-second warm-up. Measured rAF cadence improved from 39.3 to 59.9/s for
 scrolling and 39.7 to 58.6/s for canvas animation. DOM work was essentially

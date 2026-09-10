@@ -1,0 +1,171 @@
+diff --git a/code/web/bpane-client/js/__tests__/pointer-drag.test.ts b/code/web/bpane-client/js/__tests__/pointer-drag.test.ts
+new file mode 100644
+index 0000000..1fc72d4
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/pointer-drag.test.ts
+@@ -0,0 +1,60 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { PointerInputRuntime } from '../input/pointer-input-runtime.js';
++
++function pointer(target: EventTarget, type: string, x = 30, y = 40, id = 1): void {
++  const event = new Event(type, { bubbles: true, cancelable: true });
++  Object.defineProperties(event, { clientX: { value: x }, clientY: { value: y },
++    pointerId: { value: id }, button: { value: 0 } });
++  target.dispatchEvent(event);
++}
++
++function fixture() {
++  const canvas = document.createElement('canvas'); document.body.append(canvas);
++  canvas.getBoundingClientRect = () => ({ left: 10, top: 20, width: 100, height: 100 } as DOMRect);
++  canvas.setPointerCapture = vi.fn(); canvas.releasePointerCapture = vi.fn();
++  const buttons = vi.fn(), moves = vi.fn(), abort = new AbortController();
++  const runtime = new PointerInputRuntime({ canvas, drawCursor: vi.fn(),
++    getRemoteDims: () => ({ width: 1000, height: 1000 }),
++    sendMouseMove: moves, sendMouseButton: buttons, sendScroll: vi.fn(), now: () => 100 });
++  runtime.bind({ signal: abort.signal, focusKeyboardTarget: vi.fn() });
++  return { canvas, buttons, moves, abort, runtime };
++}
++
++afterEach(() => { document.body.innerHTML = ''; });
++
++describe('scrollbar drag lifetime', () => {
++  it('captures the pointer and releases an owned drag outside the canvas at clamped coordinates', () => {
++    const f = fixture();
++    pointer(f.canvas, 'pointerdown');
++    expect(f.canvas.setPointerCapture).toHaveBeenCalledWith(1);
++    pointer(document.body, 'pointermove', 400, 500);
++    pointer(document.body, 'pointerup', 400, 500);
++    expect(f.moves).toHaveBeenLastCalledWith(999, 999);
++    expect(f.buttons.mock.calls).toEqual([[0, true, 200, 200], [0, false, 999, 999]]);
++    pointer(f.canvas, 'lostpointercapture');
++    expect(f.buttons).toHaveBeenCalledTimes(2);
++    f.abort.abort();
++  });
++
++  it.each(['pointercancel', 'lostpointercapture', 'blur', 'abort', 'reset'])(
++    'releases exactly once on %s and never releases unrelated input', action => {
++      const f = fixture(); pointer(document.body, 'pointerup'); expect(f.buttons).not.toHaveBeenCalled();
++      pointer(f.canvas, 'pointerdown');
++      pointer(document.body, 'pointerup', 20, 20, 2); expect(f.buttons).toHaveBeenCalledTimes(1);
++      if (action === 'blur') window.dispatchEvent(new Event('blur'));
++      else if (action === 'abort') f.abort.abort();
++      else if (action === 'reset') f.runtime.reset();
++      else pointer(f.canvas, action);
++      expect(f.buttons.mock.calls).toEqual([[0, true, 200, 200], [0, false, 200, 200]]);
++      pointer(f.canvas, 'pointerup'); f.runtime.reset(); f.abort.abort();
++      expect(f.buttons.mock.calls).toEqual([[0, true, 200, 200], [0, false, 200, 200]]);
++    });
++
++  it('keeps document release fallback if native capture is unavailable', () => {
++    const f = fixture();
++    f.canvas.setPointerCapture = () => { throw new DOMException('No active pointer'); };
++    pointer(f.canvas, 'pointerdown'); pointer(document.body, 'pointerup', -100, -100);
++    expect(f.buttons.mock.calls).toEqual([[0, true, 200, 200], [0, false, 0, 0]]);
++    f.abort.abort();
++  });
++});
+diff --git a/code/web/bpane-client/js/input/pointer-input-runtime.ts b/code/web/bpane-client/js/input/pointer-input-runtime.ts
+index ced14ed..08b412f 100644
+--- a/code/web/bpane-client/js/input/pointer-input-runtime.ts
++++ b/code/web/bpane-client/js/input/pointer-input-runtime.ts
+@@ -28,6 +28,7 @@ export class PointerInputRuntime {
+ 
+   private lastMouseSendTime = 0;
+   private scrollState: ScrollState = createScrollState();
++  private drag: { id: number; button: number; x: number; y: number } | undefined;
+ 
+   constructor(input: PointerInputRuntimeInput) {
+     this.canvas = input.canvas;
+@@ -40,29 +41,40 @@ export class PointerInputRuntime {
+   }
+ 
+   bind(input: PointerInputBindingInput): void {
++    if (input.signal.aborted) return;
+     this.canvas.addEventListener('pointermove', (event: PointerEvent) => {
+-      const now = this.now();
+-      if (now - this.lastMouseSendTime < INPUT_THROTTLE_MS) {
+-        return;
+-      }
+-      this.lastMouseSendTime = now;
+-
+-      const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
+-      this.drawCursor(null, x, y);
+-      this.sendMouseMoveFn(x, y);
++      this.movePointer(event);
+     }, { signal: input.signal });
+ 
+     this.canvas.addEventListener('pointerdown', (event: PointerEvent) => {
+       event.preventDefault();
++      if (this.drag) return; // One owned pointer; unrelated touches cannot retarget a drag.
+       const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
++      this.drag = { id: event.pointerId, button: event.button, x, y };
+       this.sendMouseButtonFn(event.button, true, x, y);
++      try { this.canvas.setPointerCapture?.(event.pointerId); }
++      catch (error) { if (!(error instanceof DOMException)) throw error; }
+     }, { signal: input.signal });
+ 
+-    this.canvas.addEventListener('pointerup', (event: PointerEvent) => {
++    const pointerUp = (event: PointerEvent): void => {
++      if (!this.drag || event.pointerId !== this.drag.id) return;
+       event.preventDefault();
+-      const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
+-      this.sendMouseButtonFn(event.button, false, x, y);
+-    }, { signal: input.signal });
++      this.releaseDrag(this.resolveCanvasPoint(event.clientX, event.clientY));
++    };
++    this.canvas.addEventListener('pointerup', pointerUp, { signal: input.signal });
++    // Fallback for unavailable/lost native capture; observe only our active pointer.
++    const document = this.canvas.ownerDocument;
++    document.addEventListener('pointerup', pointerUp, { capture: true, signal: input.signal });
++    document.addEventListener('pointermove', event => {
++      if (this.drag && this.drag.id === event.pointerId && event.target !== this.canvas) this.movePointer(event);
++    }, { capture: true, signal: input.signal });
++    for (const type of ['pointercancel', 'lostpointercapture'] as const) {
++      this.canvas.addEventListener(type, event => {
++        if (this.drag?.id === event.pointerId) this.releaseDrag();
++      }, { signal: input.signal });
++    }
++    document.defaultView?.addEventListener('blur', () => this.releaseDrag(), { signal: input.signal });
++    input.signal.addEventListener('abort', () => this.releaseDrag(), { once: true });
+ 
+     this.canvas.addEventListener('wheel', (event: WheelEvent) => {
+       event.preventDefault();
+@@ -90,6 +102,7 @@ export class PointerInputRuntime {
+   }
+ 
+   reset(): void {
++    this.releaseDrag();
+     this.lastMouseSendTime = 0;
+     this.scrollState = createScrollState();
+   }
+@@ -100,8 +113,28 @@ export class PointerInputRuntime {
+     const scaleX = targetWidth / rect.width;
+     const scaleY = targetHeight / rect.height;
+     return {
+-      x: Math.round((clientX - rect.left) * scaleX),
+-      y: Math.round((clientY - rect.top) * scaleY),
++      x: Math.max(0, Math.min(targetWidth - 1, Math.round((clientX - rect.left) * scaleX))),
++      y: Math.max(0, Math.min(targetHeight - 1, Math.round((clientY - rect.top) * scaleY))),
+     };
+   }
++
++  private movePointer(event: PointerEvent): void {
++    if (this.drag && this.drag.id !== event.pointerId) return;
++    const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
++    if (this.drag) { this.drag.x = x; this.drag.y = y; }
++    const now = this.now();
++    if (now - this.lastMouseSendTime < INPUT_THROTTLE_MS) return;
++    this.lastMouseSendTime = now;
++    this.drawCursor(null, x, y);
++    this.sendMouseMoveFn(x, y);
++  }
++
++  private releaseDrag(point?: { x: number; y: number }): void {
++    const drag = this.drag;
++    if (!drag) return;
++    this.drag = undefined; // Clear before releasing capture; lostcapture may be synchronous.
++    this.sendMouseButtonFn(drag.button, false, point?.x ?? drag.x, point?.y ?? drag.y);
++    try { this.canvas.releasePointerCapture?.(drag.id); }
++    catch (error) { if (!(error instanceof DOMException)) throw error; }
++  }
+ }

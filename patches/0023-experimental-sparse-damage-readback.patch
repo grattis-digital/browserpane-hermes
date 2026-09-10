@@ -1,0 +1,1184 @@
+diff --git a/code/apps/bpane-host/src/capture/mod.rs b/code/apps/bpane-host/src/capture/mod.rs
+index 2436967..e15ad6d 100644
+--- a/code/apps/bpane-host/src/capture/mod.rs
++++ b/code/apps/bpane-host/src/capture/mod.rs
+@@ -1,4 +1,6 @@
+ pub mod ffmpeg;
++pub(crate) mod region;
++pub(crate) mod readback_timing;
+ pub mod x11;
+ 
+ /// A captured framebuffer.
+diff --git a/code/apps/bpane-host/src/capture/readback_timing.rs b/code/apps/bpane-host/src/capture/readback_timing.rs
+new file mode 100644
+index 0000000..b1b25fe
+--- /dev/null
++++ b/code/apps/bpane-host/src/capture/readback_timing.rs
+@@ -0,0 +1,29 @@
++//! Diagnostic-only clocks. X11 reply wait includes server work/synchronization;
++//! it is NOT a GPU timer. Copies count explicit bytes, not DRAM bus traffic.
++use std::time::Instant;
++
++#[derive(Default)]
++pub(crate) struct ReadbackTiming {
++    pub enabled: bool,
++    pub request_us: u64,
++    pub copy_us: u64,
++    pub copy_bytes: u64,
++    pub shm_requests: u64,
++    pub get_image_requests: u64,
++}
++
++impl ReadbackTiming {
++    pub fn start(&self) -> Option<Instant> {
++        self.enabled.then(Instant::now)
++    }
++    pub fn waited(&mut self, start: Option<Instant>) {
++        self.request_us += Self::elapsed(start);
++    }
++    pub fn copied(&mut self, start: Option<Instant>, bytes: usize) {
++        self.copy_us += Self::elapsed(start);
++        self.copy_bytes += bytes as u64;
++    }
++    pub fn elapsed(start: Option<Instant>) -> u64 {
++        start.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0)
++    }
++}
+diff --git a/code/apps/bpane-host/src/capture/region.rs b/code/apps/bpane-host/src/capture/region.rs
+new file mode 100644
+index 0000000..11201d6
+--- /dev/null
++++ b/code/apps/bpane-host/src/capture/region.rs
+@@ -0,0 +1,72 @@
++//! Validated packed-BGRA region operations. No allocation or borrowed SHM escapes.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct PixelRect {
++    x: u16,
++    y: u16,
++    w: u16,
++    h: u16,
++}
++
++impl PixelRect {
++    pub(crate) fn new(bounds: (u16, u16, u16, u16), size: (u16, u16)) -> Option<Self> {
++        let (x, y, w, h) = bounds;
++        (w > 0
++            && h > 0
++            && x <= i16::MAX as u16
++            && y <= i16::MAX as u16
++            && u32::from(x) + u32::from(w) <= u32::from(size.0)
++            && u32::from(y) + u32::from(h) <= u32::from(size.1))
++        .then_some(Self { x, y, w, h })
++    }
++
++    pub(crate) fn bounds(self) -> (u16, u16, u16, u16) {
++        (self.x, self.y, self.w, self.h)
++    }
++    pub(crate) fn pixels(self) -> u64 {
++        u64::from(self.w) * u64::from(self.h)
++    }
++
++    pub(crate) fn frame_bytes(size: (u16, u16)) -> anyhow::Result<usize> {
++        anyhow::ensure!(size.0 > 0 && size.1 > 0, "Empty capture geometry");
++        usize::from(size.0)
++            .checked_mul(usize::from(size.1))
++            .and_then(|n| n.checked_mul(4))
++            .ok_or_else(|| anyhow::anyhow!("Capture geometry overflow"))
++    }
++
++    pub(crate) fn copy(
++        self,
++        size: (u16, u16),
++        source: &[u8],
++        target: &mut [u8],
++        packed: bool,
++    ) -> anyhow::Result<u64> {
++        anyhow::ensure!(
++            Self::new(self.bounds(), size).is_some(),
++            "Region outside capture geometry"
++        );
++        let frame_bytes = Self::frame_bytes(size)?;
++        let source_bytes = if packed {
++            self.pixels() as usize * 4
++        } else {
++            frame_bytes
++        };
++        anyhow::ensure!(
++            target.len() == frame_bytes && source.len() == source_bytes,
++            "Invalid capture storage length"
++        );
++        let stride = usize::from(size.0) * 4;
++        let row_bytes = usize::from(self.w) * 4;
++        for row in 0..usize::from(self.h) {
++            let target_start = (usize::from(self.y) + row) * stride + usize::from(self.x) * 4;
++            let source_start = if packed {
++                row * row_bytes
++            } else {
++                target_start
++            };
++            target[target_start..target_start + row_bytes]
++                .copy_from_slice(&source[source_start..source_start + row_bytes]);
++        }
++        Ok(self.pixels() * 4)
++    }
++}
+diff --git a/code/apps/bpane-host/src/capture/x11.rs b/code/apps/bpane-host/src/capture/x11.rs
+index 9ffcccc..cbaad30 100644
+--- a/code/apps/bpane-host/src/capture/x11.rs
++++ b/code/apps/bpane-host/src/capture/x11.rs
+@@ -1,4 +1,5 @@
+ use super::{CaptureBackend, CapturedFrame};
++mod regional;
+ 
+ #[cfg(target_os = "linux")]
+ use std::time::{SystemTime, UNIX_EPOCH};
+@@ -541,77 +542,7 @@ impl X11CaptureBackend {
+         h: u16,
+         data: &mut Vec<u8>,
+     ) -> anyhow::Result<()> {
+-        if let Some(ref shm_seg) = self.shm {
+-            // SHM requires segment large enough; if region fits, use it
+-            let region_bytes = (w as usize) * (h as usize) * 4;
+-            if region_bytes <= shm_seg.size {
+-                let reply = self
+-                    .conn
+-                    .shm_get_image(
+-                        self.root,
+-                        x as i16,
+-                        y as i16,
+-                        w,
+-                        h,
+-                        !0,
+-                        ImageFormat::Z_PIXMAP.into(),
+-                        shm_seg.seg_id,
+-                        0,
+-                    )?
+-                    .reply();
+-                match reply {
+-                    Ok(_) => {
+-                        data.clear();
+-                        data.extend_from_slice(&shm_seg.as_slice()[..region_bytes]);
+-                    }
+-                    Err(e) => {
+-                        tracing::warn!("SHM region capture failed, fallback: {e}");
+-                        let reply = self
+-                            .conn
+-                            .get_image(
+-                                ImageFormat::Z_PIXMAP,
+-                                self.root,
+-                                x as i16,
+-                                y as i16,
+-                                w,
+-                                h,
+-                                !0,
+-                            )?
+-                            .reply()?;
+-                        *data = reply.data;
+-                    }
+-                }
+-            } else {
+-                let reply = self
+-                    .conn
+-                    .get_image(
+-                        ImageFormat::Z_PIXMAP,
+-                        self.root,
+-                        x as i16,
+-                        y as i16,
+-                        w,
+-                        h,
+-                        !0,
+-                    )?
+-                    .reply()?;
+-                *data = reply.data;
+-            }
+-        } else {
+-            let reply = self
+-                .conn
+-                .get_image(
+-                    ImageFormat::Z_PIXMAP,
+-                    self.root,
+-                    x as i16,
+-                    y as i16,
+-                    w,
+-                    h,
+-                    !0,
+-                )?
+-                .reply()?;
+-            *data = reply.data;
+-        }
+-        Ok(())
++        self.capture_region_raw_into_timed((x, y, w, h), data, &mut Default::default())
+     }
+ }
+ 
+@@ -769,6 +700,8 @@ pub struct DamageTracker {
+     last_small_damage_sent: Option<std::time::Instant>,
+     /// Lossless tiles must never suppress the last update of a small control.
+     preserve_all_damage: bool,
++    bounds_untrusted: bool,
++    damage_geometry: (u16, u16),
+ }
+ 
+ /// A damage rectangle reported by XDamage.
+@@ -823,6 +756,7 @@ impl DamageTracker {
+                 .and_then(|v| v.parse().ok())
+                 .unwrap_or(8)
+         });
++        let damage_geometry = (screen.width_in_pixels, screen.height_in_pixels);
+         let input_bypass_ms = std::env::var("BPANE_DAMAGE_INPUT_BYPASS_MS")
+             .ok()
+             .and_then(|v| v.parse().ok())
+@@ -867,6 +801,8 @@ impl DamageTracker {
+                     consecutive_small_damage: 0,
+                     last_small_damage_sent: None,
+                     preserve_all_damage: false,
++                    bounds_untrusted: true,
++                    damage_geometry,
+                 }))
+             }
+             Err(e) => {
+@@ -1010,6 +946,9 @@ impl DamageTracker {
+             match self.conn.poll_for_event() {
+                 Ok(Some(event)) => {
+                     if let x11rb::protocol::Event::DamageNotify(notify) = event {
++                        let geometry = (notify.geometry.width, notify.geometry.height);
++                        if geometry != self.damage_geometry { self.bounds_untrusted = true; }
++                        self.damage_geometry = geometry;
+                         if !self.dirty {
+                             self.first_damage_at = Some(std::time::Instant::now());
+                         }
+@@ -1026,6 +965,7 @@ impl DamageTracker {
+                 Err(e) => {
+                     tracing::warn!("DamageTracker: error polling events: {e}");
+                     self.dirty = true;
++                    self.bounds_untrusted = true;
+                     break;
+                 }
+             }
+@@ -1068,7 +1008,8 @@ impl DamageTracker {
+             .and_then(|cookie| cookie.check().ok())
+             .is_some();
+         self.drain_events();
+-        let bounds = self.damage_bounding_box();
++        let bounds = if self.bounds_untrusted { None } else { self.damage_bounding_box() };
++        self.bounds_untrusted = false;
+         self.dirty = false;
+         self.first_damage_at = None;
+         self.damage_rects.clear();
+@@ -1080,11 +1021,18 @@ impl DamageTracker {
+     }
+ 
+     pub fn force_refresh(&mut self) {
++        self.bounds_untrusted = true;
+         self.dirty = true;
+         self.first_damage_at = Some(std::time::Instant::now());
+         self.damage_rects.clear();
+     }
+ 
++    /// No regional readback/dirty filtering against a different root geometry.
++    pub fn begin_capture_for_size(&mut self, width: u16, height: u16) -> Option<(u16, u16, u16, u16)> {
++        let bounds = self.begin_capture();
++        (self.damage_geometry == (width, height)).then_some(bounds).flatten()
++    }
++
+     fn has_recent_input_activity(&self) -> bool {
+         let Some(activity_ms) = &self.input_activity_ms else {
+             return false;
+@@ -1306,6 +1254,7 @@ pub struct DamageRect {
+ 
+ #[cfg(not(target_os = "linux"))]
+ impl DamageTracker {
++    pub fn begin_capture_for_size(&mut self, _width: u16, _height: u16) -> Option<(u16, u16, u16, u16)> { None }
+     pub fn for_tile_capture(
+         _display: &str,
+         _input_activity_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+diff --git a/code/apps/bpane-host/src/capture/x11/regional.rs b/code/apps/bpane-host/src/capture/x11/regional.rs
+new file mode 100644
+index 0000000..8476abd
+--- /dev/null
++++ b/code/apps/bpane-host/src/capture/x11/regional.rs
+@@ -0,0 +1,176 @@
++//! One fenced X11 read shared by packed/full and strided/regional consumers.
++use super::X11CaptureBackend;
++use crate::capture::{readback_timing::ReadbackTiming, region::PixelRect};
++
++#[cfg(target_os = "linux")]
++enum Pixels<'a> {
++    Shared(&'a [u8]),
++    Owned(Vec<u8>),
++}
++
++#[cfg(all(test, target_os = "linux"))]
++#[path = "regional_tests.rs"]
++mod tests;
++
++impl X11CaptureBackend {
++    #[cfg(target_os = "linux")]
++    fn read_pixels(
++        &self,
++        bounds: (u16, u16, u16, u16),
++        timing: &mut ReadbackTiming,
++        store: impl FnOnce(Pixels<'_>, &mut ReadbackTiming) -> anyhow::Result<()>,
++    ) -> anyhow::Result<()> {
++        use x11rb::connection::Connection;
++        use x11rb::protocol::shm::ConnectionExt as _;
++        use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
++        let (x, y, w, h) = bounds;
++        anyhow::ensure!(
++            x <= i16::MAX as u16 && y <= i16::MAX as u16,
++            "Invalid X11 capture origin"
++        );
++        let bytes = PixelRect::frame_bytes((w, h))?;
++        let setup = self.conn.setup();
++        let depth = setup
++            .roots
++            .iter()
++            .find(|s| s.root == self.root)
++            .map(|s| s.root_depth);
++        anyhow::ensure!(
++            setup
++                .pixmap_formats
++                .iter()
++                .any(|f| Some(f.depth) == depth && f.bits_per_pixel == 32 && f.scanline_pad == 32),
++            "Readback requires packed 32-bit pixels"
++        );
++        if let Some(shm) = self.shm.as_ref().filter(|shm| bytes <= shm.size) {
++            let start = timing.start();
++            timing.shm_requests += 1;
++            let reply = self
++                .conn
++                .shm_get_image(
++                    self.root,
++                    x as i16,
++                    y as i16,
++                    w,
++                    h,
++                    !0,
++                    ImageFormat::Z_PIXMAP.into(),
++                    shm.seg_id,
++                    0,
++                )?
++                .reply();
++            timing.waited(start);
++            match reply {
++                Ok(reply) => {
++                    anyhow::ensure!(
++                        reply.size as usize == bytes && Some(reply.depth) == depth,
++                        "Unexpected SHM pixel format/size"
++                    );
++                    // Reply completion fences the server write. The consumer must
++                    // copy before the next request, never retain the borrowed SHM.
++                    return store(Pixels::Shared(&shm.as_slice()[..bytes]), timing);
++                }
++                Err(error) => tracing::warn!(%error, "SHM capture failed; trying GetImage"),
++            }
++        }
++        let start = timing.start();
++        timing.get_image_requests += 1;
++        let reply = self
++            .conn
++            .get_image(
++                ImageFormat::Z_PIXMAP,
++                self.root,
++                x as i16,
++                y as i16,
++                w,
++                h,
++                !0,
++            )?
++            .reply();
++        timing.waited(start);
++        let reply = reply?;
++        anyhow::ensure!(
++            Some(reply.depth) == depth && reply.data.len() == bytes,
++            "Unexpected GetImage pixel format/size"
++        );
++        store(Pixels::Owned(reply.data), timing)
++    }
++
++    #[cfg(target_os = "linux")]
++    pub(crate) fn capture_region_raw_into_timed(
++        &mut self,
++        bounds: (u16, u16, u16, u16),
++        data: &mut Vec<u8>,
++        timing: &mut ReadbackTiming,
++    ) -> anyhow::Result<()> {
++        self.read_pixels(bounds, timing, |pixels, timing| {
++            match pixels {
++                Pixels::Shared(bytes) => {
++                    let start = timing.start();
++                    data.clear();
++                    data.extend_from_slice(bytes);
++                    timing.copied(start, bytes.len());
++                }
++                // Preserve the existing GetImage allocation's ownership; no extra copy.
++                Pixels::Owned(bytes) => *data = bytes,
++            }
++            Ok(())
++        })
++    }
++
++    #[cfg(target_os = "linux")]
++    pub(crate) fn capture_into_frame_timed(
++        &mut self,
++        region: PixelRect,
++        size: (u16, u16),
++        frame: &mut [u8],
++        timing: &mut ReadbackTiming,
++    ) -> anyhow::Result<()> {
++        anyhow::ensure!(
++            PixelRect::new(region.bounds(), size).is_some()
++                && frame.len() == PixelRect::frame_bytes(size)?,
++            "Invalid regional destination"
++        );
++        self.read_pixels(region.bounds(), timing, |pixels, timing| {
++            let bytes = match &pixels {
++                Pixels::Shared(bytes) => *bytes,
++                Pixels::Owned(bytes) => bytes.as_slice(),
++            };
++            let start = timing.start();
++            region.copy(size, bytes, frame, true)?;
++            timing.copied(start, bytes.len());
++            Ok(())
++        })
++    }
++
++    #[cfg(not(target_os = "linux"))]
++    pub(crate) fn capture_region_raw_into_timed(
++        &mut self,
++        _bounds: (u16, u16, u16, u16),
++        _data: &mut Vec<u8>,
++        _timing: &mut ReadbackTiming,
++    ) -> anyhow::Result<()> {
++        anyhow::bail!("X11 capture not available on this platform")
++    }
++
++    #[cfg(not(target_os = "linux"))]
++    pub(crate) fn capture_into_frame_timed(
++        &mut self,
++        _region: PixelRect,
++        _size: (u16, u16),
++        _frame: &mut [u8],
++        _timing: &mut ReadbackTiming,
++    ) -> anyhow::Result<()> {
++        anyhow::bail!("X11 capture not available on this platform")
++    }
++
++    #[cfg(test)]
++    pub(crate) fn capture_into_frame(
++        &mut self,
++        region: PixelRect,
++        size: (u16, u16),
++        frame: &mut [u8],
++    ) -> anyhow::Result<()> {
++        self.capture_into_frame_timed(region, size, frame, &mut Default::default())
++    }
++}
+diff --git a/code/apps/bpane-host/src/capture/x11/regional_tests.rs b/code/apps/bpane-host/src/capture/x11/regional_tests.rs
+new file mode 100644
+index 0000000..ad71022
+--- /dev/null
++++ b/code/apps/bpane-host/src/capture/x11/regional_tests.rs
+@@ -0,0 +1,44 @@
++use super::*;
++
++#[test]
++#[ignore = "requires disposable X11 display with MIT-SHM"]
++fn regional_and_packed_reads_account_for_shm_and_getimage_without_extra_owned_copy() {
++    let display = std::env::var("DISPLAY").unwrap();
++    let size = (128, 96);
++    let mut cap = X11CaptureBackend::new(&display, size.0.into(), size.1.into()).unwrap();
++    assert!(cap.shm.is_some());
++    let region = PixelRect::new((3, 7, 7, 9), size).unwrap();
++    for shared in [true, false] {
++        if !shared {
++            cap.shm = None;
++        }
++        let mut full = Vec::new();
++        let mut timing = ReadbackTiming::default();
++        cap.capture_region_raw_into_timed((0, 0, size.0, size.1), &mut full, &mut timing)
++            .unwrap();
++        assert_eq!(timing.shm_requests, u64::from(shared));
++        assert_eq!(timing.get_image_requests, u64::from(!shared));
++        assert_eq!(
++            timing.copy_bytes,
++            if shared { full.len() as u64 } else { 0 }
++        );
++        assert_eq!(
++            (timing.request_us, timing.copy_us),
++            (0, 0),
++            "disabled clocks stay off"
++        );
++        let mut actual = vec![79; full.len()];
++        let mut expected = actual.clone();
++        region.copy(size, &full, &mut expected, false).unwrap();
++        let mut timing = ReadbackTiming {
++            enabled: true,
++            ..Default::default()
++        };
++        cap.capture_into_frame_timed(region, size, &mut actual, &mut timing)
++            .unwrap();
++        assert_eq!(actual, expected, "odd-width rows must match packed capture");
++        assert_eq!(timing.shm_requests, u64::from(shared));
++        assert_eq!(timing.get_image_requests, u64::from(!shared));
++        assert_eq!(timing.copy_bytes, 7 * 9 * 4);
++    }
++}
+diff --git a/code/apps/bpane-host/src/config/mod.rs b/code/apps/bpane-host/src/config/mod.rs
+index 3f5079d..2bb9eaf 100644
+--- a/code/apps/bpane-host/src/config/mod.rs
++++ b/code/apps/bpane-host/src/config/mod.rs
+@@ -185,6 +185,7 @@ pub struct TileCaptureConfig {
+     pub cdp_video_tile_margin: u16,
+     pub scroll_thin_mode_enabled: bool,
+     pub video_classification_enabled: bool,
++    pub damage_readback: bool,
+ }
+ 
+ impl TileCaptureConfig {
+@@ -232,6 +233,7 @@ impl TileCaptureConfig {
+             cdp_video_tile_margin: env_u16_clamped("BPANE_CDP_VIDEO_TILE_MARGIN", 1, 0, 3),
+             scroll_thin_mode_enabled: env_bool("BPANE_SCROLL_THIN_MODE", false),
+             video_classification_enabled: !matches!(h264_mode, H264Mode::Off),
++            damage_readback: env_bool("BPANE_EXPERIMENTAL_DAMAGE_READBACK", false),
+         }
+     }
+ }
+diff --git a/code/apps/bpane-host/src/config/tests.rs b/code/apps/bpane-host/src/config/tests.rs
+index 5cd4bee..040c48e 100644
+--- a/code/apps/bpane-host/src/config/tests.rs
++++ b/code/apps/bpane-host/src/config/tests.rs
+@@ -194,6 +194,17 @@ fn tile_capture_interval_is_configurable_and_bounded() {
+     }
+ }
+ 
++#[test]
++fn experimental_damage_readback_is_opt_in_and_invalid_values_stay_off() {
++    let _environment = EnvironmentFixture::capture(&["BPANE_EXPERIMENTAL_DAMAGE_READBACK"]);
++    std::env::remove_var("BPANE_EXPERIMENTAL_DAMAGE_READBACK");
++    assert!(!TileCaptureConfig::from_env().damage_readback);
++    for (value, enabled) in [("1", true), ("0", false), ("invalid", false)] {
++        std::env::set_var("BPANE_EXPERIMENTAL_DAMAGE_READBACK", value);
++        assert_eq!(TileCaptureConfig::from_env().damage_readback, enabled);
++    }
++}
++
+ #[test]
+ fn scroll_copy_quantum_defaults_to_half_tile_without_changing_wheel_input() {
+     let _environment = EnvironmentFixture::capture(&[
+diff --git a/code/apps/bpane-host/src/tile_loop/mod.rs b/code/apps/bpane-host/src/tile_loop/mod.rs
+index 6adb6e1..4d9cde8 100644
+--- a/code/apps/bpane-host/src/tile_loop/mod.rs
++++ b/code/apps/bpane-host/src/tile_loop/mod.rs
+@@ -13,6 +13,7 @@ mod emit;
+ pub(crate) mod frame_types;
+ mod h264_region;
+ mod resize;
++mod readback;
+ mod run;
+ mod scroll_emit;
+ mod scroll_partition;
+@@ -67,6 +68,7 @@ pub struct TileCaptureThread {
+     pub(crate) screen_h: u16,
+     pub(crate) frame_damage_bounds: Option<(u16, u16, u16, u16)>,
+     pub(crate) capture_scratch: Vec<u8>,
++    readback: readback::DamageReadback,
+ 
+     // ── Grid & emitter ───────────────────────────────────────────────
+     pub(crate) grid: tiles::TileGrid,
+@@ -180,6 +182,7 @@ impl TileCaptureThread {
+             cdp_video_tile_margin,
+             scroll_thin_mode_enabled,
+             video_classification_enabled,
++            damage_readback,
+             ..
+         } = config;
+ 
+@@ -237,6 +240,7 @@ impl TileCaptureThread {
+             screen_h,
+             frame_damage_bounds: None,
+             capture_scratch: Vec::new(),
++            readback: readback::DamageReadback::new(damage_readback),
+             grid,
+             emitter,
+             full_emit_coords,
+diff --git a/code/apps/bpane-host/src/tile_loop/readback.rs b/code/apps/bpane-host/src/tile_loop/readback.rs
+new file mode 100644
+index 0000000..d48af83
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/readback.rs
+@@ -0,0 +1,123 @@
++//! Opt-in regional readback, retaining TWO complete owned BGRA frames.
++//! After a regional capture the other buffer differs only inside that region.
++//! Repair it from the immutable previous frame before reading new pixels. A full
++//! capture can include later/unreported damage, so its difference is UNKNOWN;
++//! the next regional frame seeds once from the full previous image. Never assume
++//! full readback changed only the acknowledged damage bounds.
++use crate::capture::region::PixelRect;
++
++#[derive(Default, Debug)]
++pub(super) struct ReadbackStats {
++    pub regional: bool,
++    pub fallback: bool,
++    /// Requested pixels, including a failed region attempt before full fallback.
++    pub requested_pixels: u64,
++    /// Buffer-history repair copies, separate from X11 readback/scatter copies.
++    pub repair_bytes: u64,
++    pub repair_us: u64,
++}
++
++pub(super) struct DamageReadback {
++    enabled: bool,
++    size: Option<(u16, u16)>,
++    changed: Option<PixelRect>,
++    timings: bool,
++}
++
++impl DamageReadback {
++    pub fn new(enabled: bool) -> Self {
++        Self {
++            enabled,
++            size: None,
++            changed: None,
++            timings: false,
++        }
++    }
++    pub fn set_timings(&mut self, enabled: bool) {
++        self.timings = enabled;
++    }
++    pub fn invalidate(&mut self) {
++        self.size = None;
++        self.changed = None;
++    }
++
++    fn region(
++        &self,
++        size: (u16, u16),
++        damage: Option<(u16, u16, u16, u16)>,
++        force: bool,
++        previous: Option<&[u8]>,
++    ) -> Option<PixelRect> {
++        if !self.enabled
++            || force
++            || self.size != Some(size)
++            || previous?.len() != PixelRect::frame_bytes(size).ok()?
++        {
++            return None;
++        }
++        let region = PixelRect::new(damage?, size)?;
++        // Conservative initial experiment: one bounding rectangle, <= 1/8 of
++        // the root. Scroll/full repaint stays on the established full path.
++        (region.pixels() * 8 <= u64::from(size.0) * u64::from(size.1)).then_some(region)
++    }
++
++    pub fn capture(
++        &mut self,
++        size: (u16, u16),
++        damage: Option<(u16, u16, u16, u16)>,
++        force: bool,
++        previous: Option<&[u8]>,
++        current: &mut Vec<u8>,
++        mut read: impl FnMut(Option<PixelRect>, &mut Vec<u8>) -> anyhow::Result<()>,
++    ) -> anyhow::Result<ReadbackStats> {
++        let selected = self.region(size, damage, force, previous);
++        let prior_change = self.changed;
++        self.invalidate(); // Any error, including partial destination mutation, invalidates history.
++        let mut stats = ReadbackStats::default();
++        if let (Some(region), Some(previous)) = (selected, previous) {
++            let repair_start = self.timings.then(std::time::Instant::now);
++            stats.repair_bytes = match (current.len() == previous.len(), prior_change) {
++                (true, Some(rect)) => rect.copy(size, previous, current, false)?,
++                _ => {
++                    current.clear();
++                    current.extend_from_slice(previous);
++                    previous.len() as u64
++                }
++            };
++            stats.repair_us =
++                crate::capture::readback_timing::ReadbackTiming::elapsed(repair_start);
++            stats.requested_pixels = region.pixels();
++            match read(Some(region), current) {
++                Ok(()) => {
++                    self.changed = Some(region);
++                    stats.regional = true;
++                }
++                Err(error) => {
++                    // A failed capability/read must not repeatedly seed/copy a
++                    // full frame while pretending to be a cheap regional path.
++                    self.enabled = false;
++                    stats.fallback = true;
++                    tracing::warn!(%error, "experimental regional readback disabled for this session");
++                }
++            }
++        }
++        if !stats.regional {
++            stats.requested_pixels += u64::from(size.0) * u64::from(size.1);
++            read(None, current)?;
++        }
++        anyhow::ensure!(
++            current.len() == PixelRect::frame_bytes(size)?,
++            "Incomplete capture frame"
++        );
++        self.size = Some(size);
++        Ok(stats)
++    }
++}
++
++#[cfg(test)]
++#[path = "readback_tests.rs"]
++mod tests;
++
++#[cfg(all(test, target_os = "linux"))]
++#[path = "readback_x11_tests.rs"]
++mod x11_tests;
+diff --git a/code/apps/bpane-host/src/tile_loop/readback_tests.rs b/code/apps/bpane-host/src/tile_loop/readback_tests.rs
+new file mode 100644
+index 0000000..e12f5c4
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/readback_tests.rs
+@@ -0,0 +1,219 @@
++use super::*;
++
++const SIZE: (u16, u16) = (128, 96);
++const SMALL: (u16, u16, u16, u16) = (3, 5, 7, 9);
++
++fn read(
++    truth: &[u8],
++    size: (u16, u16),
++    region: Option<PixelRect>,
++    target: &mut Vec<u8>,
++) -> anyhow::Result<()> {
++    if let Some(region) = region {
++        region.copy(size, truth, target, false)?;
++    } else {
++        target.clear();
++        target.extend_from_slice(truth);
++    }
++    Ok(())
++}
++
++#[test]
++fn rotated_buffers_preserve_disjoint_and_overlapping_history_without_full_copies() {
++    let mut capture = DamageReadback::new(true);
++    let mut previous: Option<Vec<u8>> = None;
++    let mut scratch = Vec::new();
++    let mut truth = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++    let mut previous_area = 0;
++    for n in 0..1000u16 {
++        let bounds = (
++            n.wrapping_mul(17) % 110,
++            n.wrapping_mul(31) % 76,
++            7 + n % 11,
++            9 + n % 11,
++        );
++        let region = PixelRect::new(bounds, SIZE).unwrap();
++        let packed = vec![(n % 251) as u8; region.pixels() as usize * 4];
++        region.copy(SIZE, &packed, &mut truth, true).unwrap();
++        let before = previous.clone();
++        let stats = capture
++            .capture(
++                SIZE,
++                Some(bounds),
++                false,
++                previous.as_deref(),
++                &mut scratch,
++                |r, dst| read(&truth, SIZE, r, dst),
++            )
++            .unwrap();
++        assert_eq!(scratch, truth, "frame {n}");
++        assert_eq!(previous, before, "previous frame must remain immutable");
++        if n > 0 {
++            assert!(stats.regional);
++            assert_eq!(stats.requested_pixels, region.pixels());
++        }
++        if n > 1 {
++            assert_eq!(stats.repair_bytes, previous_area * 4);
++        }
++        previous_area = region.pixels();
++        if let Some(old) = previous.replace(std::mem::take(&mut scratch)) {
++            scratch = old;
++        }
++    }
++}
++
++#[test]
++fn full_capture_cannot_assume_only_acknowledged_bounds_changed() {
++    let mut capture = DamageReadback::new(true);
++    let mut scratch = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++    let previous = scratch.clone();
++    capture
++        .capture(
++            SIZE,
++            Some(SMALL),
++            true,
++            Some(&previous),
++            &mut scratch,
++            |_, frame| {
++                frame.fill(81);
++                Ok(())
++            },
++        )
++        .unwrap();
++    let previous = scratch.clone();
++    scratch.fill(0);
++    let stats = capture
++        .capture(
++            SIZE,
++            Some(SMALL),
++            false,
++            Some(&previous),
++            &mut scratch,
++            |region, frame| {
++                region.unwrap().copy(SIZE, &previous, frame, false)?;
++                Ok(())
++            },
++        )
++        .unwrap();
++    assert!(stats.regional);
++    assert_eq!(
++        stats.repair_bytes,
++        previous.len() as u64,
++        "one-time epoch seed must be counted"
++    );
++    assert_eq!(
++        scratch, previous,
++        "extra changes from full capture must survive rotation"
++    );
++}
++
++#[test]
++fn disabled_unknown_broad_invalid_or_forced_damage_uses_full_capture() {
++    for (enabled, damage, force) in [
++        (false, Some(SMALL), false),
++        (true, None, false),
++        (true, Some((0, 0, 128, 96)), false),
++        (true, Some((127, 0, 2, 2)), false),
++        (true, Some((0, 0, 0, 2)), false),
++        (true, Some(SMALL), true),
++    ] {
++        let mut capture = DamageReadback::new(enabled);
++        capture.size = Some(SIZE);
++        let previous = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++        let mut scratch = previous.clone();
++        let stats = capture
++            .capture(
++                SIZE,
++                damage,
++                force,
++                Some(&previous),
++                &mut scratch,
++                |r, _| {
++                    assert!(r.is_none());
++                    Ok(())
++                },
++            )
++            .unwrap();
++        assert!(!stats.regional);
++        assert_eq!(stats.repair_bytes, 0);
++    }
++}
++
++#[test]
++fn failed_partial_write_recaptures_full_and_disables_region_until_new_session() {
++    let mut capture = DamageReadback::new(true);
++    capture.size = Some(SIZE);
++    let previous = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++    let mut scratch = previous.clone();
++    let stats = capture
++        .capture(
++            SIZE,
++            Some(SMALL),
++            false,
++            Some(&previous),
++            &mut scratch,
++            |r, frame| {
++                frame.fill(7);
++                if r.is_some() {
++                    anyhow::bail!("injected partial mutation then error");
++                }
++                frame.fill(9);
++                Ok(())
++            },
++        )
++        .unwrap();
++    assert!(stats.fallback && !stats.regional);
++    assert!(scratch.iter().all(|b| *b == 9));
++    assert_eq!(
++        stats.requested_pixels,
++        u64::from(SIZE.0) * u64::from(SIZE.1) + 63
++    );
++    capture
++        .capture(
++            SIZE,
++            Some(SMALL),
++            false,
++            Some(&previous),
++            &mut scratch,
++            |r, _| {
++                assert!(r.is_none());
++                Ok(())
++            },
++        )
++        .unwrap();
++}
++
++#[test]
++fn failed_full_capture_resize_and_missing_previous_invalidate_region_history() {
++    let mut capture = DamageReadback::new(true);
++    let mut scratch = Vec::new();
++    assert!(capture
++        .capture(SIZE, None, false, None, &mut scratch, |_, _| anyhow::bail!(
++            "failure"
++        ))
++        .is_err());
++    assert_eq!(capture.size, None);
++    capture.size = Some(SIZE);
++    assert!(capture
++        .region((96, 128), Some(SMALL), false, Some(&vec![0; 128 * 96 * 4]))
++        .is_none());
++    assert!(capture.region(SIZE, Some(SMALL), false, None).is_none());
++    capture.invalidate();
++    assert!(capture
++        .region(SIZE, Some(SMALL), false, Some(&vec![0; 128 * 96 * 4]))
++        .is_none());
++}
++
++#[test]
++fn strided_odd_width_edge_regions_leave_every_other_pixel_untouched() {
++    for bounds in [(0, 0, 1, 1), (126, 95, 2, 1), (3, 7, 7, 9)] {
++        let rect = PixelRect::new(bounds, SIZE).unwrap();
++        let packed = vec![37; rect.pixels() as usize * 4];
++        let mut target = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++        rect.copy(SIZE, &packed, &mut target, true).unwrap();
++        assert_eq!(target.iter().filter(|v| **v == 37).count(), packed.len());
++        assert!(rect
++            .copy(SIZE, &packed[..packed.len() - 1], &mut target, true)
++            .is_err());
++    }
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/readback_x11_tests.rs b/code/apps/bpane-host/src/tile_loop/readback_x11_tests.rs
+new file mode 100644
+index 0000000..3ffa3d5
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/readback_x11_tests.rs
+@@ -0,0 +1,126 @@
++use super::*;
++use crate::capture::x11::{DamageTracker, X11CaptureBackend};
++use std::sync::{atomic::AtomicU64, Arc};
++use x11rb::{
++    connection::Connection,
++    protocol::xproto::{ConnectionExt, CreateGCAux, Rectangle},
++};
++
++#[test]
++#[ignore = "requires disposable X11 display"]
++fn regional_x11_pixels_preserve_damage_arriving_after_acknowledgement() {
++    let display = std::env::var("DISPLAY").unwrap();
++    let (paint, screen) = x11rb::connect(Some(&display)).unwrap();
++    let root = paint.setup().roots[screen].root;
++    let size = (
++        paint.setup().roots[screen].width_in_pixels,
++        paint.setup().roots[screen].height_in_pixels,
++    );
++    let mut cap = X11CaptureBackend::new(&display, size.0.into(), size.1.into()).unwrap();
++    let mut tracker = DamageTracker::for_tile_capture(&display, Arc::new(AtomicU64::new(0)))
++        .unwrap()
++        .unwrap();
++    let gc = paint.generate_id().unwrap();
++    paint
++        .create_gc(gc, root, &CreateGCAux::new().foreground(0x314f7b))
++        .unwrap()
++        .check()
++        .unwrap();
++    let mut state = DamageReadback::new(true);
++    let mut scratch = Vec::new();
++    let mut reference = Vec::new();
++    tracker.begin_capture_for_size(size.0, size.1);
++    state
++        .capture(size, None, true, None, &mut scratch, |r, dst| match r {
++            Some(r) => cap.capture_into_frame(r, size, dst),
++            None => cap.capture_region_raw_into(0, 0, size.0, size.1, dst),
++        })
++        .unwrap();
++    let mut previous = Some(std::mem::take(&mut scratch));
++    for step in 0..12u16 {
++        let rectangle = Rectangle {
++            x: (7 + step * 19) as i16,
++            y: (9 + step * 17) as i16,
++            width: 7,
++            height: 9,
++        };
++        paint
++            .poly_fill_rectangle(root, gc, &[rectangle])
++            .unwrap()
++            .check()
++            .unwrap();
++        let bounds = tracker.begin_capture_for_size(size.0, size.1);
++        assert!(bounds.is_some());
++        // A second update AFTER acknowledge must remain pending.
++        let late = Rectangle {
++            x: (701 + step * 11) as i16,
++            y: 601,
++            width: 5,
++            height: 3,
++        };
++        paint
++            .poly_fill_rectangle(root, gc, &[late])
++            .unwrap()
++            .check()
++            .unwrap();
++        let stats = state
++            .capture(
++                size,
++                bounds,
++                false,
++                previous.as_deref(),
++                &mut scratch,
++                |r, dst| match r {
++                    Some(r) => cap.capture_into_frame(r, size, dst),
++                    None => cap.capture_region_raw_into(0, 0, size.0, size.1, dst),
++                },
++            )
++            .unwrap();
++        assert!(stats.regional && !stats.fallback);
++        if let Some(old) = previous.replace(std::mem::take(&mut scratch)) {
++            scratch = old;
++        }
++        let pending = tracker.begin_capture_for_size(size.0, size.1);
++        assert!(pending.is_some(), "late damage disappeared");
++        state
++            .capture(
++                size,
++                pending,
++                false,
++                previous.as_deref(),
++                &mut scratch,
++                |r, dst| match r {
++                    Some(r) => cap.capture_into_frame(r, size, dst),
++                    None => cap.capture_region_raw_into(0, 0, size.0, size.1, dst),
++                },
++            )
++            .unwrap();
++        cap.capture_region_raw_into(0, 0, size.0, size.1, &mut reference)
++            .unwrap();
++        assert_eq!(
++            scratch, reference,
++            "regional reads must converge to the whole root"
++        );
++        if let Some(old) = previous.replace(std::mem::take(&mut scratch)) {
++            scratch = old;
++        }
++    }
++    tracker.force_refresh();
++    paint
++        .poly_fill_rectangle(
++            root,
++            gc,
++            &[Rectangle {
++                x: 1,
++                y: 2,
++                width: 3,
++                height: 4,
++            }],
++        )
++        .unwrap()
++        .check()
++        .unwrap();
++    assert!(tracker.begin_capture_for_size(size.0, size.1).is_none());
++    assert!(tracker.begin_capture_for_size(size.0 - 1, size.1).is_none());
++    paint.free_gc(gc).unwrap().check().unwrap();
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/resize.rs b/code/apps/bpane-host/src/tile_loop/resize.rs
+index fccb9c8..df1e1c0 100644
+--- a/code/apps/bpane-host/src/tile_loop/resize.rs
++++ b/code/apps/bpane-host/src/tile_loop/resize.rs
+@@ -52,6 +52,7 @@ impl super::TileCaptureThread {
+         self.last_cdp_scroll_y = None;
+         self.cdp_scroll_anchor = None;
+         self.prev_frame = None;
++        self.readback.invalidate();
+         self.content_origin_y = 0;
+         self.grid_offset_y = 0;
+         self.last_scroll_region_top = 0;
+diff --git a/code/apps/bpane-host/src/tile_loop/run.rs b/code/apps/bpane-host/src/tile_loop/run.rs
+index 236a44d..c7db2d8 100644
+--- a/code/apps/bpane-host/src/tile_loop/run.rs
++++ b/code/apps/bpane-host/src/tile_loop/run.rs
+@@ -51,6 +51,7 @@ impl super::TileCaptureThread {
+         let timings_enabled =
+             capture_timings_requested(std::env::var("BPANE_CAPTURE_TIMINGS").ok().as_deref());
+         let mut timed_capture_seq = 0u64;
++        self.readback.set_timings(timings_enabled);
+         // ── Constants ────────────────────────────────────────────
+         const VIDEO_ENTER_SCORE: i8 = 5;
+         const VIDEO_EXIT_SCORE: i8 = -1;
+@@ -155,21 +156,39 @@ impl super::TileCaptureThread {
+ 
+             // ── Capture ──────────────────────────────────────────
+             let timing_start = timings_enabled.then(std::time::Instant::now);
+-            self.frame_damage_bounds = self.damage.as_mut().and_then(|dt| dt.begin_capture());
++            let mut readback_timing = crate::capture::readback_timing::ReadbackTiming {
++                enabled: timings_enabled,
++                ..Default::default()
++            };
++            self.frame_damage_bounds = self.damage.as_mut()
++                .and_then(|dt| dt.begin_capture_for_size(self.screen_w, self.screen_h));
+             let mut rgba = std::mem::take(&mut self.capture_scratch);
+-            if let Err(e) =
+-                self.cap
+-                    .capture_region_raw_into(0, 0, self.screen_w, self.screen_h, &mut rgba)
+-            {
+-                warn!("tile capture: GetImage failed: {e}");
+-                self.capture_scratch = rgba;
+-                // Damage was acknowledged before the failed read. Force a
+-                // full retry, not only whatever happens to repaint afterward.
+-                self.prev_frame = None;
+-                if let Some(dt) = self.damage.as_mut() {
+-                    dt.force_refresh();
++            let size = (self.screen_w, self.screen_h);
++            // Keep active video ownership on the established capture path.
++            let full = force_refresh || self.region_committer.active.is_some()
++                || self.emitter.current_video_region().is_some();
++            let result = self.readback.capture(size, self.frame_damage_bounds, full,
++                self.prev_frame.as_deref(), &mut rgba, |region, target| match region {
++                    Some(region) => self.cap.capture_into_frame_timed(region, size, target, &mut readback_timing),
++                    None => self.cap.capture_region_raw_into_timed((0, 0, size.0, size.1), target, &mut readback_timing),
++                });
++            let readback = match result {
++                Ok(stats) => stats,
++                Err(e) => {
++                    warn!("tile capture: GetImage failed: {e}");
++                    self.capture_scratch = rgba;
++                    // Damage was acknowledged before the failed read. Force a
++                    // full retry, not only whatever happens to repaint afterward.
++                    self.prev_frame = None;
++                    if let Some(dt) = self.damage.as_mut() {
++                        dt.force_refresh();
++                    }
++                    continue;
+                 }
+-                continue;
++            };
++            if readback.fallback {
++                force_refresh = true;
++                self.frame_damage_bounds = None;
+             }
+             self.grid.advance_frame();
+             let stride = self.screen_w as usize * 4;
+@@ -307,6 +326,16 @@ impl super::TileCaptureThread {
+                     budget_wait_us = budget_wait.as_micros() as u64,
+                     interval_us = frame_interval.as_micros() as u64,
+                     dirty_tiles,
++                    readback_regional = readback.regional,
++                    readback_fallback = readback.fallback,
++                    readback_requested_pixels = readback.requested_pixels,
++                    readback_repair_bytes = readback.repair_bytes,
++                    readback_repair_us = readback.repair_us,
++                    x11_request_us = readback_timing.request_us,
++                    x11_copy_us = readback_timing.copy_us,
++                    x11_copy_bytes = readback_timing.copy_bytes,
++                    x11_shm_requests = readback_timing.shm_requests,
++                    x11_get_image_requests = readback_timing.get_image_requests,
+                     force_refresh,
+                     "capture timings"
+                 );

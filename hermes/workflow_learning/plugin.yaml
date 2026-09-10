@@ -1,0 +1,9 @@
+name: browserpane-workflows
+version: 0.1.0
+description: Opt-in, content-minimized browser workflow learning
+kind: standalone
+provides_tools:
+  - workflow_capture
+provides_hooks:
+  - post_tool_call
+  - post_api_request

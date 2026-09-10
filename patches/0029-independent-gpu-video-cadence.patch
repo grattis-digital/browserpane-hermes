@@ -1,0 +1,77 @@
+diff --git a/code/apps/bpane-host/src/gpu_output.rs b/code/apps/bpane-host/src/gpu_output.rs
+index ace2d8d..95776ec 100644
+--- a/code/apps/bpane-host/src/gpu_output.rs
++++ b/code/apps/bpane-host/src/gpu_output.rs
+@@ -1,4 +1,4 @@
+-//! Bounded worker output state; reliable tiles authorize each video access unit.
++//! Bounded worker output; complete tile batches authorize independently paced video.
+ use anyhow::{bail, ensure};
+ use bpane_protocol::{TileMessage, VideoTileInfo};
+ 
+@@ -95,7 +95,6 @@ impl GpuOutput {
+                 && self.region == Some((t.tile_x, t.tile_y, t.tile_w, t.tile_h)),
+             "GPU video ownership"
+         );
+-        self.video_allowed = false;
+         Ok(())
+     }
+ }
+@@ -148,14 +147,17 @@ mod tests {
+         }
+     }
+     #[test]
+-    fn only_one_bounded_access_unit_after_matching_complete_batch() {
++    fn independently_paced_access_units_after_matching_complete_batch() {
+         assert!(GpuOutput::default().video_header(32).is_err());
+         let mut s = ready();
+         assert!(s.video_header(usize::MAX).is_err());
+-        s.video_header(32).unwrap();
+-        s.video(info()).unwrap();
+-        assert!(s.video(info()).is_err());
+-        assert!(s.video_header(32).is_err());
++        // No tile change or ACK is required for each subsequent video frame.
++        for _ in 0..300 {
++            s.video_header(32).unwrap();
++            s.video(info()).unwrap();
++        }
++        assert!(s.video_header(28).is_err());
++        assert!(s.video_header(1_048_601).is_err());
+     }
+     #[test]
+     fn move_resize_exit_and_incomplete_batch_cannot_authorize_old_video() {
+diff --git a/code/apps/bpane-host/src/gpu_video.rs b/code/apps/bpane-host/src/gpu_video.rs
+index bb16e7c..09ff638 100644
+--- a/code/apps/bpane-host/src/gpu_video.rs
++++ b/code/apps/bpane-host/src/gpu_video.rs
+@@ -77,7 +77,7 @@ impl<'a> EncodedVideo<'a> {
+     pub fn parse(bytes: &'a [u8]) -> anyhow::Result<Self> {
+         ensure!((29..=1_048_600).contains(&bytes.len()), "GPU video size");
+         ensure!(
+-            bytes[0] == 1 && bytes[1] == 0 && bytes[22..24] == [0, 0],
++            bytes[0] == 2 && bytes[1] == 0 && bytes[22..24] == [0, 0],
+             "GPU video version/reserved"
+         );
+         let mut r = [0u16; 6];
+diff --git a/code/apps/bpane-host/src/gpu_video_tests.rs b/code/apps/bpane-host/src/gpu_video_tests.rs
+index 83da03d..17bb831 100644
+--- a/code/apps/bpane-host/src/gpu_video_tests.rs
++++ b/code/apps/bpane-host/src/gpu_video_tests.rs
+@@ -51,7 +51,7 @@ fn no_editable_or_ambiguous_target_and_move_revokes_immediately() {
+ }
+ fn encoded() -> Vec<u8> {
+     let mut bytes = vec![
+-        1, 0, 14, 0, 22, 0, 130, 2, 106, 1, 0, 5, 208, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        2, 0, 14, 0, 22, 0, 130, 2, 106, 1, 0, 5, 208, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+     ];
+     bytes.extend([
+         0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xaa, 0, 0, 0, 1, 0x65, 0xbb,
+@@ -65,6 +65,9 @@ fn access_unit_handles_both_start_codes_and_checks_bounds() {
+     assert_eq!(v.nals.len(), 3);
+     assert_eq!(v.tile.tile_w, 642);
+     assert_eq!(v.pts, 1);
++    let mut old_worker = bytes.clone();
++    old_worker[0] = 1;
++    assert!(EncodedVideo::parse(&old_worker).is_err());
+     for n in 0..29 {
+         assert!(EncodedVideo::parse(&bytes[..n]).is_err());
+     }

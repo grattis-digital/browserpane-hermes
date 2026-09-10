@@ -1,12 +1,13 @@
-# Explicit opt-in: see docs/GPU.md. CPU Compose remains the default.
+# Experimental custom Xorg/Vulkan pipeline. CPU Compose remains the default.
 services:
   browserpane:
     build: !reset null
-    image: browserpane-hermes-browser:gpu-local
+    image: ${BPANE_GPU_BROWSER_IMAGE:-browserpane-hermes-browser:gpu-local}
     pull_policy: never
     environment:
       BPANE_GPU_MODE: v3d
-      BPANE_X11_BACKEND: xvnc
+      BPANE_X11_BACKEND: gpu-dummy
+      BPANE_GPU_TAIL: "1"
     ipc: service:gpu-display
     shm_size: !reset null
     devices:
@@ -28,8 +29,9 @@ services:
   gpu-display:
     build:
       context: .
-      dockerfile: Dockerfile.gpu-display
-    image: browserpane-hermes-gpu-display:local
+      dockerfile: Dockerfile.gpu-dummy
+      target: gpu-live-display
+    image: browserpane-hermes-gpu-display:experimental
     restart: unless-stopped
     network_mode: none
     ipc: shareable

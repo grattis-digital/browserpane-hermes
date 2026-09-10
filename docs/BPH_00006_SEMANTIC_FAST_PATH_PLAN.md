@@ -1,7 +1,6 @@
 # Semantic MCP fast-path experiment
 
-Branch: `experiment/semantic-fast-path`, based on merged `main` commit
-`70129e2c2b506bba8d6a3153e99131ef5d6888ca`.
+Scope: semantic fast-path operations for the single-session bundle.
 
 ## Objective and boundaries
 

@@ -1,0 +1,52 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=256) in;
+uint part(uint value,uint byte) { return (value>>(8u*byte))&255u; }
+uint tile_byte(uint tile,uint at) {
+    uvec4 w=work[tile]; uint n=frame_size(tile),col=tile%columns(),row=tile/columns();
+    if (at==0u) return 11u;
+    if (at<5u) return part(n-5u,at-1u);
+    if (at==5u) return w.x==1u?3u:w.x==2u?2u:4u;
+    if (at<8u) return part(col,at-6u);
+    if (at<10u) return part(row,at-8u);
+    if (at<14u) return part(w.y,at-10u);
+    if (at<18u) return part(w.z,at-14u);
+    if (at<22u) return part(w.w,at-18u);
+    uint byte=at-22u; return part(encoded[tile*SLOT_WORDS+byte/4u],byte%4u);
+}
+void stream_byte(uint at,uint value) { atomicOr(outputWords[16u+at/4u],(value&255u)<<((at%4u)*8u)); }
+void le(uint at,uint value,uint count) { for (uint i=0u;i<count;i++) stream_byte(at+i,part(value,i)); }
+void main() {
+    uint tile=gl_WorkGroupID.x,lane=gl_LocalInvocationIndex,n=frame_size(tile),start=offsets[tile];
+    if (n>0u) for (uint word=start/4u+lane;word<(start+n+3u)/4u;word+=256u) {
+        uint value=0u;
+        for (uint b=0u;b<4u;b++) {
+            uint at=word*4u+b;
+            if (at>=start && at<start+n) value|=tile_byte(tile,at-start)<<(b*8u);
+        }
+        if (word*4u>=start && word*4u+4u<=start+n) outputWords[16u+word]=value;
+        else atomicOr(outputWords[16u+word],value);
+    }
+    if (tile==0u && lane==0u) {
+        uint at=0u;
+        if ((p.flags&2u)!=0u) {
+            stream_byte(0,11u); le(1,11u,4); stream_byte(5,1u); le(6,64u,2); le(8,columns(),2);
+            le(10,(p.height+63u)/64u,2); le(12,p.width,2); le(14,p.height,2); at=16u;
+        }
+        if (int(control.x)!=0) {
+            stream_byte(at,11u); le(at+1u,11u,4); stream_byte(at+5u,7u);
+            // BrowserPane dy is source minus destination (not destination motion).
+            le(at+6u,0,2); le(at+8u,control.x,2); le(at+10u,0,2);
+            le(at+12u,p.height,2); le(at+14u,p.width,2);
+            at+=16u;
+        }
+        if ((p.flags&16u)!=0u) {
+            stream_byte(at,11u); le(at+1u,9u,4); stream_byte(at+5u,5u);
+            le(at+6u,p.video.x,2); le(at+8u,p.video.y,2);
+            le(at+10u,p.video.z,2); le(at+12u,p.video.w,2);
+        }
+        at=outputWords[2]-10u; stream_byte(at,11u); le(at+1u,5u,4);
+        stream_byte(at+5u,6u); le(at+6u,p.serial,4);
+    }
+}

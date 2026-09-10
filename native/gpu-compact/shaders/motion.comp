@@ -1,0 +1,36 @@
+#version 310 es
+// Content-addressed GPU lookup, not a scan over all historical positions.
+// Each tile checks <=8 hash buckets in each cache before exact verification.
+precision highp int;
+layout(local_size_x=8, local_size_y=8) in;
+layout(std430, binding=2) buffer Header { uint count; uint data[]; };
+layout(std430, binding=4) readonly buffer CurrentRows { uint current_rows[]; };
+layout(std430, binding=5) readonly buffer PreviousRows { uint previous_rows[]; };
+layout(std430, binding=6) readonly buffer CheckpointRows { uint checkpoint_rows[]; };
+uniform ivec2 size;
+void main() {
+    int column = int(gl_GlobalInvocationID.x), row = int(gl_GlobalInvocationID.y);
+    int columns = (size.x + 31) / 32, rows = (size.y + 31) / 32;
+    if (column >= columns || row >= rows) return;
+    int y = min(row * 32 + 16, size.y - 1), start = column * size.y;
+    uint hash = current_rows[start + y];
+    uint base = uint(columns * size.y + column * 2048);
+    uint rank = 0xffffffffu, bank = 0u;
+    int delta = 0;
+    for (uint cache = 0u; cache < 2u; ++cache) {
+        for (uint probe = 0u; probe < 8u; ++probe) {
+            uint slot = base + ((hash + probe) & 2047u);
+            uint entry = cache == 0u ? previous_rows[slot] : checkpoint_rows[slot];
+            if (entry == 0u) break;
+            int candidate = int(entry - 1u);
+            uint key = cache == 0u ? previous_rows[start + candidate] : checkpoint_rows[start + candidate];
+            if (key != hash) continue;
+            int dy = candidate - y;
+            uint score = uint(abs(dy)) * 4u + cache + (dy < 0 ? 2u : 0u);
+            if (score < rank) { rank = score; delta = dy; bank = cache; }
+        }
+    }
+    int tiles = columns * rows, tile = row * columns + column;
+    data[tiles + tile] = uint(delta);
+    data[2 * tiles + tile] = bank;
+}

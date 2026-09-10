@@ -93,12 +93,17 @@ def main():
         report["verification"] = json.loads(output[output.index(marker):])
         marker_code = "from pathlib import Path; import os; assert os.getuid()==10000; Path('/shared/persistence-marker').write_text('synthetic'); p=Path('/opt/data/config.yaml'); p.write_text(p.read_text()+'\\n# synthetic operator customization\\n'); Path('/opt/data/.env').write_text('BPH_SYNTHETIC_TEST=preserved\\n')"
         docker("exec", agent, "python", "-c", marker_code)
+        recipe_setup = "import sys,time; sys.path.insert(0,'/opt/hermes-bundle'); from workflow_runner.private_files import PrivateFiles; from workflow_runner.journal import RunJournal; j=RunJournal(PrivateFiles('/opt/data/recipe-persistence-fixture'),time.time,lambda:'a'*32); r=j.approve('b'*64,'b'*64); assert j.begin(r,'b'*64); j.checkpoint(r,'b'*64,'prepared','navigating','NAVIGATION_INTENT'); j.checkpoint(r,'b'*64,'navigating','exporting','EXPORT_INTENT')"
+        docker("exec", agent, "python", "-c", recipe_setup)
+        execution_fixture = Path(__file__).with_name("execution_persistence_fixture.py").read_text(encoding="utf-8")
+        docker("exec", agent, "python", "-c", execution_fixture, "setup")
         owned("container", agent)
         docker("stop", "--time", "30", agent, timeout=45)
         owned("container", agent)
         docker("start", agent)
         wait_healthy(agent)
         report["restart"] = "healthy"
+        docker("exec", agent, "python", "-c", execution_fixture, "check")
         owned("container", agent)
         docker("stop", "--time", "30", agent, timeout=45)
         owned("container", agent)
@@ -108,7 +113,12 @@ def main():
         wait_healthy(agent)
         owned("container", agent)
         docker("exec", agent, "python", "-c", "from pathlib import Path; assert Path('/shared/persistence-marker').read_text()=='synthetic'; assert '# synthetic operator customization' in Path('/opt/data/config.yaml').read_text(); assert Path('/opt/data/.env').read_text()=='BPH_SYNTHETIC_TEST=preserved\\n'")
+        recipe_check = "import sys,time; sys.path.insert(0,'/opt/hermes-bundle'); from workflow_runner.private_files import PrivateFiles; from workflow_runner.journal import RunJournal; j=RunJournal(PrivateFiles('/opt/data/recipe-persistence-fixture'),time.time,lambda:'c'*32); assert j.read('a'*32,'b'*64)['state']=='exporting'; assert j.begin('a'*32,'b'*64) is False"
+        docker("exec", agent, "python", "-c", recipe_check)
+        docker("exec", agent, "python", "-c", execution_fixture, "check")
         report["recreate"] = "shared file, operator config and synthetic env preserved"
+        report["recipeJournalRecreate"] = "Synthetic unresolved export checkpoint preserved; duplicate begin denied without any browser call"
+        report["executionCatalogRecreate"] = "Private contract, run ID, unresolved intent and cancellation survive restart/recreate without dispatch"
         print(json.dumps(report, indent=2))
     finally:
         for container in reversed(containers):

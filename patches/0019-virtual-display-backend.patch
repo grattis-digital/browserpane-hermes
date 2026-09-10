@@ -1,0 +1,46 @@
+diff --git a/code/apps/bpane-host/src/capture/ffmpeg.rs b/code/apps/bpane-host/src/capture/ffmpeg.rs
+--- a/code/apps/bpane-host/src/capture/ffmpeg.rs
++++ b/code/apps/bpane-host/src/capture/ffmpeg.rs
+@@ -6,6 +6,34 @@ use std::{env, str::FromStr};
+ 
+ use crate::encode::EncodedFrame;
+ 
++// Both supported servers expose the same exact DUMMY0 geometry contract.
++fn validate_virtual_backend(value: Option<&std::ffi::OsStr>) -> anyhow::Result<()> {
++    match value {
++        None => Ok(()),
++        Some(value) if value == "dummy" || value == "gpu-dummy" => Ok(()),
++        Some(_) => anyhow::bail!("BPANE_X11_BACKEND must be dummy or gpu-dummy"),
++    }
++}
++
++#[cfg(test)]
++mod backend_tests {
++    use super::validate_virtual_backend;
++    use std::ffi::OsStr;
++
++    #[test]
++    fn backend_selection_is_explicit_and_fail_closed() {
++        assert!(validate_virtual_backend(None).is_ok());
++        for value in ["dummy", "gpu-dummy"] {
++            assert!(validate_virtual_backend(Some(OsStr::new(value))).is_ok());
++        }
++        for value in ["", "auto", "GPU-DUMMY", " gpu-dummy", "unsupported"] {
++            assert!(validate_virtual_backend(Some(OsStr::new(value))).is_err());
++        }
++        use std::os::unix::ffi::OsStrExt;
++        assert!(validate_virtual_backend(Some(OsStr::from_bytes(&[0xff]))).is_err());
++    }
++}
++
+ /// Pixel-space capture region for x11grab.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub struct CaptureRegion {
+@@ -41,6 +69,7 @@ pub fn spawn_pipeline(
+     std_mpsc::Sender<PipelineCmd>,
+     std_mpsc::Receiver<EncodedFrame>,
+ )> {
++    validate_virtual_backend(env::var_os("BPANE_X11_BACKEND").as_deref())?;
+     let (cmd_tx, cmd_rx) = std_mpsc::channel::<PipelineCmd>();
+     let (nal_tx, nal_rx) = std_mpsc::sync_channel::<EncodedFrame>(64);
+ 

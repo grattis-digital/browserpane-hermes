@@ -42,6 +42,7 @@ test('session timings distinguish fresh snapshots from state cache hits without 
   await f.call(session, 'pane_view', { state: first.state, query: { role: 'button' } });
   const [fresh, cached] = lines.map(JSON.parse);
   assert.equal(fresh.snapshots, 1); assert.equal(fresh.stateHits, undefined);
+  assert.equal(fresh.snapshotBytes, Buffer.byteLength(f.pages[0].snapshotText));
   assert.equal(cached.snapshots, undefined); assert.equal(cached.stateHits, 1);
   assert(lines.every(line => !line.includes('Private label')));
 });
@@ -107,7 +108,7 @@ test('zero tabs remain zero during discovery/observation; only explicit new crea
   assert.equal(f.creations, 1);
 });
 
-test('navigate in place stays view-guarded and replay-safe; deliberate new does not replace the default', async t => {
+test('navigate in place stays view-guarded and replay-safe; new cannot add tabs', async t => {
   const f = fixture(t), a = f.session(), b = f.session();
   const view = await f.call(a, 'pane_view'), stale = await f.call(b, 'pane_view');
   const args = navigation(view), result = await f.call(a, 'pane_act', args);
@@ -116,8 +117,12 @@ test('navigate in place stays view-guarded and replay-safe; deliberate new does 
   assert.equal((await f.call(b, 'pane_act', navigation(stale))).error.code, 'STALE_VIEW');
   assert.deepEqual(f.pages[0].navigations, ['https://fixture.test/reused']);
   assert.equal(f.creations, 0);
-  const created = await f.call(a, 'pane_act', { lease: view.lease, request: 2, steps: [{ op: 'new' }] });
-  assert.equal(created.tab, 't3'); assert.equal(f.creations, 1);
+  const create = { lease: view.lease, request: 2, steps: [{ op: 'new' }] };
+  const rejected = await f.call(a, 'pane_act', create);
+  assert.equal(rejected.error.code, 'TAB_EXISTS'); assert.equal(rejected.completed, 0);
+  assert.equal(rejected.mayHaveActed, undefined);
+  assert.deepEqual(await f.call(a, 'pane_act', create), rejected);
+  assert.equal(f.creations, 0); assert.equal(f.context.pages().length, 2);
   assert.equal((await f.call(b, 'pane_view')).tab, 't1');
 });
 
@@ -141,12 +146,12 @@ test('real MCP HTTP clients share the same default across delete/reconnect witho
   assert(f.pages.every(page => page.navigations.length === 0 && page.activations === 0));
 });
 
-test('model-facing guidance leads with existing-tab reuse and leaves intentional new available', () => {
+test('model-facing guidance leads with existing-tab reuse and restricts new to recovery', () => {
   const tools = PaneSchemas.tools(), view = tools.find(tool => tool.name === 'pane_view');
   const act = tools.find(tool => tool.name === 'pane_act');
-  assert.match(view.description, /Start with \{\}.*reuse/);
+  assert.match(view.description, /Start with \{capture:"outline"\}.*reuse/);
   assert.match(act.description, /navigate\(url\) in place/);
-  assert.match(act.description, /new creates an extra tab/);
+  assert.match(act.description, /new is rejected while any tab exists/);
   assert.match(view.description, /state requeries/);
   assert.match(view.description, /cursor: reply.cursor/);
   assert.equal(act.inputSchema.properties.steps.items.properties.op.enum.at(-1), 'new');

@@ -1,4 +1,5 @@
 import { ObservationError } from './observation-error.mjs';
+import { SnapshotCoverage } from './snapshot-coverage.mjs';
 
 /** Validates untrusted snapshot bytes and the deliberately small projection API. */
 export class ObservationInput {
@@ -31,6 +32,7 @@ export class ObservationInput {
     this.#integer(maxChars, 'maxChars', 64, 24576);
     if (since !== undefined) this.#string(since, 'since', 128, false);
     return { tab, document, mutation, url, title, snapshot, lines: this.snapshot(snapshot), since,
+      ...(input.coverage === undefined ? {} : { coverage: SnapshotCoverage.validate(input.coverage) }),
       projection: { detail, filter, ...(semantic ? { query: semantic } : {}), offset, limit, maxChars } };
   }
 

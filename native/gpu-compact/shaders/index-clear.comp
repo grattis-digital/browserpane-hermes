@@ -1,0 +1,10 @@
+#version 310 es
+precision highp int;
+layout(local_size_x=64) in;
+layout(std430, binding=4) writeonly buffer Rows { uint entries[]; };
+uniform ivec2 size;
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint columns = uint((size.x + 31) / 32);
+    if (slot < columns * 2048u) entries[columns * uint(size.y) + slot] = 0u;
+}

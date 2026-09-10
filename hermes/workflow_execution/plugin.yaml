@@ -1,0 +1,6 @@
+name: browserpane-replay
+version: 0.1.0
+description: Supervised operator-reviewed BrowserPane report execution with a warm MCP connection
+kind: standalone
+provides_tools:
+  - workflow

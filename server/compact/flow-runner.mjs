@@ -13,7 +13,7 @@ export class FlowRunner {
     this.#observations = observations;
   }
 
-  async run(args, signal, trace, observe) {
+  async run(args, signal, trace, observe, guard) {
     let tab, activeStage = 0;
     const popupVersion = this.#browser.popupVersion;
     const outcome = { request: args.request, completed: 0, stages: 0 };
@@ -27,10 +27,14 @@ export class FlowRunner {
         const internal = await observe(tab, { detail: 'controls', limit: 1, maxChars: 64 }, trace);
         if (this.#browser.popupVersion !== popupVersion) { outcome.stopped = 'new_tab'; outcome.failedStage = stageIndex; break; }
         const observed = this.#observations.inspect(internal.view);
+        if (stageIndex === 0 && guard && (observed.document !== guard.document ||
+          observed.url !== guard.url || observed.snapshot !== guard.snapshot))
+          throw new PaneError('STALE_VIEW', 'Page state changed since the supplied view; no flow input was started.');
         const { steps, refs } = this.#resolveSteps(observed.snapshot, stage.steps);
         tab.consume();
         const result = await this.#actions.run(tab, { steps, wait: stage.wait },
-          { document: observed.document, refs, popupVersion }, signal, trace);
+          { document: observed.document, refs, popupVersion,
+            ...(stageIndex === 0 && guard ? { requiredSnapshot: guard.snapshot } : {}) }, signal, trace);
         this.#applyStageResult(outcome, result, stageIndex, steps.length);
         if (result.error || result.completed !== steps.length ||
           (result.stopped && result.stopped !== 'navigation')) break;

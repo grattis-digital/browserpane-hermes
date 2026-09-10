@@ -1,0 +1,50 @@
+# Experimental Pi 4 incoming H.264 decoding. Extend a CURRENT, paired GPU-tail
+# browser image, not the CPU image. No Chromium source compilation or OS upgrade.
+ARG BPANE_GPU_DECODE_BASE=browserpane-hermes-browser:gpu-local
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS decoder-source
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY UPSTREAM_COMMIT ./
+COPY patches patches
+COPY scripts/fetch-upstream.sh scripts/fetch-upstream.sh
+RUN sh scripts/fetch-upstream.sh
+COPY . .
+RUN sh scripts/package-source.sh
+
+FROM ${BPANE_GPU_DECODE_BASE} AS decoder-packages
+USER root
+WORKDIR /tmp/bpane-decoder-packages
+COPY runtime/gpu-decode-packages.sha256 ./
+RUN test "$(dpkg --print-architecture)" = arm64 \
+    && . /etc/os-release && test "$VERSION_CODENAME" = bookworm \
+    && while read -r digest package; do \
+      case "$package" in chromium*) directory=c/chromium ;; zenoty*) directory=z/zenoty ;; *) exit 1 ;; esac; \
+      curl --fail --location --retry 2 --connect-timeout 15 --max-time 300 \
+        "https://archive.raspberrypi.com/debian/pool/main/$directory/$package" -o "$package" || exit 1; \
+    done < gpu-decode-packages.sha256 \
+    && sha256sum --check gpu-decode-packages.sha256
+RUN curl --fail --location --retry 2 --connect-timeout 15 --max-time 120 \
+      https://codeload.github.com/erkserkserks/h264ify/tar.gz/f894cef9d704dfb5fcf3aecddc25d734c3934af2 \
+      -o h264ify.tar.gz \
+    && echo 'df229c8ecdf9915c30aac6b5c0108e791882b7923586401b4c7c1891426d0fed  h264ify.tar.gz' | sha256sum --check \
+    && mkdir h264ify && tar -xzf h264ify.tar.gz --strip-components=1 -C h264ify \
+    && test -f h264ify/LICENSE && test -f h264ify/manifest.json
+
+FROM ${BPANE_GPU_DECODE_BASE}
+USER root
+COPY --from=decoder-packages /tmp/bpane-decoder-packages/*.deb /tmp/bpane-decoder-packages/
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/bpane-decoder-packages/*.deb \
+    && test "$(dpkg-query -W -f='${Version}' chromium)" = '1:152.0.7977.82-1~deb12u1+rpt1' \
+    && rm -rf /tmp/bpane-decoder-packages /var/lib/apt/lists/*
+COPY --from=decoder-packages /tmp/bpane-decoder-packages/h264ify /opt/browserpane/h264ify
+COPY runtime/chromium-wrapper.sh /usr/local/bin/chromium
+COPY server/gpu-status.mjs server/gpu-status-error.mjs server/gpu-video-status.mjs server/check-gpu.mjs /app/server/
+COPY docs/GPU_VIDEO_DECODE.md /app/GPU_VIDEO_DECODE.md
+COPY runtime/gpu-decode-packages.sha256 /app/gpu-decode-packages.sha256
+COPY --from=decoder-source /source/source.tar.gz /app/source.tar.gz
+RUN chmod 755 /usr/local/bin/chromium
+USER 10000:10000
+LABEL io.browserpane.experimental="pi4-v4l2-decode-candidate" \
+      io.browserpane.chromium.packaging="4d53fbc65790635e85719396282493ba55c5c511" \
+      io.browserpane.h264ify.revision="f894cef9d704dfb5fcf3aecddc25d734c3934af2"

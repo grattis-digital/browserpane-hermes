@@ -90,6 +90,17 @@ export class CompactEngineFixture {
 
   sharedPath(name) { return join(this.#temporary, 'shared', name); }
   pageFor(tab) { return this.#browser.tab(tab).page; }
+  tabFor(tab) { return this.#browser.tab(tab); } // Owned benchmark instrumentation only.
+
+  /** Simulate a human-created tab in this owned browser, never via MCP new. */
+  async openPage() {
+    await this.#context.newPage();
+    const deadline = performance.now() + 3000;
+    while ((await this.#browser.list()).length !== this.#context.pages().length && performance.now() < deadline) await delay(10);
+    const tabs = await this.#browser.list();
+    assert.equal(tabs.length, this.#context.pages().length);
+    return tabs.at(-1);
+  }
 
   async waitForTabs(count) {
     const deadline = performance.now() + 3000;

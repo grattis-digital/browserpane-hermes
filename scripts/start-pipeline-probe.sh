@@ -10,11 +10,19 @@ if ! [[ "$probe_run" =~ ^[a-zA-Z0-9-]{1,80}$ ]]; then echo 'Invalid disposable r
 docker_cli=(docker)
 network_args=(--network none)
 capture_args=()
+case "${BPANE_EXPERIMENTAL_DAMAGE_READBACK:-0}" in 0|1) ;; *) echo 'Damage readback flag must be 0 or 1' >&2; exit 64 ;; esac
+case "${BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS:-0}" in 0|1) ;; *) echo 'Damage analysis flag must be 0 or 1' >&2; exit 64 ;; esac
 if [ -n "${BPANE_SCROLL_COPY_QUANTUM_PX:-}" ]; then
   if ! [[ "$BPANE_SCROLL_COPY_QUANTUM_PX" =~ ^[0-9]+$ ]] || [ "$BPANE_SCROLL_COPY_QUANTUM_PX" -gt 512 ]; then
     echo 'BPANE_SCROLL_COPY_QUANTUM_PX must be an integer from 0 to 512' >&2; exit 64
   fi
   capture_args=(-e "BPANE_SCROLL_COPY_QUANTUM_PX=$BPANE_SCROLL_COPY_QUANTUM_PX")
+fi
+if [ -n "${BPANE_CDP_SCROLL_SNAP_CSS_PX:-}" ]; then
+  if ! [[ "$BPANE_CDP_SCROLL_SNAP_CSS_PX" =~ ^[0-9]+$ ]] || [ "$BPANE_CDP_SCROLL_SNAP_CSS_PX" -gt 256 ]; then
+    echo 'Scroll snap must be an integer from 0 to 256' >&2; exit 64
+  fi
+  capture_args+=(-e "BPANE_CDP_SCROLL_SNAP_CSS_PX=$BPANE_CDP_SCROLL_SNAP_CSS_PX")
 fi
 viewer_origin=https://localhost
 gateway_url=https://localhost:4433
@@ -40,6 +48,8 @@ fi
   -e VIEWER_ORIGIN="$viewer_origin" -e GATEWAY_URL="$gateway_url" \
   -e BPANE_URL=about:blank -e BPANE_DEVICE_SCALE=1 -e BPANE_PIPELINE_TEST=1 \
   -e BPANE_CAPTURE_TIMINGS="${BPANE_CAPTURE_TIMINGS:-0}" \
+  -e BPANE_EXPERIMENTAL_DAMAGE_READBACK="${BPANE_EXPERIMENTAL_DAMAGE_READBACK:-0}" \
+  -e BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS="${BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS:-0}" \
   -e BPANE_CHROMIUM_SANDBOX_MODE=strict -e BPANE_CHROMIUM_EXTRA_FLAGS=--disable-setuid-sandbox \
   -e BPANE_CHROMIUM_DEBUG_ADDRESS=127.0.0.1 -e RUST_LOG=warn \
   "$probe_image"

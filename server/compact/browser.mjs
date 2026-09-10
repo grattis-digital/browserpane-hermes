@@ -87,8 +87,15 @@ export class SharedBrowser {
     }
   }
 
+  assertCanCreate() {
+    this.#assertConnected();
+    if (this.#context.pages().some(page => !page.isClosed())) {
+      throw new PaneError('TAB_EXISTS', 'Reuse the existing tab: call pane_view {} then navigate in place. new is only allowed when no tabs remain.');
+    }
+  }
+
   async create() {
-    if (this.#context.pages().length >= 64) throw new PaneError('TAB_LIMIT', 'Close an unneeded tab before creating another.');
+    this.assertCanCreate();
     const page = await this.#context.newPage();
     const tab = this.#register(page);
     if (!tab) throw new PaneError('TAB_LIMIT', 'New tab exists but the tab registry is full.');

@@ -20,6 +20,11 @@ export class PaneValidation {
       if (input.cursor !== undefined && Object.keys(input).some(key => !['cursor', 'limit', 'maxChars'].includes(key))) this.#fail('cursor options');
       if (input.query) this.#query(input.query);
       if (input.state !== undefined && input.since !== undefined) this.#fail('state/since');
+      if (input.root !== undefined && (!/^f?\d*e\d+$/.test(input.root) || !input.tab || !input.view)) this.#fail('root requires tab/view and an observed ref');
+      if (input.view !== undefined && input.root === undefined) this.#fail('view requires root');
+      if (input.enterFrame !== undefined && input.root === undefined) this.#fail('enterFrame requires root');
+      if (input.depth !== undefined && input.capture !== 'outline') this.#fail('depth requires outline capture');
+      if (input.state !== undefined && ['root', 'view', 'capture', 'depth', 'enterFrame'].some(key => input[key] !== undefined)) this.#fail('cached state cannot change capture scope');
     }
     if (name === 'pane_read') {
       if (input.mode === 'summary' && (input.column === undefined || input.offset !== undefined || input.limit !== undefined)) this.#fail('summary column/pagination');
@@ -67,6 +72,7 @@ export class PaneValidation {
   }
 
   static #flow(input) {
+    if (input.view !== undefined && (!input.view || !input.tab)) this.#fail('flow tab/view');
     let count = 0;
     for (const [stageIndex, stage] of input.stages.entries()) {
       count += stage.steps.length;

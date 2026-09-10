@@ -1,3 +1,4 @@
 # Unified patches contain context lines consisting of one significant space.
 # Generated source is separately checked by strict git-apply regression tests.
 patches/*.patch -whitespace
+native/chromium-damage/surface-damage.patch -whitespace

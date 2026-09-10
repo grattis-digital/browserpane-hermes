@@ -1,0 +1,971 @@
+diff --git a/code/apps/bpane-gateway/src/session_hub/membership.rs b/code/apps/bpane-gateway/src/session_hub/membership.rs
+index d165ed6c..22d479ce 100644
+--- a/code/apps/bpane-gateway/src/session_hub/membership.rs
++++ b/code/apps/bpane-gateway/src/session_hub/membership.rs
+@@ -20,6 +20,11 @@ pub(super) async fn subscribe(
+     let client_id = hub.client_counter.fetch_add(1, Ordering::Relaxed) + 1;
+     let mut connected_clients = hub.connected_clients.lock().await;
+     let prev_count = connected_clients.len() as u32;
++    // The experimental lease ACK represents one receiver, not a quorum.
++    // This lock makes admission atomic; MCP/CDP does not consume a viewer slot.
++    if hub.gpu_single_viewer && (prev_count != 0 || client_role != BrowserClientRole::Interactive) {
++        return Err(SubscribeError::ViewerLimitReached { max_viewers: 0 });
++    }
+     let current_owner_id = hub.owner_id.load(Ordering::Relaxed);
+     let exclusive_browser_owner = hub.exclusive_browser_owner;
+     let should_claim_browser_owner =
+@@ -113,6 +118,9 @@ async fn should_request_join_repaint(
+     client_role: BrowserClientRole,
+     prev_count: u32,
+ ) -> bool {
++    if hub.gpu_single_viewer {
++        return true;
++    }
+     match client_role {
+         BrowserClientRole::Interactive => {
+             if prev_count > 0 || hub.mcp_is_owner.load(Ordering::Relaxed) {
+diff --git a/code/apps/bpane-gateway/src/session_hub/refresh.rs b/code/apps/bpane-gateway/src/session_hub/refresh.rs
+index 03eb91ce..6382286e 100644
+--- a/code/apps/bpane-gateway/src/session_hub/refresh.rs
++++ b/code/apps/bpane-gateway/src/session_hub/refresh.rs
+@@ -8,8 +8,28 @@ use tracing::{debug, warn};
+ pub(super) async fn request_full_refresh(
+     cached_grid_config: &Mutex<Option<Arc<Frame>>>,
+     to_agent: &mpsc::Sender<Frame>,
++    gpu: bool,
+ ) -> u64 {
+     let gc = cached_grid_config.lock().await;
++    if gc.is_none() && gpu {
++        drop(gc);
++        // A viewer can join before the first encoded grid reaches the hub.
++        // Reset unconditionally so that it gets an independent GPU baseline.
++        return u64::from(
++            to_agent
++                .send(
++                    TileMessage::CacheMiss {
++                        frame_seq: 0,
++                        col: u16::MAX,
++                        row: u16::MAX,
++                        hash: 0,
++                    }
++                    .to_frame(),
++                )
++                .await
++                .is_ok(),
++        );
++    }
+     let Some(gc_frame) = gc.as_ref() else {
+         warn!("no cached GridConfig — cannot request full refresh");
+         return 0;
+@@ -62,7 +82,7 @@ mod tests {
+         .to_frame();
+         let cached = Mutex::new(Some(Arc::new(grid)));
+         let (tx, mut rx) = mpsc::channel(1);
+-        assert_eq!(request_full_refresh(&cached, &tx).await, 6);
++        assert_eq!(request_full_refresh(&cached, &tx, false).await, 6);
+         let request = rx.try_recv().unwrap();
+         assert!(matches!(
+             TileMessage::decode(&request.payload).unwrap(),
+@@ -75,4 +95,21 @@ mod tests {
+         ));
+         assert!(rx.try_recv().is_err());
+     }
++
++    #[tokio::test]
++    async fn gpu_first_join_resets_without_a_cached_grid() {
++        let (tx, mut rx) = mpsc::channel(1);
++        let cached = Mutex::new(None);
++        assert_eq!(request_full_refresh(&cached, &tx, false).await, 0);
++        assert!(rx.try_recv().is_err());
++        assert_eq!(request_full_refresh(&cached, &tx, true).await, 1);
++        assert!(matches!(
++            TileMessage::decode(&rx.try_recv().unwrap().payload).unwrap(),
++            TileMessage::CacheMiss {
++                col: u16::MAX,
++                row: u16::MAX,
++                ..
++            }
++        ));
++    }
+ }
+diff --git a/code/apps/bpane-gateway/src/session_hub/tests/ownership.rs b/code/apps/bpane-gateway/src/session_hub/tests/ownership.rs
+index c01c0321..cab5e65d 100644
+--- a/code/apps/bpane-gateway/src/session_hub/tests/ownership.rs
++++ b/code/apps/bpane-gateway/src/session_hub/tests/ownership.rs
+@@ -5,6 +5,24 @@ use bpane_protocol::frame::Frame;
+ use super::*;
+ use crate::session_hub::{BrowserClientRole, ClientHandle};
+ 
++#[tokio::test]
++async fn gpu_mode_allows_one_ack_owner_and_rejoins_after_disconnect() {
++    let dir = tempfile::tempdir().unwrap();
++    let sock = dir.path().join("gpu.sock");
++    let sock_str = sock.to_str().unwrap();
++    let agent = mock_agent(sock_str).await;
++    let mut hub = SessionHub::new(sock_str, 10, false).await.unwrap();
++    hub.gpu_single_viewer = true;
++    let owner = hub.subscribe().await.unwrap();
++    assert!(matches!(
++        hub.subscribe().await,
++        Err(SubscribeError::ViewerLimitReached { .. })
++    ));
++    hub.unsubscribe(owner.client_id).await;
++    assert!(hub.subscribe().await.unwrap().is_owner);
++    agent.abort();
++}
++
+ #[tokio::test]
+ async fn first_subscriber_is_owner() {
+     let dir = tempfile::tempdir().unwrap();
+diff --git a/code/apps/bpane-gateway/src/session_hub.rs b/code/apps/bpane-gateway/src/session_hub.rs
+index 10a788a9..cbc66315 100644
+--- a/code/apps/bpane-gateway/src/session_hub.rs
++++ b/code/apps/bpane-gateway/src/session_hub.rs
+@@ -37,6 +37,7 @@ pub struct SessionHub {
+     to_agent: mpsc::Sender<Frame>,
+     max_viewers: u32,
+     exclusive_browser_owner: bool,
++    gpu_single_viewer: bool,
+     current_resolution: Arc<Mutex<(u16, u16)>>,
+     connected_clients: Mutex<Vec<u64>>,
+     client_roles: RwLock<HashMap<u64, BrowserClientRole>>,
+@@ -127,6 +128,7 @@ impl SessionHub {
+             max_viewers,
+             exclusive_browser_owner,
+             current_resolution,
++            gpu_single_viewer: std::env::var("BPANE_GPU_TAIL").as_deref() == Ok("1"),
+             connected_clients: Mutex::new(Vec::new()),
+             client_roles: RwLock::new(HashMap::new()),
+             client_control_txs: Mutex::new(HashMap::new()),
+@@ -206,7 +208,12 @@ impl SessionHub {
+     /// Send CacheMiss for every tile in the grid to trigger a full refresh.
+     /// The host will resend all tiles, which get broadcast to all subscribers.
+     async fn request_full_refresh(&self) -> u64 {
+-        refresh::request_full_refresh(&self.cached_grid_config, &self.to_agent).await
++        refresh::request_full_refresh(
++            &self.cached_grid_config,
++            &self.to_agent,
++            self.gpu_single_viewer,
++        )
++        .await
+     }
+ 
+     /// Register MCP automation as active for this session.
+diff --git a/code/apps/bpane-gateway/src/transport/negotiation.rs b/code/apps/bpane-gateway/src/transport/negotiation.rs
+index cbcc3c8c..383e9599 100644
+--- a/code/apps/bpane-gateway/src/transport/negotiation.rs
++++ b/code/apps/bpane-gateway/src/transport/negotiation.rs
+@@ -69,6 +69,7 @@ impl ConnectionProtocol {
+             }
+             Message::VideoIn(_) => Some(ProtocolCapability::CameraH264AnnexB),
+             Message::Tiles(TileMessage::CacheMiss { .. }) => Some(ProtocolCapability::TileCache),
++            Message::Tiles(TileMessage::GpuAck { .. }) => Some(ProtocolCapability::GpuTileAck),
+             Message::Control(_)
+             | Message::Video(_)
+             | Message::AudioOut(_)
+@@ -120,6 +121,9 @@ impl ConnectionProtocol {
+                 self.allows(ProtocolCapability::ClientAccessState)
+             }
+             Message::Tiles(TileMessage::Zstd { .. }) => self.allows(ProtocolCapability::TileZstd),
++            Message::Tiles(TileMessage::GpuBegin { .. }) => {
++                self.allows(ProtocolCapability::GpuTileAck)
++            }
+             Message::Tiles(TileMessage::CacheHit { .. }) => {
+                 self.allows(ProtocolCapability::TileCache)
+             }
+@@ -141,7 +145,7 @@ impl ConnectionProtocol {
+             | Message::VideoIn(_)
+             | Message::Clipboard(_)
+             | Message::FileUp(_)
+-            | Message::Tiles(TileMessage::CacheMiss { .. }) => false,
++            | Message::Tiles(TileMessage::CacheMiss { .. } | TileMessage::GpuAck { .. }) => false,
+             Message::FileDown(_) => self.allows(ProtocolCapability::FileTransfer),
+         };
+         if render_dependency && !allowed {
+@@ -419,6 +423,7 @@ fn gateway_protocol_support() -> ProtocolSupport {
+             ProtocolCapability::FileTransfer,
+             ProtocolCapability::ExtendedKeyboard,
+             ProtocolCapability::ClientAccessState,
++            ProtocolCapability::GpuTileAck,
+         ],
+     )
+     .expect("the fixed gateway protocol support profile is valid")
+@@ -437,6 +442,7 @@ fn is_checked_legacy_client_frame(frame: &Frame) -> bool {
+             | Ok(Message::Clipboard(_))
+             | Ok(Message::FileUp(_))
+             | Ok(Message::Tiles(TileMessage::CacheMiss { .. }))
++            | Ok(Message::Tiles(TileMessage::GpuAck { .. }))
+     )
+ }
+ 
+diff --git a/code/apps/bpane-host/src/gpu_tail.rs b/code/apps/bpane-host/src/gpu_tail.rs
+new file mode 100644
+index 00000000..b51d0bcb
+--- /dev/null
++++ b/code/apps/bpane-host/src/gpu_tail.rs
+@@ -0,0 +1,178 @@
++//! Opt-in encoded-byte bridge. No pixel capture, hashing or encoding in Rust.
++//! The display-side worker owns both leases and releases them on EOF/termination.
++use anyhow::{bail, ensure, Context};
++use bpane_protocol::channel::ChannelId;
++use bpane_protocol::frame::{Frame, Message};
++use bpane_protocol::{ControlMessage, TileMessage};
++use std::time::Duration;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
++use tokio::sync::mpsc;
++
++pub fn enabled() -> anyhow::Result<bool> {
++    match std::env::var("BPANE_GPU_TAIL").as_deref() {
++        Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
++        Ok("1") => Ok(true),
++        _ => bail!("BPANE_GPU_TAIL must be 0 or 1"),
++    }
++}
++
++pub fn start(
++    from_gateway: mpsc::Receiver<Frame>,
++    tiles: mpsc::Sender<Frame>,
++) -> (
++    mpsc::Receiver<Frame>,
++    tokio::task::JoinHandle<anyhow::Result<()>>,
++) {
++    let (tx, rx) = mpsc::channel(32);
++    let task = tokio::spawn(async move {
++        let stream = tokio::time::timeout(
++            Duration::from_secs(5),
++            tokio::net::UnixStream::connect("/tmp/.X11-unix/bpane-gpu-tail.sock"),
++        )
++        .await?
++        .context("connect GPU tail")?;
++        ensure!(
++            stream.peer_cred()?.uid() == 10000,
++            "unexpected GPU worker UID"
++        );
++        let (output, input) = stream.into_split();
++        tokio::select! {
++            result = receive(output, tiles) => result,
++            result = route(from_gateway, tx, input) => result,
++        }
++    });
++    (rx, task)
++}
++
++async fn receive(
++    mut output: tokio::net::unix::OwnedReadHalf,
++    tiles: mpsc::Sender<Frame>,
++) -> anyhow::Result<()> {
++    let mut count = 0usize;
++    let mut bytes = 0usize;
++    let mut pending = None;
++    loop {
++        let mut header = [0; 5];
++        output
++            .read_exact(&mut header)
++            .await
++            .context("GPU worker closed")?;
++        let length = u32::from_le_bytes(header[1..5].try_into()?) as usize;
++        ensure!(
++            header[0] == 11 && (1..=16428).contains(&length),
++            "invalid GPU output frame"
++        );
++        let mut payload = vec![0; length];
++        tokio::time::timeout(Duration::from_secs(5), output.read_exact(&mut payload)).await??;
++        let message = TileMessage::decode(&payload)?;
++        match message {
++            TileMessage::GpuBegin { frame_seq, .. } => {
++                ensure!(pending.is_none(), "overlapping GPU batches");
++                pending = Some(frame_seq);
++                count = 0;
++                bytes = 0;
++            }
++            TileMessage::BatchEnd { frame_seq } => {
++                ensure!(pending == Some(frame_seq), "GPU batch sequence mismatch");
++                pending = None;
++            }
++            TileMessage::GridConfig { .. }
++            | TileMessage::Qoi { .. }
++            | TileMessage::Fill { .. }
++            | TileMessage::CacheHit { .. }
++            | TileMessage::ScrollCopy { .. } => {
++                ensure!(pending.is_some(), "GPU command outside batch");
++            }
++            _ => bail!("unexpected GPU output command"),
++        }
++        count += 1;
++        bytes += length;
++        ensure!(
++            count <= 520 && bytes <= 9 * 1024 * 1024,
++            "GPU batch bounds exceeded"
++        );
++        tokio::time::timeout(
++            Duration::from_secs(5),
++            tiles.send(Frame::new(ChannelId::Tiles, payload)),
++        )
++        .await??;
++    }
++}
++
++fn command(frame: &Frame) -> anyhow::Result<Option<[u8; 16]>> {
++    if frame.channel != ChannelId::Tiles {
++        return Ok(None);
++    }
++    let mut bytes = [0u8; 16];
++    match TileMessage::decode(&frame.payload)? {
++        TileMessage::GpuAck { .. } => bytes[..15].copy_from_slice(&frame.payload),
++        TileMessage::CacheMiss { .. } => {
++            bytes[0] = 9;
++            bytes[1] = 1;
++        }
++        _ => bail!("unexpected client GPU tile command"),
++    }
++    Ok(Some(bytes))
++}
++
++async fn route(
++    mut source: mpsc::Receiver<Frame>,
++    forward: mpsc::Sender<Frame>,
++    mut input: tokio::net::unix::OwnedWriteHalf,
++) -> anyhow::Result<()> {
++    while let Some(mut frame) = source.recv().await {
++        if let Some(command) = command(&frame)? {
++            tokio::time::timeout(Duration::from_secs(2), input.write_all(&command)).await??;
++            continue;
++        }
++        if let Ok(Message::Control(ControlMessage::ResolutionRequest { width, height })) =
++            Message::from_frame(&frame)
++        {
++            // Match the bounded GPU cache, never silently crop a larger display.
++            frame = ControlMessage::ResolutionRequest {
++                width: width.clamp(32, 1920),
++                height: height.clamp(32, 1080),
++            }
++            .to_frame();
++        }
++        if forward.send(frame).await.is_err() {
++            break;
++        }
++    }
++    input.shutdown().await?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn controls_are_exact_and_bounded() {
++        let ack = TileMessage::GpuAck {
++            epoch: 42,
++            frame_seq: 7,
++            rejected: false,
++        }
++        .to_frame();
++        let out = command(&ack).unwrap().unwrap();
++        assert_eq!(&out[..15], &ack.payload[..]);
++        assert_eq!(out[15], 0);
++        let reset = TileMessage::CacheMiss {
++            frame_seq: 0,
++            col: 65535,
++            row: 65535,
++            hash: 0,
++        }
++        .to_frame();
++        assert_eq!(
++            command(&reset).unwrap().unwrap(),
++            [9, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
++        );
++        assert!(command(&TileMessage::BatchEnd { frame_seq: 2 }.to_frame()).is_err());
++        let mut bad = ack;
++        let mut payload = bad.payload.to_vec();
++        payload.push(0);
++        bad.payload = payload.into();
++        assert!(command(&bad).is_err());
++    }
++}
+diff --git a/code/apps/bpane-host/src/main.rs b/code/apps/bpane-host/src/main.rs
+index 91aa7b5a..fa046d78 100644
+--- a/code/apps/bpane-host/src/main.rs
++++ b/code/apps/bpane-host/src/main.rs
+@@ -8,6 +8,7 @@ mod cursor;
+ mod display;
+ mod encode;
+ mod filetransfer;
++mod gpu_tail;
+ mod input;
+ mod ipc;
+ mod message_dispatch;
+diff --git a/code/apps/bpane-host/src/session.rs b/code/apps/bpane-host/src/session.rs
+index 4843d652..2d93a9ed 100644
+--- a/code/apps/bpane-host/src/session.rs
++++ b/code/apps/bpane-host/src/session.rs
+@@ -31,6 +31,7 @@ pub async fn run_ffmpeg_session(
+     from_gateway: mpsc::Receiver<Frame>,
+     to_gateway: mpsc::Sender<Frame>,
+ ) -> anyhow::Result<()> {
++    let gpu_tail = crate::gpu_tail::enabled()?;
+     // Hide the X cursor so only the streamed cursor is visible.
+     #[allow(unused)]
+     let _cursor_hider = match cursor::CursorHider::new(display) {
+@@ -67,7 +68,7 @@ pub async fn run_ffmpeg_session(
+         width,
+         height,
+         fps,
+-        h264_mode.starts_enabled(),
++        !gpu_tail && h264_mode.starts_enabled(),
+     )?;
+ 
+     let mut input_backend: Box<dyn InputBackend> = if cfg!(target_os = "linux") {
+@@ -89,7 +90,7 @@ pub async fn run_ffmpeg_session(
+     };
+ 
+     // Shared state
+-    let tiles_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let tiles_active = Arc::new(std::sync::atomic::AtomicBool::new(gpu_tail));
+     let video_tile_info = Arc::new(std::sync::Mutex::new(None::<VideoTileInfo>));
+     let input_activity_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+     let browser_video_hint = Arc::new(std::sync::Mutex::new(cdp_video::PageHintState::default()));
+@@ -197,6 +198,12 @@ pub async fn run_ffmpeg_session(
+ 
+     // Tile capture thread
+     let (tile_tx, mut tile_rx) = mpsc::channel::<Frame>(256);
++    let (from_gateway, gpu_task) = if gpu_tail {
++        let (rx, task) = crate::gpu_tail::start(from_gateway, tile_tx.clone());
++        (rx, Some(task))
++    } else {
++        (from_gateway, None)
++    };
+     let display_for_tiles = display.to_string();
+     let cmd_tx_for_tiles = cmd_tx.clone();
+     let tiles_active_for_tiles = tiles_active.clone();
+@@ -204,25 +211,29 @@ pub async fn run_ffmpeg_session(
+     let browser_video_hint_for_tiles = browser_video_hint.clone();
+     let input_activity_for_tiles = input_activity_ms.clone();
+     let tile_config_for_tiles = tile_config.clone();
+-    let tile_thread = tokio::task::spawn_blocking(move || {
+-        if let Some(thread) = tile_loop::TileCaptureThread::new(
+-            &display_for_tiles,
+-            width,
+-            height,
+-            tile_config_for_tiles,
+-            tile_tx,
+-            cmd_tx_for_tiles,
+-            tiles_active_for_tiles,
+-            video_tile_info_for_tiles,
+-            browser_video_hint_for_tiles,
+-            input_activity_for_tiles,
+-            scroll_rx,
+-            text_input_rx,
+-            cache_miss_rx,
+-        ) {
+-            thread.run();
+-        }
+-    });
++    let tile_thread = if gpu_tail {
++        None
++    } else {
++        Some(tokio::task::spawn_blocking(move || {
++            if let Some(thread) = tile_loop::TileCaptureThread::new(
++                &display_for_tiles,
++                width,
++                height,
++                tile_config_for_tiles,
++                tile_tx,
++                cmd_tx_for_tiles,
++                tiles_active_for_tiles,
++                video_tile_info_for_tiles,
++                browser_video_hint_for_tiles,
++                input_activity_for_tiles,
++                scroll_rx,
++                text_input_rx,
++                cache_miss_rx,
++            ) {
++                thread.run();
++            }
++        }))
++    };
+ 
+     // Tile frame forwarder
+     let tile_gateway = to_gateway.clone();
+@@ -254,7 +265,9 @@ pub async fn run_ffmpeg_session(
+     let _ = cmd_tx.send(capture::ffmpeg::PipelineCmd::Stop);
+     bridge.abort();
+     video_fwd.abort();
+-    tile_thread.abort();
++    if let Some(thread) = tile_thread {
++        thread.abort();
++    }
+     tile_fwd.abort();
+     cursor_task.abort();
+     clipboard_task.abort();
+@@ -264,5 +277,17 @@ pub async fn run_ffmpeg_session(
+     if let Some(handle) = browser_video_hint_task {
+         handle.task.abort();
+     }
++    if let Some(task) = gpu_task {
++        // A dispatch failure must close both Unix halves and release the worker,
++        // even if the gateway is still connected but no longer sending input.
++        if !task.is_finished() {
++            task.abort();
++        }
++        match task.await {
++            Ok(result) => result?,
++            Err(error) if error.is_cancelled() => {}
++            Err(error) => return Err(error.into()),
++        }
++    }
+     result
+ }
+diff --git a/code/shared/bpane-protocol/src/frame/negotiation/model.rs b/code/shared/bpane-protocol/src/frame/negotiation/model.rs
+index c83611a0..69c8ba08 100644
+--- a/code/shared/bpane-protocol/src/frame/negotiation/model.rs
++++ b/code/shared/bpane-protocol/src/frame/negotiation/model.rs
+@@ -24,11 +24,12 @@ pub enum ProtocolCapability {
+     FileTransfer = 0x000C,
+     ExtendedKeyboard = 0x000D,
+     ClientAccessState = 0x000E,
++    GpuTileAck = 0x000F,
+ }
+ 
+ impl ProtocolCapability {
+     /// All capabilities defined by protocol v1, in numeric order.
+-    pub const ALL: [Self; 14] = [
++    pub const ALL: [Self; 15] = [
+         Self::TileZstd,
+         Self::TileCache,
+         Self::TileScroll,
+@@ -43,6 +44,7 @@ impl ProtocolCapability {
+         Self::FileTransfer,
+         Self::ExtendedKeyboard,
+         Self::ClientAccessState,
++        Self::GpuTileAck,
+     ];
+ 
+     /// Return the numeric wire identifier.
+@@ -67,6 +69,7 @@ impl ProtocolCapability {
+             Self::FileTransfer => "file_transfer",
+             Self::ExtendedKeyboard => "extended_keyboard",
+             Self::ClientAccessState => "client_access_state",
++            Self::GpuTileAck => "gpu_tile_ack",
+         }
+     }
+ 
+diff --git a/code/shared/bpane-protocol/src/frame/tests/gpu_tile.rs b/code/shared/bpane-protocol/src/frame/tests/gpu_tile.rs
+new file mode 100644
+index 00000000..4945b20e
+--- /dev/null
++++ b/code/shared/bpane-protocol/src/frame/tests/gpu_tile.rs
+@@ -0,0 +1,36 @@
++use crate::{frame::FrameError, TileMessage};
++
++#[test]
++fn gpu_lease_wire_is_exact_and_versioned() {
++    let begin = TileMessage::GpuBegin {
++        epoch: 0x0102030405060708,
++        frame_seq: 0x11223344,
++    };
++    let bytes = vec![13, 1, 8, 7, 6, 5, 4, 3, 2, 1, 68, 51, 34, 17];
++    assert_eq!(begin.encode(), bytes);
++    assert_eq!(TileMessage::decode(&bytes).unwrap(), begin);
++    for n in 0..bytes.len() {
++        assert!(TileMessage::decode(&bytes[..n]).is_err());
++    }
++    let mut extra = bytes.clone();
++    extra.push(0);
++    assert!(TileMessage::decode(&extra).is_err());
++    let mut bad = bytes;
++    bad[1] = 2;
++    assert!(matches!(
++        TileMessage::decode(&bad),
++        Err(FrameError::InvalidFieldValue { .. })
++    ));
++    for rejected in [false, true] {
++        let ack = TileMessage::GpuAck {
++            epoch: 7,
++            frame_seq: 99,
++            rejected,
++        };
++        let mut wire = ack.encode();
++        assert_eq!(wire.len(), 15);
++        assert_eq!(TileMessage::decode(&wire).unwrap(), ack);
++        wire[14] = 2;
++        assert!(TileMessage::decode(&wire).is_err());
++    }
++}
+diff --git a/code/shared/bpane-protocol/src/frame/tests.rs b/code/shared/bpane-protocol/src/frame/tests.rs
+index 8ac3e01d..7f669be3 100644
+--- a/code/shared/bpane-protocol/src/frame/tests.rs
++++ b/code/shared/bpane-protocol/src/frame/tests.rs
+@@ -3,6 +3,7 @@ mod control;
+ mod cursor_clipboard_file;
+ mod decoder;
+ mod envelope;
++mod gpu_tile;
+ mod input;
+ mod message_dispatch;
+ mod tile_frame;
+diff --git a/code/shared/bpane-protocol/src/frame/tile/decode.rs b/code/shared/bpane-protocol/src/frame/tile/decode.rs
+index b696428b..080a5c7c 100644
+--- a/code/shared/bpane-protocol/src/frame/tile/decode.rs
++++ b/code/shared/bpane-protocol/src/frame/tile/decode.rs
+@@ -1,8 +1,8 @@
+ use crate::{channel::ChannelId, types::TileMessage};
+ 
+ use super::{
+-    BATCH_END, CACHE_HIT, CACHE_MISS, FILL, GRID_CONFIG, GRID_OFFSET, QOI, SCROLL_COPY,
+-    SCROLL_STATS, TILE_DRAW_MODE, VIDEO_REGION, ZSTD,
++    BATCH_END, CACHE_HIT, CACHE_MISS, FILL, GPU_ACK, GPU_BEGIN, GRID_CONFIG, GRID_OFFSET, QOI,
++    SCROLL_COPY, SCROLL_STATS, TILE_DRAW_MODE, VIDEO_REGION, ZSTD,
+ };
+ use crate::frame::{io::Reader, FrameError};
+ 
+@@ -10,6 +10,33 @@ pub(super) fn decode(buf: &[u8]) -> Result<TileMessage, FrameError> {
+     let mut r = Reader::new(buf);
+     let tag = r.read_u8()?;
+     match tag {
++        GPU_BEGIN | GPU_ACK => {
++            let expected = if tag == GPU_BEGIN { 14 } else { 15 };
++            if buf.len() != expected {
++                return Err(FrameError::InvalidFieldValue {
++                    field: "gpu_message_length",
++                    value: buf.len() as u64,
++                });
++            }
++            let version = r.read_u8()?;
++            let epoch = r.read_u64()?;
++            let frame_seq = r.read_u32()?;
++            if version != 1 || epoch == 0 || frame_seq == 0 || (tag == GPU_ACK && buf[14] > 1) {
++                return Err(FrameError::InvalidFieldValue {
++                    field: "gpu_message",
++                    value: version as u64,
++                });
++            }
++            if tag == GPU_BEGIN {
++                Ok(TileMessage::GpuBegin { epoch, frame_seq })
++            } else {
++                Ok(TileMessage::GpuAck {
++                    epoch,
++                    frame_seq,
++                    rejected: r.read_bool()?,
++                })
++            }
++        }
+         GRID_CONFIG => Ok(TileMessage::GridConfig {
+             tile_size: r.read_u16()?,
+             cols: r.read_u16()?,
+diff --git a/code/shared/bpane-protocol/src/frame/tile.rs b/code/shared/bpane-protocol/src/frame/tile.rs
+index 76fee00f..7c0851a7 100644
+--- a/code/shared/bpane-protocol/src/frame/tile.rs
++++ b/code/shared/bpane-protocol/src/frame/tile.rs
+@@ -18,12 +18,31 @@ const CACHE_MISS: u8 = 0x09;
+ const SCROLL_STATS: u8 = 0x0A;
+ const TILE_DRAW_MODE: u8 = 0x0B;
+ const ZSTD: u8 = 0x0C;
++const GPU_BEGIN: u8 = 0x0D;
++const GPU_ACK: u8 = 0x0E;
+ 
+ impl TileMessage {
+     /// Encode a tile command payload.
+     pub fn encode(&self) -> Vec<u8> {
+         let mut w = Writer::new();
+         match self {
++            Self::GpuBegin { epoch, frame_seq } => {
++                w.write_u8(GPU_BEGIN);
++                w.write_u8(1);
++                w.write_u64(*epoch);
++                w.write_u32(*frame_seq);
++            }
++            Self::GpuAck {
++                epoch,
++                frame_seq,
++                rejected,
++            } => {
++                w.write_u8(GPU_ACK);
++                w.write_u8(1);
++                w.write_u64(*epoch);
++                w.write_u32(*frame_seq);
++                w.write_bool(*rejected);
++            }
+             Self::GridConfig {
+                 tile_size,
+                 cols,
+diff --git a/code/shared/bpane-protocol/src/types.rs b/code/shared/bpane-protocol/src/types.rs
+index ede4f753..d859f3c6 100644
+--- a/code/shared/bpane-protocol/src/types.rs
++++ b/code/shared/bpane-protocol/src/types.rs
+@@ -469,6 +469,14 @@ impl FileMessage {
+ /// - Video tiles → H.264 via the VIDEO channel (only the video region)
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum TileMessage {
++    /// Experimental GPU batch lease. Only encoded tiles follow; no raw image.
++    GpuBegin { epoch: u64, frame_seq: u32 },
++    /// Receiver applied the complete batch, or rejected it for a fresh snapshot.
++    GpuAck {
++        epoch: u64,
++        frame_seq: u32,
++        rejected: bool,
++    },
+     /// Sent once on connect and after resize. Defines the tile grid.
+     GridConfig {
+         tile_size: u16,
+diff --git a/code/web/bpane-client/js/__tests__/gpu-frame-ack.test.ts b/code/web/bpane-client/js/__tests__/gpu-frame-ack.test.ts
+new file mode 100644
+index 00000000..0a6cd8a9
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/gpu-frame-ack.test.ts
+@@ -0,0 +1,38 @@
++import { describe, expect, it, vi } from 'vitest';
++import { GpuFrameAck } from '../render/gpu-frame-ack.js';
++import { TileMessageParser } from '../render/tile-message-parser.js';
++
++describe('GPU frame ACK ownership', () => {
++  it('emits the exact versioned bytes once, only for the current frame', () => {
++    const sender = vi.fn(), ack = new GpuFrameAck(); ack.setSender(sender);
++    ack.begin(0x0102030405060708n, 0x11223344);
++    ack.finish(1); expect(sender).not.toHaveBeenCalled();
++    ack.finish(0x11223344);
++    expect([...sender.mock.calls[0][0]]).toEqual([14,1,8,7,6,5,4,3,2,1,68,51,34,17,0]);
++    ack.finish(0x11223344); expect(sender).toHaveBeenCalledTimes(1);
++  });
++  it('rejects an incomplete batch and cannot ACK after reset', () => {
++    const sender = vi.fn(), ack = new GpuFrameAck(); ack.setSender(sender);
++    ack.begin(99n, 2); ack.finish(2, true);
++    expect(sender.mock.calls[0][0][14]).toBe(1);
++    ack.begin(99n, 3); ack.reset(); ack.finish(3); expect(sender).toHaveBeenCalledTimes(1);
++  });
++  it('ignores stale completions when a new snapshot supersedes an old batch', () => {
++    const sender = vi.fn(), ack = new GpuFrameAck(); ack.setSender(sender);
++    ack.begin(99n, 2); ack.begin(99n, 3); ack.finish(2);
++    expect(sender).not.toHaveBeenCalled(); ack.finish(3); expect(sender).toHaveBeenCalledTimes(1);
++  });
++  it('fails closed without an ACK route or on invalid leases', () => {
++    const ack = new GpuFrameAck(); expect(() => ack.begin(1n, 1)).toThrow();
++    ack.setSender(() => {});
++    for (const epoch of [0n, -1n, 1n << 64n]) expect(() => ack.begin(epoch, 1)).toThrow();
++    for (const seq of [0,-1,1.5,2 ** 32,NaN]) expect(() => ack.begin(1n, seq)).toThrow();
++  });
++  it('strictly parses GPU begin messages, including byte offsets', () => {
++    const bytes = Uint8Array.from([13,1,8,7,6,5,4,3,2,1,68,51,34,17]);
++    expect(TileMessageParser.parse(bytes)).toEqual({ type: 'gpu-begin', epoch: 0x0102030405060708n, frameSeq: 0x11223344 });
++    for (let n=0; n<bytes.length; n++) expect(TileMessageParser.parse(bytes.slice(0,n))).toBeNull();
++    expect(TileMessageParser.parse(Uint8Array.from([...bytes,0]))).toBeNull();
++    const bad=bytes.slice(); bad[1]=2; expect(TileMessageParser.parse(bad)).toBeNull();
++  });
++});
+diff --git a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+index c535f065..a9240401 100644
+--- a/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/tile-compositor.test.ts
+@@ -100,6 +100,47 @@ describe('TileCompositor', () => {
+ 
+     beforeEach(() => vi.useFakeTimers());
+ 
++    it('acknowledges a GPU lease only after its complete batch is drawn', async () => {
++      const send = vi.fn(() => expect(ctx.fillRect).toHaveBeenCalledTimes(1));
++      compositor.setGpuAckHandler(send);
++      compositor.processCommand({ type: 'gpu-begin', epoch: 7n, frameSeq: 8 });
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'fill', col: 0, row: 0, rgba: 0xff });
++      expect(send).not.toHaveBeenCalled();
++      compositor.processCommand({ type: 'batch-end', frameSeq: 8 });
++      expect(send).not.toHaveBeenCalled();
++      await vi.advanceTimersByTimeAsync(0);
++      expect(send).toHaveBeenCalledTimes(1);
++      expect(send.mock.calls[0][0][14]).toBe(0);
++    });
++
++    it('rejects a GPU lease when there is no drawable surface', async () => {
++      const send = vi.fn();
++      compositor.setGpuAckHandler(send);
++      compositor.setContext(null);
++      compositor.processCommand({ type: 'gpu-begin', epoch: 7n, frameSeq: 8 });
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'fill', col: 0, row: 0, rgba: 0xff });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 8 });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(send).toHaveBeenCalledTimes(1);
++      expect(send.mock.calls[0][0][14]).toBe(1);
++      expect(ctx.fillRect).not.toHaveBeenCalled();
++    });
++
++    it('does not positively acknowledge a GPU cache miss', async () => {
++      const send = vi.fn();
++      compositor.setGpuAckHandler(send);
++      compositor.setCacheMissHandler(vi.fn());
++      compositor.processCommand({ type: 'gpu-begin', epoch: 7n, frameSeq: 8 });
++      compositor.processCommand({ type: 'grid-config', config: grid });
++      compositor.processCommand({ type: 'cache-hit', col: 0, row: 0, hash: 999n });
++      compositor.processCommand({ type: 'batch-end', frameSeq: 8 });
++      await vi.advanceTimersByTimeAsync(0);
++      expect(send).toHaveBeenCalledTimes(1);
++      expect(send.mock.calls[0][0][14]).toBe(1);
++    });
++
+     it.each(['cache-hit', 'qoi', 'zstd'] as const)('pauses dependent commands after a %s failure until fresh grid pixels arrive', async (type) => {
+       const onMiss = vi.fn();
+       const onError = vi.fn();
+diff --git a/code/web/bpane-client/js/protocol-negotiation-types.ts b/code/web/bpane-client/js/protocol-negotiation-types.ts
+index 02e136a8..ae8d41d7 100644
+--- a/code/web/bpane-client/js/protocol-negotiation-types.ts
++++ b/code/web/bpane-client/js/protocol-negotiation-types.ts
+@@ -15,6 +15,7 @@ export const PROTOCOL_CAPABILITY = {
+   fileTransfer: 0x000C,
+   extendedKeyboard: 0x000D,
+   clientAccessState: 0x000E,
++  gpuTileAck: 0x000F,
+ } as const;
+ 
+ export type ProtocolCapability =
+diff --git a/code/web/bpane-client/js/render/gpu-frame-ack.ts b/code/web/bpane-client/js/render/gpu-frame-ack.ts
+new file mode 100644
+index 00000000..44920505
+--- /dev/null
++++ b/code/web/bpane-client/js/render/gpu-frame-ack.ts
+@@ -0,0 +1,28 @@
++/** One GPU lease at a time. ACK means complete ordered drawing, not scanout. */
++export class GpuFrameAck {
++  private pending: { epoch: bigint; frameSeq: number } | null = null;
++  private send: ((payload: Uint8Array) => void) | null = null;
++
++  public setSender(send: ((payload: Uint8Array) => void) | null): void { this.send = send; }
++
++  public begin(epoch: bigint, frameSeq: number): void {
++    if (epoch <= 0n || epoch > 0xffffffffffffffffn || !Number.isInteger(frameSeq)
++      || frameSeq <= 0 || frameSeq > 0xffffffff) throw new Error('Invalid GPU lease');
++    if (!this.send) throw new Error('GPU lease acknowledgement unavailable');
++    this.pending = { epoch, frameSeq };
++  }
++
++  public reset(): void { this.pending = null; }
++
++  public isPending(frameSeq: number): boolean { return this.pending?.frameSeq === frameSeq; }
++
++  public finish(frameSeq: number, rejected = false): void {
++    if (!this.pending || this.pending.frameSeq !== frameSeq) return;
++    const payload = new Uint8Array(15), view = new DataView(payload.buffer);
++    payload[0] = 0x0E; payload[1] = 1;
++    view.setBigUint64(2, this.pending.epoch, true);
++    view.setUint32(10, frameSeq, true); payload[14] = Number(rejected);
++    if (!this.send) throw new Error('GPU lease acknowledgement disconnected');
++    this.send(payload); this.pending = null;
++  }
++}
+diff --git a/code/web/bpane-client/js/render/tile-draw-runtime.ts b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+index 3fdb4cbf..9130e069 100644
+--- a/code/web/bpane-client/js/render/tile-draw-runtime.ts
++++ b/code/web/bpane-client/js/render/tile-draw-runtime.ts
+@@ -106,6 +106,8 @@ export class TileDrawRuntime {
+     return this.glRenderer !== null;
+   }
+ 
++  hasOutput(): boolean { return this.ctx !== null || this.glRenderer !== null; }
++
+   getGridConfig(): TileGridConfig | null {
+     return this.gridConfig;
+   }
+diff --git a/code/web/bpane-client/js/render/tile-message-parser.ts b/code/web/bpane-client/js/render/tile-message-parser.ts
+index 100da479..4aa785c0 100644
+--- a/code/web/bpane-client/js/render/tile-message-parser.ts
++++ b/code/web/bpane-client/js/render/tile-message-parser.ts
+@@ -23,6 +23,10 @@ export class TileMessageParser {
+     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+ 
+     switch (payload[0]) {
++      case 0x0D:
++        if (payload.length !== 14 || payload[1] !== 1 || view.getBigUint64(2, true) === 0n
++          || view.getUint32(10, true) === 0) return null;
++        return { type: 'gpu-begin', epoch: view.getBigUint64(2, true), frameSeq: view.getUint32(10, true) };
+       case TILE_GRID_CONFIG:
+         return TileMessageParser.parseGridConfig(payload, view);
+       case TILE_CACHE_HIT:
+diff --git a/code/web/bpane-client/js/session-runtime-factory.ts b/code/web/bpane-client/js/session-runtime-factory.ts
+index b66c08c9..0c44dede 100644
+--- a/code/web/bpane-client/js/session-runtime-factory.ts
++++ b/code/web/bpane-client/js/session-runtime-factory.ts
+@@ -214,6 +214,7 @@ export class SessionRuntimeFactory {
+       }
+     };
+     params.tileCompositor.setRenderErrorHandler?.(onRenderError);
++    params.tileCompositor.setGpuAckHandler?.((payload) => params.context.sendFrame(0x0B, payload));
+     const surfaceRuntime = this.deps.createSessionSurfaceRuntime({
+       container: params.container,
+       tileCompositor: params.tileCompositor,
+diff --git a/code/web/bpane-client/js/tile-cache.ts b/code/web/bpane-client/js/tile-cache.ts
+index 6d8a7a99..b3ca6fcc 100644
+--- a/code/web/bpane-client/js/tile-cache.ts
++++ b/code/web/bpane-client/js/tile-cache.ts
+@@ -24,6 +24,7 @@ export interface TileGridConfig {
+ 
+ /** A single tile update command from the server. */
+ export type TileCommand =
++  | { type: 'gpu-begin'; epoch: bigint; frameSeq: number }
+   | { type: 'grid-config'; config: TileGridConfig }
+   | { type: 'cache-hit'; col: number; row: number; hash: bigint }
+   | { type: 'fill'; col: number; row: number; rgba: number }
+diff --git a/code/web/bpane-client/js/tile-compositor.ts b/code/web/bpane-client/js/tile-compositor.ts
+index 3748c8bf..a66e3e6c 100644
+--- a/code/web/bpane-client/js/tile-compositor.ts
++++ b/code/web/bpane-client/js/tile-compositor.ts
+@@ -24,6 +24,7 @@ import {
+ } from './render/tile-draw-runtime.js';
+ import { ZstdTileRenderer } from './render/zstd-tile-renderer.js';
+ import type { WebGLTileRenderer } from './webgl-compositor.js';
++import { GpuFrameAck } from './render/gpu-frame-ack.js';
+ 
+ const SNAPSHOT_RECOVERY_TIMEOUT_MS = 5000;
+ 
+@@ -38,6 +39,10 @@ export interface CompositorStats extends TileCompositorRenderStats {
+ }
+ 
+ export class TileCompositor {
++  private readonly gpuAck = new GpuFrameAck();
++  public setGpuAckHandler(handler: ((payload: Uint8Array) => void) | null): void {
++    this.gpuAck.setSender(handler);
++  }
+   private videoRegion: { x: number; y: number; w: number; h: number } | null = null;
+   private pendingCommands: TileCommand[] = [];
+   private readonly tileBatchCommandApplier: TileBatchCommandApplier;
+@@ -174,6 +179,7 @@ export class TileCompositor {
+     // makes a later coordinate-only repair insufficient. The paired host
+     // upgrades this report to a complete, fresh GridConfig snapshot.
+     this.awaitingSnapshot = true;
++    this.gpuAck.finish(event.frameSeq, true);
+     if (this.snapshotRecoveryTimer === null) {
+       this.snapshotRecoveryTimer = setTimeout(() => {
+         this.snapshotRecoveryTimer = null;
+@@ -216,6 +222,9 @@ export class TileCompositor {
+   /** Process a parsed tile command. */
+   processCommand(cmd: TileCommand): void {
+     switch (cmd.type) {
++      case 'gpu-begin':
++        this.gpuAck.begin(cmd.epoch, cmd.frameSeq);
++        break;
+       case 'grid-config':
+         // Invalidate any in-flight async decode work and reset drawing state.
+         this.tileBatchSequencer.invalidate();
+@@ -261,6 +270,7 @@ export class TileCompositor {
+ 
+   /** Reset state (e.g., on disconnect or resize). */
+   reset(): void {
++    this.gpuAck.reset();
+     this.cancelSnapshotRecoveryTimer();
+     this.awaitingSnapshot = false;
+     this.tileBatchSequencer.reset();
+@@ -276,6 +286,10 @@ export class TileCompositor {
+     if (!this.tileBatchSequencer.isCurrentEpoch(epoch) || this.awaitingSnapshot) {
+       return false;
+     }
++    if (this.gpuAck.isPending(frameSeq) && !this.tileDrawRuntime.hasOutput()) {
++      this.gpuAck.finish(frameSeq, true);
++      return false;
++    }
+     const completed = this.tileBatchCommandApplier.applyCommands({
+       commands,
+       frameSeq,
+@@ -289,6 +303,7 @@ export class TileCompositor {
+       // Safety: ensure offset mode is restored even if TileDrawMode(true) was missed.
+       this.tileDrawRuntime.restoreDefaultDrawMode();
+       this.cancelSnapshotRecoveryTimer();
++      this.gpuAck.finish(frameSeq);
+       return true;
+     }
+     return false;

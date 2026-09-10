@@ -83,6 +83,21 @@ before granting the agent access to sensitive browsing sessions.
 
 ## MCP configuration
 
+Optional [workflow learning](WORKFLOW_LEARNING.md) adds an explicitly selected
+Hermes plugin/toolset. It uses the existing skills and observer APIs, records only
+selected session/task intervals, and returns unverified draft guidance. It is
+disabled by default, does not change this MCP configuration, and makes no model
+calls by itself. It does not execute recipes automatically. The separate
+[`bpane-workflow` report-recipe CLI](WORKFLOW_REPLAY.md) can run a deliberately
+reviewed pilot export using the existing MCP endpoint and shared downloads.
+Hermes may prepare drafts and invoke an already authorized run; it must not
+approve, abandon, or create a replacement run to bypass an uncertain result.
+For execution directly from chat, independently enable `browserpane-replay` and
+the `workflow_execution` toolset. Its single [Hermes-local `workflow` tool](WORKFLOW_EXECUTION.md)
+selects operator-registered IDs, reuses its own warm connection to the shared
+browser, and supports status/cancellation/read-only reconciliation. Recording
+alone never enables it. No extra MCP browser tool or network listener is added.
+
 The initial config contains:
 
 ```yaml
@@ -282,8 +297,10 @@ This checks the pinned revision, native imports, linked SQLite/FTS5, MCP
 connectivity and the exact six compact tools, including the absence of legacy
 close/install tools. For an intentionally configured legacy server, use
 `--mcp --mcp-mode playwright`; that option changes only verification expectations,
-not the server or saved config. The verifier lists tools but does not navigate a page,
-execute browser tools, or call a model. Import checks can initialize ordinary
+not the server or saved config. Verification against the configured MCP server
+only lists tools: it does not navigate or execute browser input there. A separate
+disposable loopback fake-browser fixture exercises the recipe CLI/SDK, journal
+and verifier. Neither check calls a model. Import checks can initialize ordinary
 Hermes runtime files in its own home.
 
 Development checks use a separate image and disposable, identity-checked

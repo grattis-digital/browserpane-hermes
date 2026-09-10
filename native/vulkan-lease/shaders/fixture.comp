@@ -1,0 +1,39 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(rgba8,set=0,binding=0) writeonly uniform image2D previousFrame;
+layout(rgba8,set=0,binding=1) writeonly uniform image2D currentFrame;
+layout(push_constant) uniform Params { uint width; uint height; uint scenario; uint spare; } p;
+uint base(uvec2 q) {
+    uint c=0x123456u;
+    if (q.y%37u<17u) c=0x315779u;
+    if (q.x%83u<11u) c=0x84a2c6u;
+    if (q.y<48u) c=0x223344u;
+    return c;
+}
+void main() {
+    uvec2 q=gl_GlobalInvocationID.xy;
+    if(q.x>=p.width || q.y>=p.height) return;
+    uint a=base(q), b=a;
+    if(p.scenario==1u && q.x>=4u && q.x<28u && q.y>=8u && q.y<32u) b=0xabcdefu;
+    if(p.scenario==2u) b=0xfedcbau;
+    if(p.scenario==3u && q.x==p.width-1u && q.y==p.height-1u) b=a^1u;
+    if(p.scenario==4u && q.y>=48u) {
+        b=q.y+13u<p.height ? base(q+uvec2(0,13)) : 0x365478u;
+        if(q.x>=100u && q.x<132u && q.y>=100u && q.y<132u) b=0xaccdefu;
+    }
+    if(q.x>=128u && q.x<192u && q.y>=128u && q.y<192u) {
+        if(p.scenario==5u) b=base(q-uvec2(64,0));
+        if(p.scenario==6u) {
+            uint v=q.x+q.y*p.width; v^=v>>16; v*=0x7feb352du; v^=v>>15;
+            v*=0x846ca68bu; b=(v^(v>>16))&0xffffffu;
+        }
+        if(p.scenario==7u) b=(q.x-128u)<<16 | (q.y-128u)<<8 | (q.x+q.y-256u);
+    }
+    if(p.scenario==8u) b=0xfedcbau^uint(q.x==p.width-1u && q.y==p.height-1u);
+    if(p.scenario==9u || p.scenario==10u) {
+        if(q.x>=130u && q.x<772u && q.y>=66u && q.y<428u) b=0xabcdefu;
+        if(p.scenario==10u && q.x==129u && q.y==66u) b=0xfedcbau;
+    }
+    imageStore(previousFrame,ivec2(q),vec4((a>>16)&255u,(a>>8)&255u,a&255u,255u)/255.0);
+    imageStore(currentFrame,ivec2(q),vec4((b>>16)&255u,(b>>8)&255u,b&255u,255u)/255.0);
+}
