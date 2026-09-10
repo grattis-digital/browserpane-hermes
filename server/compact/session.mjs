@@ -3,6 +3,8 @@ import { PaneSchemas } from './schemas.mjs';
 import { PaneValidation } from './validation.mjs';
 import { PaneError } from './errors.mjs';
 import { PaneReader } from './reader.mjs';
+import { ObservationCapture } from './observation-capture.mjs';
+import { ObservationRefs } from './observation-refs.mjs';
 export class PaneSession {
   #browser;
   #executor;
@@ -71,6 +73,12 @@ export class PaneSession {
         if (args.tab !== undefined && args.tab !== source.tab) throw new PaneError('STALE_STATE', 'Observation state belongs to another tab.');
         tab = this.#browser.tab(source.tab);
       } else tab = this.#browser.tab(args.tab);
+      if (args.root) {
+        const source = this.#view(args).view;
+        if (!source.refs.has(args.root)) throw new PaneError('STALE_REF', 'Scope must be a ref returned in the latest view.');
+        if (args.enterFrame && ObservationRefs.semantic(source.refs.get(args.root))?.role !== 'iframe')
+          throw new PaneError('INVALID_ARGUMENT', 'enterFrame requires an observed iframe ref.');
+      }
       return this.#result(await this.#observe(tab, args, trace));
     }
     if (name === 'pane_act') return this.#act(args, signal, trace);
@@ -85,27 +93,8 @@ export class PaneSession {
   }
 
   async #observe(tab, options = {}, trace) {
-    if (options.state) {
-      const source = this.#observations.source(options.state);
-      if (!source || source.tab !== tab.id) throw new PaneError('STALE_STATE', 'Observation state expired or belongs to another tab.');
-      tab.assert(source.document, source.mutation);
-      if (tab.page.url() !== source.url) throw new PaneError('STALE_STATE', 'Tab URL changed. Capture a fresh pane_view.');
-      const { state, tab: _tab, ...projection } = options;
-      trace?.increment('stateHits');
-      const view = trace ? await trace.span('projectionMs', () => this.#observations.reproject(state, projection))
-        : this.#observations.reproject(state, projection);
-      this.#remember(tab.id, view, source.mutation);
-      return { ...view, ...tab.metadata() };
-    }
-    const document = tab.document, mutation = tab.mutation;
-    const snapshotWork = trace ? trace.span('snapshotMs', () => tab.snapshot()) : tab.snapshot();
-    const [snapshot, title] = await Promise.all([snapshotWork, tab.dialog ? '' : tab.page.title()]);
-    trace?.increment('snapshots');
-    tab.assert(document, mutation);
-    const capture = () => this.#observations.capture({ ...options, tab: tab.id, document, mutation,
-      url: tab.page.url().slice(0, 4096), title: title.slice(0, 300), snapshot });
-    const view = trace ? await trace.span('projectionMs', capture) : capture();
-    this.#remember(tab.id, view, mutation);
+    const view = await ObservationCapture.run(tab, options, trace, this.#observations);
+    this.#remember(tab.id, view, tab.mutation);
     return { ...view, ...tab.metadata() };
   }
 
@@ -123,6 +112,7 @@ export class PaneSession {
       throw new PaneError('STALE_VIEW', 'Use the latest pane_view for this tab in this MCP session.');
     }
     const tab = this.#browser.tab(args.tab);
+    if (args.stages && view.coverage) throw new PaneError('SCOPED_VIEW', 'Guarded workflows require a full-page view without capture/root limits. Scoped input uses pane_act.');
     tab.assert(view.document, this.#epochs.get(args.view));
     if (tab.page.url() !== view.url) throw new PaneError('STALE_VIEW', 'Tab URL changed. Observe again.');
     return { tab, view };
@@ -133,7 +123,7 @@ export class PaneSession {
     let outcome = { request: args.request, completed: 0 };
     try {
       if (args.steps[0].op === 'new') {
-        outcome.mayHaveActed = true;
+        this.#browser.assertCanCreate(); outcome.mayHaveActed = true;
         tab = await this.#browser.create();
         if (signal?.aborted) throw new PaneError('CANCELLED', 'New tab created; navigation was cancelled.');
         const url = args.steps[0].url;
@@ -159,7 +149,7 @@ export class PaneSession {
     if (tab) outcome.tab = tab.id;
     if (tab && !tab.page.isClosed() && !['close_requested', 'tab_closed'].includes(outcome.stopped) && args.observe !== 'none' && !signal?.aborted) {
       try {
-        const options = view && view.document === tab.document
+        const options = view?.coverage ? { capture: 'outline' } : view && view.document === tab.document
           ? { ...view.projection, ...(args.observe !== 'full' ? { since: view.view } : {}) } : {};
         outcome.observation = await this.#observe(tab, options, trace);
       } catch (error) {

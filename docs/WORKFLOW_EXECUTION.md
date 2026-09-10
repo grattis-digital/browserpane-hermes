@@ -180,7 +180,7 @@ Both arms use the same Python recipe/SDK/verifier and five MCP calls. Only the
 owned synthetic fixtures auto-acknowledge their contracts. No timing threshold or
 paid model is used in CI; CI runs a shorter persistent-profile smoke test.
 
-Local ARM64 Mac / headless sandboxed Chromium 146, 2026-09-07:
+Local ARM64 Mac / headless sandboxed Chromium 146:
 
 | Metric | Cold CLI | Warm service |
 | --- | ---: | ---: |
@@ -226,7 +226,7 @@ in that attempt, but its precise browser failure remains unresolved.
 
 New reason-code/oracle diagnostics subsequently reproduced a successful download
 followed by a three-second post-click completion timeout. The bounded fix in
-browser checkpoint `bb9d6d2e` passed fresh Pi smoke/recovery and then all 30 pairs
+the browser candidate passed fresh Pi smoke/recovery and then all 30 pairs
 plus recovery in a new invocation: 61 benchmark exports in one profile, followed
 by health-report/cancellation and persistence checks. Cold/warm median wall times
 were 19.23/4.10 seconds; 20 of 30 warm runs needed no extra poll and ten needed one.

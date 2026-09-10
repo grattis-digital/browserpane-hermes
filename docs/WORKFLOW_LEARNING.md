@@ -145,7 +145,7 @@ model calls. Container qualification also checks restart, recreation, preserved
 operator configuration and unchanged six-tool MCP discovery. CI definitions run
 these deterministic checks without paid model calls.
 
-The local 2026-09-07 qualification completed 30 paired parameter cases: all 60
+The local qualification completed 30 paired parameter cases: all 60
 valid exports passed and all four deliberately invalid exports were rejected.
 Separate versus batched calls used four versus three MCP requests, with median
 serialized MCP result sizes of 1,250 versus 1,113 bytes. Median trial times were

@@ -8,11 +8,65 @@ license.
 
 ## Patch map
 
+GPU consumer recovery is tracked directly in `native/vulkan-lease/live-watch.*`,
+the live listener/loop, `runtime/gpu-dummy-start.sh` and the wrapper's GPU health
+checks. It does not change the viewer wire protocol or require a new upstream
+patch. Backport the paired display/browser health changes and fault regressions
+together; retain normal idle/parked behavior and bounded, same-UID health access.
+
+Patch `0031-bounded-video-burst-presentation.patch` follows `0030`. It fences
+both sides of keyframe delivery, rejects overtaken pre-IDR deltas using existing
+wire timestamps, tolerates short decoder bursts and retains at most three
+decoded viewer frames with a 50 ms stale-backlog policy. No wire change or
+prebuffering timer is added. Its deterministic queue, reset and ordering tests
+must accompany it; report texture commits separately from decode submissions.
+
+Patch `0030-video-stability-and-delivery.patch` builds on `0028`/`0029`: one
+bounded metadata-probe retry, finite GPU hint grace, independent bounded gateway
+egress lanes with codec/keyframe ordering, and honest viewer presentation
+counters. Pair it with the native pixel-level video-edge exclusion in
+`tail-analyze.comp` and its synthetic boundary/move/exit cache tests. No new
+wire format, network listener or CPU pixel path is introduced. The gateway lane
+and viewer telemetry changes can be evaluated separately for backporting;
+GPU-specific hint timing depends on the paired native video pipeline. See
+[GPU_LIVE_TEST.md](GPU_LIVE_TEST.md) for limits and verification commands.
+
+The [Pi video-decode candidate](GPU_VIDEO_DECODE.md) is wrapper/package work,
+not another BrowserPane rendering patch. Its pinned Raspberry Pi Chromium
+patches and MIT h264ify dependency belong to their respective upstream projects.
+Keep the image, explicit decoder mapping and readiness checks together; do not
+claim hardware playback from a package build or a generic GPU-rendering check.
+
+Patch `0028-experimental-gpu-video.patch` adds stable/expiring CDP video-region
+hints, bounded GPU-worker H.264 output forwarding and screen-geometry validation
+for late viewer frames. It requires `0027` and the matching native Vulkan/V4L2
+worker, shaders and optional video Compose layer. The native conversion/encoder
+is in `native/vulkan-lease/video-*.c` and `shaders/video-nv12.comp`; no FFmpeg
+screen-capture path is re-enabled. See the [video setup and verification
+boundaries](GPU_LIVE_TEST.md#optional-pi-4-hardware-video-regions).
+
+Patch `0027-experimental-gpu-tail-integration.patch` pairs the encoded-byte host
+bridge, gateway admission/refresh, wire messages and viewer applied-batch ACK.
+It is opt-in and requires the native lease/encoder and display entrypoint; do
+not backport only one side. See [GPU_LIVE_TEST.md](GPU_LIVE_TEST.md).
+
+The separate [GPU-backed Xorg driver experiment](../native/gpu-dummy/README.md)
+is original `native/gpu-dummy/` code, not a new upstream rendering patch. Its
+Rust core, C/Xorg adapter, image and protocol tests must travel together. The explicit GPU Compose live target uses this driver with the Vulkan lease
+consumer, encoded-output bridge and recovery watchers. Do not cherry-pick only
+a driver binary or assume software-fixture passes qualify the full stack.
+
 The [compact MCP experiment](COMPACT_MCP.md) is original wrapper code, not an
 upstream rendering patch. Its observation, replay and transport layers can be reviewed independently
 of these rendering patches. The pinned generic Playwright MCP settlement-timer
 issue is documented with measurements; this branch bypasses that orchestration,
 without modifying or claiming to fix all later upstream releases.
+The later [scoped observation extension](MCP_SCOPED_OBSERVATIONS.md) **does** patch
+the pinned Playwright dependency, separately from these rendering patches.
+Backport its installer, four-file hash checks, server coverage/ref contract and
+real-browser tests together. Do not copy edited `node_modules` or assume a new
+Playwright version has equivalent private internals. It does not modify CDP,
+Chromium, the X11/GPU capture stack or the viewer protocol.
 
 Paths below are relative to upstream `code/`. Host means
 `apps/bpane-host/src`, gateway means `apps/bpane-gateway/src`, and client means
@@ -38,7 +92,7 @@ Paths below are relative to upstream `code/`. Host means
 | 0016 failed-resize state restoration | Host `cdp_video.rs`, `cdp_video/resize_tests.rs` | Attempt restoration of the prior window state even when the intermediate numeric-bounds request fails |
 | 0017 browser-owned window resize | Host `cdp_video.rs`, `cdp_video/{resize_tests,browser_resize_tests}.rs` | Keep top-level window commands on a browser-level CDP connection that survives the identifying tab closing |
 | 0018 drawable renderer fallback | Client `session-surface-runtime.ts`, `render/session-canvas-factory.ts` | Finalize renderer/context before mounting; replace rejected WebGL canvases with drawable Canvas2D, fail explicitly if neither exists |
-| 0019 opt-in virtual GPU display | Host `capture/ffmpeg.rs`, `capture/ffmpeg/xvnc_tests.rs` | Explicit VNC-0 backend with the same exact-root/sole-output geometry gate; default DUMMY0 behavior retained |
+| 0019 virtual display validation | Host `capture/ffmpeg.rs` | Only dummy/gpu-dummy accepted; shared exact-root/sole-DUMMY0-output geometry contract |
 | 0020 external X11 startup | Upstream `deploy/start-host.sh` | Opt-in DRI3 display readiness without deleting another server's socket or spawning dummy Xorg |
 | 0021 restore without extra tab | Upstream `deploy/start-host.sh` | Recheck saved session state on every supervised launch; keep initial URL only for a fresh shared profile |
 | 0022 deterministic token retry tests | Gateway tests `apps/bpane-gateway/tests/compose_api_surface/support.rs` | Use one Tokio clock for retry deadlines/sleeps; paused-clock retry, timeout and immediate-success assertions |
@@ -133,6 +187,42 @@ Real Compose callers retain real-time waits and the same timeout/retry settings.
 No native regression is skipped and no CI timing budget is enlarged.
 
 ## Rebuild and verify from the pin
+
+Patch 0029 corrects the experimental GPU-video cadence introduced in 0028.
+The host accepts multiple bounded access units between complete tile batches;
+geometry, framing, region revocation and incomplete-batch rejection remain.
+Its private header version 2 requires the paired native display worker. Backport
+with the three-slot lease policy, independently owned video Vulkan/codec worker,
+atomic output serialization and revocation checks, not just removal of the host
+one-frame gate. The existing viewer protocol and tile ACK/cache contracts stay
+unchanged. See [GPU live testing](GPU_LIVE_TEST.md) for scope and qualification.
+
+The separate [Chromium surface-damage experiment](../native/chromium-damage/README.md)
+targets Chromium commit `4999cc1efed37c4d91dc4ce6ec4b0a50e2a9a8cb`, not the
+BrowserPane pin below. Its patch, overlay and exact source digests must travel
+together. It is default-off and not yet compiled/qualified in Chromium. Do not
+add it to the BrowserPane ordered series or backport only the EGL call: retain
+logical-damage, sequence/producer, transition and failure guards with their tests.
+The Chromium experiment is independent of the ordered BrowserPane patch series.
+
+Patch 0023 adds default-off sparse X11 readback with two-buffer history repair,
+conservative unknown/resize/video/error fallback, and diagnostic-only copy/request
+accounting. It retains the tile protocol and needs the prior capture/damage fixes.
+Keep all native regional/SHM/GetImage and late-damage regressions, not just the
+flag. See [damage and human-scroll qualification](DAMAGE_SCROLL_EXPERIMENT.md).
+
+Patch 0024 retains viewer pointer ownership until release, including outside-canvas
+release, cancellation, capture loss and teardown. It is independent of regional
+readback and changes no wire messages or wheel/grid policy. Retain its seven
+pointer regressions and the native-thumb outside-release oracle when backporting.
+
+Patch 0025 makes classifier hashing demand/region-aware behind an independent
+default-off flag and reports exact damage/readback admission decisions. It depends
+on 0023's verified regional-frame/history contract, not just raw damage hints.
+Retain the differential hash and full classifier-lifecycle regressions.
+Patch 0026 fixes dropped trailing pointer motion with a bounded latest-position
+timer, preserving 0024's cancellation/release ownership. See
+[damage-directed analysis](DAMAGE_DIRECTED_ANALYSIS.md) for scope and evidence.
 
 ```sh
 npm ci

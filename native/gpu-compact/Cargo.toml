@@ -1,0 +1,20 @@
+[package]
+name = "bpane-gpu-compact-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+description = "Finite GPU-resident exact tile reduction experiment, not a production capture backend"
+repository = "https://github.com/grattis-digital/browserpane-hermes"
+readme = "README.md"
+publish = false
+
+[profile.release]
+lto = true
+panic = "abort"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

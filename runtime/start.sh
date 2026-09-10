@@ -25,6 +25,13 @@ shutdown() {
   wait || true
 }
 trap shutdown TERM INT EXIT
+if [ -r /sys/fs/cgroup/memory.events ]; then
+  memory_baseline=$(bash /app/runtime/watch-memory.sh --baseline)
+  bash /app/runtime/watch-memory.sh /sys/fs/cgroup/memory.events 5 "$memory_baseline" &
+  children+=("$!")
+else
+  echo 'Memory watchdog unavailable: cgroup v2 memory.events is not readable' >&2
+fi
 setsid bash /app/upstream/start-host.sh &
 host_group=$!
 children+=("$host_group")
@@ -35,7 +42,7 @@ for attempt in $(seq 1 150); do
 done
 test -S "$BPANE_SOCKET_PATH"
 curl -fsS http://127.0.0.1:9222/json/version >/dev/null
-if [ "${BPANE_X11_BACKEND:-dummy}" = xvnc ]; then
+if [ "${BPANE_X11_BACKEND:-dummy}" = gpu-dummy ]; then
   gpu_ready=0
   for attempt in $(seq 1 10); do
     if node /app/server/check-gpu.mjs; then gpu_ready=1; break; fi

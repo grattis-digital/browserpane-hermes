@@ -16,11 +16,11 @@ test('CPU mode preserves every Chromium flag unchanged', () => {
 });
 test('V3D changes only graphics flags and requires the qualified X11 backend', () => {
   const flags = ['--disable-gpu', '--disable-gpu-compositing', '--use-gl=swiftshader', '--ozone-platform=x11', '--disable-setuid-sandbox', '--restore-last-session'];
-  assert.deepEqual(args('v3d', 'xvnc', flags), ['--ozone-platform=x11', '--disable-setuid-sandbox', '--restore-last-session',
+  assert.deepEqual(args('v3d', 'gpu-dummy', flags), ['--ozone-platform=x11', '--disable-setuid-sandbox', '--restore-last-session',
     '--use-gl=angle', '--use-angle=gles-egl', '--enable-gpu-rasterization', '--disable-gpu-vsync']);
-  for (const [mode, backend, options] of [['v3d', 'dummy', []], ['typo', 'xvnc', []],
-    ['v3d', 'xvnc', ['--no-sandbox']], ['v3d', 'xvnc', ['--no-sandbox=true']],
-    ['v3d', 'xvnc', ['--disable-gpu-sandbox']], ['v3d', 'xvnc', ['--disable-gpu-sandbox=true']]]) {
+  for (const [mode, backend, options] of [['v3d', 'dummy', []], ['typo', 'gpu-dummy', []],
+    ['v3d', 'gpu-dummy', ['--no-sandbox']], ['v3d', 'gpu-dummy', ['--no-sandbox=true']],
+    ['v3d', 'gpu-dummy', ['--disable-gpu-sandbox']], ['v3d', 'gpu-dummy', ['--disable-gpu-sandbox=true']]]) {
     assert.throws(() => args(mode, backend, options), error => error.status === 64);
   }
 });
@@ -39,8 +39,10 @@ test('GPU display stays private and explicit; discovery uses stable driver ident
   assert.match(discover, /\/dev\/dri\/by-path/);
   assert.match(discover, /renderD\*:v3d/);
   assert.match(discover, /card\*:vc4-drm/);
-  const display = readFileSync('runtime/gpu-x11-start.sh', 'utf8');
-  assert.match(display, /-rfbport -1/);
+  const display = readFileSync('runtime/gpu-dummy-start.sh', 'utf8');
+  assert.match(display, /bpane-vulkan-probe --listen/);
+  assert.match(config, /BPANE_GPU_TAIL: "1"/);
+  assert.match(config, /target: gpu-live-display/);
   assert.match(display, /-nolisten tcp/);
   assert.match(display, /_BPANE_X11_INSTANCE/);
   const supervisor = readFileSync('runtime/start.sh', 'utf8');
@@ -83,16 +85,16 @@ test('GPU readiness uses only private browser-level SystemInfo and rejects endpo
   assert.equal(calls.length, 2);
 });
 test('display readiness drains large xdpyinfo output under pipefail', () => {
-  const source = readFileSync('runtime/gpu-x11-start.sh', 'utf8');
+  const source = readFileSync('runtime/gpu-dummy-start.sh', 'utf8');
   const condition = source.match(/if (timeout 2 xdpyinfo[^;]+); then ready=1;/)?.[1];
   assert(condition, 'Test must exercise the actual display-readiness command');
   const fixture = marker => `set -o pipefail
     timeout() { shift; "$@"; }
     xdpyinfo() { awk 'BEGIN { print "${marker}"; for(i=0;i<100000;i++) print "screen visual depth 24"; }'; }
     ${condition}`;
-  execFileSync('bash', ['-c', fixture('DRI3')], { timeout: 5000 });
-  assert.throws(() => execFileSync('bash', ['-c', fixture('DRI2')], { timeout: 5000 }), error => error.status === 1);
+  execFileSync('bash', ['-c', fixture('BPANE-GPU-LEASE')], { timeout: 5000 });
+  assert.throws(() => execFileSync('bash', ['-c', fixture('unsupported')], { timeout: 5000 }), error => error.status === 1);
   // Prove the old early-exit pipeline reproduces the same readiness failure.
-  assert.throws(() => execFileSync('bash', ['-c', fixture('DRI3').replace('grep DRI3 >/dev/null', 'grep -q DRI3')],
+  assert.throws(() => execFileSync('bash', ['-c', fixture('BPANE-GPU-LEASE').replace('grep BPANE-GPU-LEASE >/dev/null', 'grep -q BPANE-GPU-LEASE')],
     { timeout: 5000 }), error => error.status !== 0);
 });

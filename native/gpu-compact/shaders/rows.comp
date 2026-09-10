@@ -1,0 +1,27 @@
+#version 310 es
+// Position-independent vertical matching index. These sampled fingerprints
+// propose reuse only; compact.comp must verify every pixel before accepting it.
+precision highp float;
+precision highp int;
+layout(local_size_x=8, local_size_y=8) in;
+layout(r32ui, binding=0) readonly uniform highp uimage2D current;
+layout(std430, binding=4) buffer Rows { uint entries[]; };
+uniform ivec2 size;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int columns = (size.x + 31) / 32;
+    if (p.x >= columns || p.y >= size.y) return;
+    uint hash = 2166136261u;
+    for (int i = 0; i < 8; ++i) {
+        int x = min(p.x * 32 + i * 4 + 1, size.x - 1);
+        hash = (hash ^ imageLoad(current, ivec2(x, p.y)).r) * 16777619u;
+    }
+    entries[p.x * size.y + p.y] = hash;
+    uint base = uint(columns * size.y + p.x * 2048);
+    // Eight bounded probes. Overflow loses a candidate, not correctness.
+    // Zero means empty; entries store row+1, not an unchecked pixel identity.
+    for (uint probe = 0u; probe < 8u; ++probe) {
+        uint slot = base + ((hash + probe) & 2047u);
+        if (atomicCompSwap(entries[slot], 0u, uint(p.y) + 1u) == 0u) break;
+    }
+}

@@ -1,0 +1,14 @@
+# Optional Pi 4 hardware video regions, layered after compose.gpu.yaml.
+# Select the bcm2835-codec-encode device, NOT a camera or decoder device.
+services:
+  browserpane:
+    environment:
+      BPANE_H264_MODE: video_tiles
+  gpu-display:
+    # Keep UID/Unix peer identity. Use the codec GID as the primary group so
+    # equal codec/display GIDs do not duplicate Compose's group_add list.
+    user: "10000:${BPANE_GPU_VIDEO_GID:?Set the encoder device group ID}"
+    environment:
+      BPANE_GPU_VIDEO: "1"
+    devices:
+      - ${BPANE_GPU_VIDEO_DEVICE:?Select the bcm2835-codec-encode node}:/dev/bpane-video-encode:rw

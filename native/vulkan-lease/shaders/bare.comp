@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+// Same tile/workgroup/memory layout as diff.comp, but exact RGB diff ONLY.
+// No classification, early exit, sampling, compaction or CPU participation.
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=0) readonly uniform image2D previousFrame;
+layout(set=0,binding=1) readonly uniform image2D currentFrame;
+layout(set=0,binding=2,std430) buffer Scratch { uint flags[512]; uint colors[512]; };
+layout(push_constant) uniform Params { uint width; uint height; uint scenario; uint spare; } p;
+shared uint changed;
+void main() {
+    if (gl_LocalInvocationIndex==0u) changed=0u;
+    memoryBarrierShared(); barrier();
+    ivec2 origin=ivec2(gl_WorkGroupID.xy)*64;
+    uint different=0u;
+    for (int y=0;y<64;y+=16) for (int x=0;x<64;x+=16) {
+        ivec2 q=origin+ivec2(gl_LocalInvocationID.xy)+ivec2(x,y);
+        if (all(lessThan(q,ivec2(p.width,p.height))))
+            different |= any(notEqual(imageLoad(previousFrame,q).rgb,imageLoad(currentFrame,q).rgb))?1u:0u;
+    }
+    if (different!=0u) atomicOr(changed,1u);
+    memoryBarrierShared(); barrier();
+    if (gl_LocalInvocationIndex==0u)
+        flags[gl_WorkGroupID.y*gl_NumWorkGroups.x+gl_WorkGroupID.x]=changed;
+}

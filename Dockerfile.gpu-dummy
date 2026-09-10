@@ -1,0 +1,142 @@
+# Experimental driver and Vulkan pipeline; selected only by GPU Compose.
+FROM rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS rust-core
+WORKDIR /driver
+RUN rustup component add clippy rustfmt
+COPY native/gpu-dummy/Cargo.toml native/gpu-dummy/Cargo.lock ./
+COPY native/gpu-dummy/src ./src
+RUN cargo fmt --all --check && cargo test --locked --offline && cargo clippy --locked --offline --all-targets -- -D warnings \
+    && cargo build --locked --offline --release
+
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS abi-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config xserver-xorg-dev libdrm-dev libepoxy-dev libgbm-dev libxcb1-dev \
+    libx11-dev libxrandr-dev libxpresent-dev libxext-dev libxfixes-dev libxdamage-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=rust-core /driver/target/release/libbpane_gpu_dummy.a /build/
+COPY native/gpu-dummy/abi /build/abi
+WORKDIR /build
+COPY native/gpu-dummy/tests/wire-fixture.c /build/wire-fixture.c
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -Iabi wire-fixture.c -o wire-fixture && ./wire-fixture
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -fPIC -Wall -Wextra -Werror -isystem /usr/include/xorg \
+      $(pkg-config --cflags xorg-server libdrm epoxy) -shared abi/*.c libbpane_gpu_dummy.a \
+      $(pkg-config --libs libdrm epoxy gbm) -lpthread -ldl -lm -o bpane_drv.so \
+    && cc -std=c11 -D_GNU_SOURCE -DBPANE_TEST_SOFTWARE=1 -O2 -fPIC -Wall -Wextra -Werror -isystem /usr/include/xorg \
+      $(pkg-config --cflags xorg-server libdrm epoxy) -shared abi/*.c libbpane_gpu_dummy.a \
+      $(pkg-config --libs libdrm epoxy gbm) -lpthread -ldl -lm -o bpane_test_drv.so
+RUN cc -std=c11 -D_GNU_SOURCE -DBPANE_TEST_SOFTWARE=1 -g -O1 -fPIC -fsanitize=address -fno-omit-frame-pointer \
+      -Wall -Wextra -Werror -isystem /usr/include/xorg $(pkg-config --cflags xorg-server libdrm epoxy) \
+      -shared abi/*.c libbpane_gpu_dummy.a $(pkg-config --libs libdrm epoxy gbm) -lpthread -ldl -lm -o bpane_asan_test_drv.so
+COPY native/gpu-dummy/tests/probe.c /build/probe.c
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror probe.c $(pkg-config --cflags --libs x11 xrandr xpresent xext) -o probe
+COPY native/gpu-dummy/tests/egl-probe.c /build/egl-probe.c
+COPY native/gpu-dummy/tests/capture-bench.c /build/capture-bench.c
+COPY native/gpu-dummy/tests/damage-probe.c /build/damage-probe.c
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror egl-probe.c capture-bench.c damage-probe.c $(pkg-config --cflags --libs x11 xext xdamage epoxy) -ldl -o egl-probe
+COPY native/gpu-dummy/tests/lease-*.c native/gpu-dummy/tests/lease-client.h /build/lease/
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror -Iabi lease/*.c \
+      $(pkg-config --cflags --libs xcb x11 xrandr gbm libdrm epoxy) -o lease-probe
+COPY native/gpu-dummy/tests/compare-*.c native/gpu-dummy/tests/compare-kernel.h /build/lease/
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror -Iabi lease/compare-*.c \
+      lease/lease-client.c lease/lease-import.c lease/lease-diff.c \
+      $(pkg-config --cflags --libs xcb x11 xrandr gbm libdrm epoxy) -o compare-probe
+
+# Dependency-independent policy used by the default-off Chromium source patch.
+# This never checks out, builds or launches Chromium, and needs no GPU/display.
+COPY native/chromium-damage/overlay /build/chromium-damage/overlay
+COPY native/chromium-damage/tests /build/chromium-damage/tests
+RUN g++ -std=c++20 -O1 -g -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined \
+      -fno-sanitize-recover=all -fno-omit-frame-pointer \
+      -Ichromium-damage/overlay chromium-damage/tests/surface-damage-test.cc -o damage-policy-test \
+    && ASAN_OPTIONS=detect_leaks=0 timeout 15 ./damage-policy-test
+
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xserver-xorg-core libgl1-mesa-dri libegl-mesa0 libgles2 libepoxy0 libdrm2 x11-utils x11-xserver-utils tini libxpresent1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.X11-unix && chown 10000:10000 /tmp/.X11-unix && chmod 1770 /tmp/.X11-unix
+COPY native/gpu-dummy/xorg.conf /etc/X11/bpane.conf
+USER 10000:10000
+ENV HOME=/tmp DISPLAY=:99
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/lib/xorg/Xorg", ":99", "-config", "/etc/X11/bpane.conf", "-logfile", "/tmp/Xorg.log", "-nolisten", "tcp", "-noreset", "-nocursor", "-ac"]
+
+FROM runtime-base AS test-display
+# This alternate binary cannot be activated by a runtime environment variable.
+COPY --from=abi-build /build/bpane_test_drv.so /usr/lib/xorg/modules/drivers/bpane_drv.so
+COPY --from=abi-build /build/probe /usr/local/bin/bpane-display-probe
+
+FROM runtime-base AS gpu-check
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libxdamage1 && rm -rf /var/lib/apt/lists/*
+USER 10000:10000
+COPY --from=abi-build /build/bpane_drv.so /usr/lib/xorg/modules/drivers/bpane_drv.so
+COPY --from=abi-build /build/probe /usr/local/bin/bpane-display-probe
+COPY --from=abi-build /build/egl-probe /usr/local/bin/bpane-egl-probe
+COPY --from=abi-build /build/lease-probe /usr/local/bin/bpane-lease-probe
+COPY --from=abi-build /build/compare-probe /usr/local/bin/bpane-compare-probe
+RUN bpane-egl-probe --check-runtime
+
+FROM runtime-base AS asan-test-display
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libasan8 && rm -rf /var/lib/apt/lists/*
+COPY --from=abi-build /build/bpane_asan_test_drv.so /usr/lib/xorg/modules/drivers/bpane_drv.so
+COPY --from=abi-build /build/probe /usr/local/bin/bpane-display-probe
+USER 10000:10000
+ENV LD_PRELOAD=libasan.so.8 ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:fast_unwind_on_malloc=0
+
+# Small local ARM64 test-binary export; no Chromium compilation or deployment.
+FROM scratch AS comparison-artifacts
+COPY --from=abi-build /build/compare-probe /bpane-compare-probe
+
+# Default-off Vulkan consumer. All shader/data work stays in this isolated
+# component target; the normal display image does not gain a Vulkan dependency.
+FROM abi-build AS vulkan-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvulkan-dev libxcb-damage0-dev glslang-tools spirv-tools mesa-vulkan-drivers vulkan-validationlayers \
+    && rm -rf /var/lib/apt/lists/*
+COPY native/vulkan-lease /build/vulkan
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -Iabi -Ilease -Ivulkan \
+      vulkan/fence.c vulkan/tests/fence-test.c -o fence-test && timeout 5 ./fence-test
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror -Ivulkan \
+      vulkan/live-watch.c vulkan/tests/watch-test.c -o watch-test && timeout 15 ./watch-test
+RUN mkdir -p /usr/share/bpane-vulkan && for shader in vulkan/shaders/*.comp; do \
+      name=$(basename "$shader" .comp); \
+      glslangValidator -V --target-env vulkan1.2 "$shader" -o "/usr/share/bpane-vulkan/$name.spv" \
+      && spirv-val --target-env vulkan1.2 "/usr/share/bpane-vulkan/$name.spv" || exit 1; \
+    done
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror -Iabi -Ilease vulkan/*.c \
+      lease/compare-kernel.c lease/lease-client.c lease/lease-import.c lease/lease-diff.c \
+      $(pkg-config --cflags --libs vulkan xcb xcb-damage x11 xrandr gbm libdrm epoxy) -lm -pthread -o vulkan-probe
+# Software waits have a separate bounded allowance; outer job limits stay fixed.
+RUN timeout 110 ./vulkan-probe --software --validate
+RUN timeout 180 ./vulkan-probe --software --validate --audit > /build/vulkan-audit-software.json
+RUN timeout 180 ./vulkan-probe --software --validate --tail-export > /build/vulkan-tail-software.json
+
+FROM gpu-check AS vulkan-check
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libvulkan1 libxcb-damage0 mesa-vulkan-drivers vulkan-validationlayers && rm -rf /var/lib/apt/lists/*
+COPY --from=vulkan-build /build/vulkan-probe /usr/local/bin/bpane-vulkan-probe
+COPY --from=vulkan-build /usr/share/bpane-vulkan /usr/share/bpane-vulkan
+USER 10000:10000
+ENV BPANE_GPU_LEASE_LAYOUT=uif
+
+# Explicit experimental end-to-end display adapter; ordinary targets unchanged.
+FROM vulkan-check AS gpu-live-display
+COPY runtime/gpu-dummy-start.sh /app/gpu-dummy-start.sh
+ENV BPANE_GPU_TAIL=1 BPANE_GPU_LEASE=1
+ENTRYPOINT ["/usr/bin/tini", "--", "/bin/bash", "/app/gpu-dummy-start.sh"]
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=3 CMD bpane-vulkan-probe --health && timeout 1 xprop -root _BPANE_X11_INSTANCE | grep -q STRING
+
+FROM scratch AS vulkan-artifacts
+COPY --from=vulkan-build /build/vulkan-probe /bpane-vulkan-probe
+COPY --from=vulkan-build /usr/share/bpane-vulkan /shaders
+COPY --from=abi-build /build/bpane_drv.so /bpane_drv.so
+
+# Synthetic final-wire evidence for the unchanged viewer decoder gate.
+FROM scratch AS vulkan-tail-evidence
+COPY --from=vulkan-build /tmp/bpane-gpu-tail.wire /tail-wire.bin
+COPY --from=vulkan-build /build/vulkan-tail-software.json /tail-software.json
+
+# Keep the fail-closed driver binary as the default target.
+FROM runtime-base AS gpu-display
+COPY --from=abi-build /build/bpane_drv.so /usr/lib/xorg/modules/drivers/bpane_drv.so

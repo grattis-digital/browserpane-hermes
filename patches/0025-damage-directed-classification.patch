@@ -1,0 +1,838 @@
+diff --git a/code/apps/bpane-host/src/capture/damage_observation.rs b/code/apps/bpane-host/src/capture/damage_observation.rs
+new file mode 100644
+index 0000000..351d9f4
+--- /dev/null
++++ b/code/apps/bpane-host/src/capture/damage_observation.rs
+@@ -0,0 +1,32 @@
++//! Numeric, content-free evidence explaining why damage bounds were admitted.
++#[derive(Clone, Copy, Debug, Default)]
++pub(crate) struct DamageObservation {
++    pub rects: usize,
++    pub bounds: Option<(u16, u16, u16, u16)>,
++    pub geometry: (u16, u16),
++    pub reason: DamageReason,
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub(crate) enum DamageReason {
++    #[default]
++    Unavailable,
++    Known,
++    Invalidated,
++    Empty,
++    AcknowledgeFailed,
++    GeometryMismatch,
++}
++
++impl DamageReason {
++    pub fn label(self) -> &'static str {
++        match self {
++            Self::Unavailable => "unavailable",
++            Self::Known => "known",
++            Self::Invalidated => "invalidated",
++            Self::Empty => "empty",
++            Self::AcknowledgeFailed => "ack_failed",
++            Self::GeometryMismatch => "geometry_mismatch",
++        }
++    }
++}
+diff --git a/code/apps/bpane-host/src/capture/mod.rs b/code/apps/bpane-host/src/capture/mod.rs
+index e15ad6d..e0e1883 100644
+--- a/code/apps/bpane-host/src/capture/mod.rs
++++ b/code/apps/bpane-host/src/capture/mod.rs
+@@ -1,4 +1,5 @@
+ pub mod ffmpeg;
++pub(crate) mod damage_observation;
+ pub(crate) mod region;
+ pub(crate) mod readback_timing;
+ pub mod x11;
+diff --git a/code/apps/bpane-host/src/capture/x11.rs b/code/apps/bpane-host/src/capture/x11.rs
+index cbaad30..fb3c048 100644
+--- a/code/apps/bpane-host/src/capture/x11.rs
++++ b/code/apps/bpane-host/src/capture/x11.rs
+@@ -702,6 +702,7 @@ pub struct DamageTracker {
+     preserve_all_damage: bool,
+     bounds_untrusted: bool,
+     damage_geometry: (u16, u16),
++    last_observation: super::damage_observation::DamageObservation,
+ }
+ 
+ /// A damage rectangle reported by XDamage.
+@@ -803,6 +804,7 @@ impl DamageTracker {
+                     preserve_all_damage: false,
+                     bounds_untrusted: true,
+                     damage_geometry,
++                    last_observation: Default::default(),
+                 }))
+             }
+             Err(e) => {
+@@ -1000,6 +1002,7 @@ impl DamageTracker {
+     /// even though capture uses another X11 connection. Never clear events
+     /// after the frame has been read/encoded/sent.
+     pub fn begin_capture(&mut self) -> Option<(u16, u16, u16, u16)> {
++        use super::damage_observation::{DamageObservation, DamageReason};
+         self.drain_events();
+         let acknowledged = self
+             .conn
+@@ -1008,7 +1011,14 @@ impl DamageTracker {
+             .and_then(|cookie| cookie.check().ok())
+             .is_some();
+         self.drain_events();
+-        let bounds = if self.bounds_untrusted { None } else { self.damage_bounding_box() };
++        let raw_bounds = self.damage_bounding_box();
++        let bounds = if self.bounds_untrusted { None } else { raw_bounds };
++        self.last_observation = DamageObservation {
++            rects: self.damage_rects.len(), bounds: raw_bounds, geometry: self.damage_geometry,
++            reason: if !acknowledged { DamageReason::AcknowledgeFailed }
++                else if self.bounds_untrusted { DamageReason::Invalidated }
++                else if bounds.is_none() { DamageReason::Empty } else { DamageReason::Known },
++        };
+         self.bounds_untrusted = false;
+         self.dirty = false;
+         self.first_damage_at = None;
+@@ -1030,9 +1040,16 @@ impl DamageTracker {
+     /// No regional readback/dirty filtering against a different root geometry.
+     pub fn begin_capture_for_size(&mut self, width: u16, height: u16) -> Option<(u16, u16, u16, u16)> {
+         let bounds = self.begin_capture();
++        if self.damage_geometry != (width, height) {
++            self.last_observation.reason = super::damage_observation::DamageReason::GeometryMismatch;
++        }
+         (self.damage_geometry == (width, height)).then_some(bounds).flatten()
+     }
+ 
++    pub(crate) fn observation(&self) -> super::damage_observation::DamageObservation {
++        self.last_observation
++    }
++
+     fn has_recent_input_activity(&self) -> bool {
+         let Some(activity_ms) = &self.input_activity_ms else {
+             return false;
+@@ -1255,6 +1272,7 @@ pub struct DamageRect {
+ #[cfg(not(target_os = "linux"))]
+ impl DamageTracker {
+     pub fn begin_capture_for_size(&mut self, _width: u16, _height: u16) -> Option<(u16, u16, u16, u16)> { None }
++    pub(crate) fn observation(&self) -> super::damage_observation::DamageObservation { Default::default() }
+     pub fn for_tile_capture(
+         _display: &str,
+         _input_activity_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+diff --git a/code/apps/bpane-host/src/config/mod.rs b/code/apps/bpane-host/src/config/mod.rs
+index 2bb9eaf..4d54c1f 100644
+--- a/code/apps/bpane-host/src/config/mod.rs
++++ b/code/apps/bpane-host/src/config/mod.rs
+@@ -186,6 +186,7 @@ pub struct TileCaptureConfig {
+     pub scroll_thin_mode_enabled: bool,
+     pub video_classification_enabled: bool,
+     pub damage_readback: bool,
++    pub damage_analysis: bool,
+ }
+ 
+ impl TileCaptureConfig {
+@@ -234,6 +235,7 @@ impl TileCaptureConfig {
+             scroll_thin_mode_enabled: env_bool("BPANE_SCROLL_THIN_MODE", false),
+             video_classification_enabled: !matches!(h264_mode, H264Mode::Off),
+             damage_readback: env_bool("BPANE_EXPERIMENTAL_DAMAGE_READBACK", false),
++            damage_analysis: env_bool("BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS", false),
+         }
+     }
+ }
+diff --git a/code/apps/bpane-host/src/config/tests.rs b/code/apps/bpane-host/src/config/tests.rs
+index 040c48e..4bcbd98 100644
+--- a/code/apps/bpane-host/src/config/tests.rs
++++ b/code/apps/bpane-host/src/config/tests.rs
+@@ -223,6 +223,17 @@ fn scroll_copy_quantum_defaults_to_half_tile_without_changing_wheel_input() {
+     }
+ }
+ 
++#[test]
++fn experimental_damage_analysis_is_independently_opt_in() {
++    let _environment = EnvironmentFixture::capture(&["BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS"]);
++    std::env::remove_var("BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS");
++    assert!(!TileCaptureConfig::from_env().damage_analysis);
++    for (value, enabled) in [("1", true), ("0", false), ("invalid", false)] {
++        std::env::set_var("BPANE_EXPERIMENTAL_DAMAGE_ANALYSIS", value);
++        assert_eq!(TileCaptureConfig::from_env().damage_analysis, enabled);
++    }
++}
++
+ #[test]
+ fn tile_capture_config_off_disables_classification() {
+     let _environment = EnvironmentFixture::capture(&["BPANE_H264_MODE"]);
+diff --git a/code/apps/bpane-host/src/tile_loop/classification_hashes.rs b/code/apps/bpane-host/src/tile_loop/classification_hashes.rs
+new file mode 100644
+index 0000000..b664c5a
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/classification_hashes.rs
+@@ -0,0 +1,87 @@
++//! Reuse only known-equal captured pixels, or omit hashes with no video consumer.
++//! The emitter owns independent lossless hashes. A video hint returning after an
++//! inactive period lazily hashes the previous image: no stale classification
++//! baseline, missing first motion, or disabling video to win a benchmark.
++use crate::capture::region::PixelRect;
++use crate::region::hash_tile_region;
++
++#[derive(Clone, Copy, Debug, Default)]
++pub(crate) struct ClassificationWork {
++    pub current_tiles: u32,
++    pub previous_tiles: u32,
++    pub reused_tiles: u32,
++    pub inactive_tiles: u32,
++}
++
++pub(super) struct ClassificationHashes<'a> {
++    enabled: bool,
++    inactive: bool,
++    verified: Option<PixelRect>,
++    current: &'a [u8],
++    previous: Option<&'a [u8]>,
++    stride: usize,
++    work: ClassificationWork,
++}
++
++impl<'a> ClassificationHashes<'a> {
++    pub fn new(
++        enabled: bool,
++        inactive: bool,
++        verified: Option<PixelRect>,
++        current: &'a [u8],
++        previous: Option<&'a [u8]>,
++        stride: usize,
++    ) -> Self {
++        Self {
++            enabled,
++            inactive,
++            verified,
++            current,
++            previous: previous.filter(|frame| frame.len() == current.len()),
++            stride,
++            work: Default::default(),
++        }
++    }
++
++    pub fn resolve(&mut self, tile: (usize, usize, usize, usize), stored: u64) -> (u64, bool) {
++        if self.enabled && self.inactive {
++            self.work.inactive_tiles += 1;
++            return (0, false); // Explicitly invalidate the old classifier-only hash.
++        }
++        let (x, y, w, h) = tile;
++        let mut baseline = stored;
++        if self.enabled && baseline == 0 {
++            if let Some(previous) = self.previous {
++                baseline = hash_tile_region(previous, self.stride, x, y, w, h);
++                self.work.previous_tiles += 1;
++            }
++        }
++        if self.enabled
++            && baseline != 0
++            && self.verified.is_some_and(|r| !Self::intersects(r, tile))
++        {
++            self.work.reused_tiles += 1;
++            return (baseline, false);
++        }
++        self.work.current_tiles += 1;
++        let hash = hash_tile_region(self.current, self.stride, x, y, w, h);
++        (hash, baseline != 0 && hash != baseline)
++    }
++
++    fn intersects(region: PixelRect, tile: (usize, usize, usize, usize)) -> bool {
++        let (rx, ry, rw, rh) = region.bounds();
++        let (x, y, w, h) = tile;
++        x < usize::from(rx) + usize::from(rw)
++            && usize::from(rx) < x + w
++            && y < usize::from(ry) + usize::from(rh)
++            && usize::from(ry) < y + h
++    }
++
++    pub fn work(&self) -> ClassificationWork {
++        self.work
++    }
++}
++
++#[cfg(test)]
++#[path = "classification_hashes_tests.rs"]
++mod tests;
+diff --git a/code/apps/bpane-host/src/tile_loop/classification_hashes_tests.rs b/code/apps/bpane-host/src/tile_loop/classification_hashes_tests.rs
+new file mode 100644
+index 0000000..6585ec8
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/classification_hashes_tests.rs
+@@ -0,0 +1,102 @@
++use super::*;
++
++#[test]
++fn inactive_hashes_rebase_from_previous_pixels_when_hint_returns() {
++    let previous = vec![3; 128 * 96 * 4];
++    let mut current = previous.clone();
++    current[4 * 19] = 55;
++    let mut inactive = ClassificationHashes::new(true, true, None, &current, Some(&previous), 512);
++    assert_eq!(inactive.resolve((0, 0, 64, 64), 123), (0, false));
++    assert_eq!(inactive.work().current_tiles, 0);
++    assert_eq!(inactive.work().inactive_tiles, 1);
++    let mut active = ClassificationHashes::new(true, false, None, &current, Some(&previous), 512);
++    let (hash, changed) = active.resolve((0, 0, 64, 64), 0);
++    assert!(
++        changed,
++        "First active motion must not be lost when the hint returns"
++    );
++    assert_eq!(hash, hash_tile_region(&current, 512, 0, 0, 64, 64));
++    assert_eq!(active.work().previous_tiles, 1);
++    assert_eq!(active.work().current_tiles, 1);
++}
++
++#[test]
++fn inactive_and_regional_paths_match_reference_hashes_across_odd_edges_and_reversals() {
++    let size = (337, 193);
++    let stride = usize::from(size.0) * 4;
++    let mut previous = vec![0; PixelRect::frame_bytes(size).unwrap()];
++    let mut reference = vec![0; 6 * 4];
++    let mut optimized = reference.clone();
++    let mut reused = 0;
++    for n in 0..240u16 {
++        let region = PixelRect::new((n * 13 % 325, n * 17 % 181, 12, 12), size).unwrap();
++        let mut current = previous.clone();
++        region
++            .copy(
++                size,
++                &vec![(n % 251 + 1) as u8; 12 * 12 * 4],
++                &mut current,
++                true,
++            )
++            .unwrap();
++        let active = n % 17 > 3;
++        // Alternating full reads: never trust acknowledged bounds after a full read.
++        let verified = (n % 3 != 0).then_some(region);
++        if verified.is_none() {
++            let tail = current.len() - 4;
++            current[tail] = n as u8;
++        }
++        let mut hashes =
++            ClassificationHashes::new(true, !active, verified, &current, Some(&previous), stride);
++        for row in 0..4 {
++            for col in 0..6 {
++                let (x, y) = (col * 64, row * 64);
++                let tile = (x, y, 64.min(337 - x), 64.min(193 - y));
++                let index = row * 6 + col;
++                let expected = hash_tile_region(&current, stride, tile.0, tile.1, tile.2, tile.3);
++                let (hash, changed) = hashes.resolve(tile, optimized[index]);
++                if active {
++                    assert_eq!(hash, expected, "frame {n}, tile {index}");
++                    assert_eq!(
++                        changed,
++                        reference[index] != 0 && reference[index] != expected
++                    );
++                } else {
++                    assert_eq!((hash, changed), (0, false));
++                }
++                optimized[index] = hash;
++                reference[index] = expected;
++            }
++        }
++        reused += hashes.work().reused_tiles;
++        previous = current;
++    }
++    assert!(
++        reused > 1000,
++        "Must exercise real retained classifier hashes"
++    );
++}
++
++#[test]
++fn disabled_and_unknown_history_paths_preserve_full_hash_behavior() {
++    let current = vec![3; 64 * 64 * 4];
++    let invalid_previous = vec![0; 4];
++    let region = PixelRect::new((0, 0, 1, 1), (64, 64));
++    for enabled in [false, true] {
++        let mut hashes = ClassificationHashes::new(
++            enabled,
++            false,
++            region,
++            &current,
++            Some(&invalid_previous),
++            256,
++        );
++        let (hash, changed) = hashes.resolve((0, 0, 64, 64), 0);
++        assert_eq!(hash, hash_tile_region(&current, 256, 0, 0, 64, 64));
++        assert!(!changed);
++        assert_eq!(hashes.work().previous_tiles, 0);
++    }
++    let mut disabled = ClassificationHashes::new(false, true, region, &current, None, 256);
++    assert_ne!(disabled.resolve((0, 0, 64, 64), 0).0, 0);
++    assert_eq!(disabled.work().inactive_tiles, 0);
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/classify.rs b/code/apps/bpane-host/src/tile_loop/classify.rs
+index ed5ffe5..9b02650 100644
+--- a/code/apps/bpane-host/src/tile_loop/classify.rs
++++ b/code/apps/bpane-host/src/tile_loop/classify.rs
+@@ -2,7 +2,8 @@
+ //! bounding-box stability, and hysteresis scoring.
+ 
+ use crate::capture::ffmpeg::CaptureRegion;
+-use crate::region::hash_tile_region;
++use super::classification_hashes::ClassificationHashes;
++use crate::capture::region::PixelRect;
+ use crate::tiles;
+ use crate::video_classify::{
+     bbox_center_shift, bbox_iou, compute_tile_motion_features, is_photo_like_tile,
+@@ -20,6 +21,7 @@ impl super::TileCaptureThread {
+         &mut self,
+         rgba: &[u8],
+         stride: usize,
++        verified_region: Option<PixelRect>,
+         cdp_video_region_hint: Option<CaptureRegion>,
+         cdp_hint_tile_bounds: Option<(u16, u16, u16, u16)>,
+         video_enter_score: i8,
+@@ -41,9 +43,13 @@ impl super::TileCaptureThread {
+             return ClassifyResult {
+                 latched_video_tiles: Vec::new(),
+                 cdp_motion_tiles: 0,
++                work: Default::default(),
+             };
+         }
+         let prev_for_analysis = self.prev_frame.as_deref();
++        let mut hashes = ClassificationHashes::new(self.damage_analysis,
++            cdp_video_region_hint.is_none() && cdp_hint_tile_bounds.is_none(),
++            verified_region, rgba, prev_for_analysis, stride);
+         // ── Per-tile change detection (two-pass) ─────────────
+         // Pass 1: hash each tile, extract motion features for changed
+         // tiles, identify video candidates, compute candidate bbox.
+@@ -65,8 +71,7 @@ impl super::TileCaptureThread {
+                 let ty = row as usize * self.tile_size as usize;
+                 let tw = (self.tile_size as usize).min(self.screen_w as usize - tx);
+                 let th = (self.tile_size as usize).min(self.screen_h as usize - ty);
+-                let hash = hash_tile_region(&rgba, stride, tx, ty, tw, th);
+-                let changed = self.prev_hashes[idx] != 0 && hash != self.prev_hashes[idx];
++                let (hash, changed) = hashes.resolve((tx, ty, tw, th), self.prev_hashes[idx]);
+                 self.changed_mask[idx] = changed;
+ 
+                 if changed
+@@ -252,6 +257,7 @@ impl super::TileCaptureThread {
+         ClassifyResult {
+             latched_video_tiles,
+             cdp_motion_tiles,
++            work: hashes.work(),
+         }
+     }
+ }
+diff --git a/code/apps/bpane-host/src/tile_loop/classify_integration_tests.rs b/code/apps/bpane-host/src/tile_loop/classify_integration_tests.rs
+new file mode 100644
+index 0000000..112b5f1
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/classify_integration_tests.rs
+@@ -0,0 +1,125 @@
++//! Real classifier state compared against the unchanged full-hash reference.
++//! X11 is used only to construct the production host state on a disposable display.
++use super::*;
++
++fn host(enabled: bool) -> TileCaptureThread {
++    let mut config = TileCaptureConfig::from_env();
++    config.damage_analysis = enabled;
++    config.video_classification_enabled = true;
++    TileCaptureThread::new(
++        &std::env::var("DISPLAY").unwrap(),
++        337,
++        193,
++        config,
++        tokio_mpsc::channel(4).0,
++        std::sync::mpsc::channel().0,
++        Arc::new(AtomicBool::new(true)),
++        Arc::new(Mutex::new(None)),
++        Arc::new(Mutex::new(Default::default())),
++        Arc::new(AtomicU64::new(0)),
++        std::sync::mpsc::channel().1,
++        std::sync::mpsc::channel().1,
++        std::sync::mpsc::channel().1,
++    )
++    .unwrap()
++}
++
++fn classify(
++    host: &mut TileCaptureThread,
++    pixels: &[u8],
++    hint: bool,
++    verified: Option<crate::capture::region::PixelRect>,
++) -> frame_types::ClassifyResult {
++    let region = hint.then_some(capture::ffmpeg::CaptureRegion {
++        x: 0,
++        y: 0,
++        w: u32::from(host.screen_w),
++        h: u32::from(host.screen_h),
++    });
++    let bounds = hint.then_some((0, 0, host.grid.cols - 1, host.grid.rows - 1));
++    host.classify_tiles(
++        pixels,
++        usize::from(host.screen_w) * 4,
++        verified,
++        region,
++        bounds,
++        5,
++        -1,
++        20,
++        18,
++        12,
++        6,
++        18,
++        4,
++        3,
++        0.10,
++    )
++}
++
++#[test]
++#[ignore = "requires isolated X11 display"]
++fn damage_directed_classification_preserves_video_state_through_hint_gaps() {
++    use crate::capture::region::PixelRect;
++    let (mut reference, mut optimized) = (host(false), host(true));
++    let size = (reference.screen_w, reference.screen_h);
++    let mut pixels = vec![0; PixelRect::frame_bytes(size).unwrap()];
++    let mut skipped = 0;
++    for n in 0..30u16 {
++        let small = n % 3 != 0;
++        let region = PixelRect::new(
++            if small {
++                (51, 61, 80, 70)
++            } else {
++                (0, 0, size.0, size.1)
++            },
++            size,
++        )
++        .unwrap();
++        let packed: Vec<u8> = (0..region.pixels() * 4)
++            .map(|i| (i * 37 + u64::from(n) * 61) as u8)
++            .collect();
++        region.copy(size, &packed, &mut pixels, true).unwrap();
++        let hint = n % 10 != 5 && n % 10 != 6;
++        let known = small.then_some(region);
++        let (a, b) = (
++            classify(&mut reference, &pixels, hint, None),
++            classify(&mut optimized, &pixels, hint, known),
++        );
++        assert_eq!(
++            a.cdp_motion_tiles, b.cdp_motion_tiles,
++            "motion count at {n}"
++        );
++        assert_eq!(
++            a.latched_video_tiles, b.latched_video_tiles,
++            "video latch at {n}"
++        );
++        assert_eq!(
++            reference.video_scores, optimized.video_scores,
++            "scores at {n}"
++        );
++        assert_eq!(reference.video_hold_frames, optimized.video_hold_frames);
++        assert_eq!(
++            reference.non_candidate_streaks,
++            optimized.non_candidate_streaks
++        );
++        assert_eq!(reference.prev_video_bbox, optimized.prev_video_bbox);
++        assert_eq!(reference.stable_bbox_frames, optimized.stable_bbox_frames);
++        for row in 0..reference.grid.rows {
++            for col in 0..reference.grid.cols {
++                let coord = tiles::TileCoord::new(col, row);
++                assert_eq!(
++                    reference.grid.get(coord).unwrap().classification,
++                    optimized.grid.get(coord).unwrap().classification,
++                    "class at frame {n}"
++                );
++            }
++        }
++        skipped += b.work.inactive_tiles + b.work.reused_tiles;
++        reference.prev_frame = Some(pixels.clone());
++        optimized.prev_frame = Some(pixels.clone());
++    }
++    assert!(
++        skipped > 100,
++        "Must actually exercise omitted/reused hashes"
++    );
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/frame_types.rs b/code/apps/bpane-host/src/tile_loop/frame_types.rs
+index 425e4b5..d5c61f5 100644
+--- a/code/apps/bpane-host/src/tile_loop/frame_types.rs
++++ b/code/apps/bpane-host/src/tile_loop/frame_types.rs
+@@ -34,6 +34,7 @@ pub struct CdpScrollResult {
+ /// Result of the two-pass video classification.
+ #[derive(Debug)]
+ pub struct ClassifyResult {
++    pub work: super::classification_hashes::ClassificationWork,
+     pub latched_video_tiles: Vec<tiles::TileCoord>,
+     pub cdp_motion_tiles: u32,
+ }
+diff --git a/code/apps/bpane-host/src/tile_loop/mod.rs b/code/apps/bpane-host/src/tile_loop/mod.rs
+index 4d9cde8..d6a7f04 100644
+--- a/code/apps/bpane-host/src/tile_loop/mod.rs
++++ b/code/apps/bpane-host/src/tile_loop/mod.rs
+@@ -14,6 +14,8 @@ pub(crate) mod frame_types;
+ mod h264_region;
+ mod resize;
+ mod readback;
++mod readback_choice;
++mod classification_hashes;
+ mod run;
+ mod scroll_emit;
+ mod scroll_partition;
+@@ -24,6 +26,8 @@ mod scroll_trust;
+ 
+ #[cfg(test)]
+ mod integrity_tests;
++#[cfg(all(test, target_os = "linux"))]
++mod classify_integration_tests;
+ #[cfg(test)]
+ mod tests;
+ 
+@@ -51,6 +55,7 @@ pub struct TileCaptureThread {
+     pub(crate) tile_size: u16,
+     pub(crate) tile_codec: tiles::emitter::TileCodec,
+     pub(crate) video_classification_enabled: bool,
++    pub(crate) damage_analysis: bool,
+     pub(crate) scroll_copy_quantum_px: u16,
+     pub(crate) base_frame_interval: std::time::Duration,
+     pub(crate) scroll_active_frame_interval: std::time::Duration,
+@@ -183,6 +188,7 @@ impl TileCaptureThread {
+             scroll_thin_mode_enabled,
+             video_classification_enabled,
+             damage_readback,
++            damage_analysis,
+             ..
+         } = config;
+ 
+@@ -226,6 +232,7 @@ impl TileCaptureThread {
+             tile_codec,
+             video_classification_enabled,
+             scroll_copy_quantum_px,
++            damage_analysis,
+             base_frame_interval,
+             scroll_active_frame_interval,
+             scroll_active_capture_frames,
+diff --git a/code/apps/bpane-host/src/tile_loop/readback.rs b/code/apps/bpane-host/src/tile_loop/readback.rs
+index d48af83..6938c99 100644
+--- a/code/apps/bpane-host/src/tile_loop/readback.rs
++++ b/code/apps/bpane-host/src/tile_loop/readback.rs
+@@ -4,10 +4,14 @@
+ //! capture can include later/unreported damage, so its difference is UNKNOWN;
+ //! the next regional frame seeds once from the full previous image. Never assume
+ //! full readback changed only the acknowledged damage bounds.
++use super::readback_choice::ReadbackChoice;
+ use crate::capture::region::PixelRect;
+ 
+ #[derive(Default, Debug)]
+ pub(super) struct ReadbackStats {
++    pub choice: ReadbackChoice,
++    /// Only successful regional capture proves all other current pixels equal previous.
++    pub verified_region: Option<PixelRect>,
+     pub regional: bool,
+     pub fallback: bool,
+     /// Requested pixels, including a failed region attempt before full fallback.
+@@ -47,18 +51,30 @@ impl DamageReadback {
+         damage: Option<(u16, u16, u16, u16)>,
+         force: bool,
+         previous: Option<&[u8]>,
+-    ) -> Option<PixelRect> {
+-        if !self.enabled
+-            || force
+-            || self.size != Some(size)
+-            || previous?.len() != PixelRect::frame_bytes(size).ok()?
++    ) -> ReadbackChoice {
++        if !self.enabled {
++            return ReadbackChoice::Disabled;
++        }
++        if force {
++            return ReadbackChoice::Forced;
++        }
++        if self.size != Some(size) || previous.map(<[u8]>::len) != PixelRect::frame_bytes(size).ok()
+         {
+-            return None;
++            return ReadbackChoice::NoHistory;
+         }
+-        let region = PixelRect::new(damage?, size)?;
++        let Some(damage) = damage else {
++            return ReadbackChoice::UnknownDamage;
++        };
++        let Some(region) = PixelRect::new(damage, size) else {
++            return ReadbackChoice::InvalidDamage;
++        };
+         // Conservative initial experiment: one bounding rectangle, <= 1/8 of
+         // the root. Scroll/full repaint stays on the established full path.
+-        (region.pixels() * 8 <= u64::from(size.0) * u64::from(size.1)).then_some(region)
++        if region.pixels() * 8 <= u64::from(size.0) * u64::from(size.1) {
++            ReadbackChoice::Regional(region)
++        } else {
++            ReadbackChoice::BroadDamage
++        }
+     }
+ 
+     pub fn capture(
+@@ -70,11 +86,14 @@ impl DamageReadback {
+         current: &mut Vec<u8>,
+         mut read: impl FnMut(Option<PixelRect>, &mut Vec<u8>) -> anyhow::Result<()>,
+     ) -> anyhow::Result<ReadbackStats> {
+-        let selected = self.region(size, damage, force, previous);
++        let choice = self.region(size, damage, force, previous);
+         let prior_change = self.changed;
+         self.invalidate(); // Any error, including partial destination mutation, invalidates history.
+-        let mut stats = ReadbackStats::default();
+-        if let (Some(region), Some(previous)) = (selected, previous) {
++        let mut stats = ReadbackStats {
++            choice,
++            ..Default::default()
++        };
++        if let (Some(region), Some(previous)) = (choice.region(), previous) {
+             let repair_start = self.timings.then(std::time::Instant::now);
+             stats.repair_bytes = match (current.len() == previous.len(), prior_change) {
+                 (true, Some(rect)) => rect.copy(size, previous, current, false)?,
+@@ -91,6 +110,7 @@ impl DamageReadback {
+                 Ok(()) => {
+                     self.changed = Some(region);
+                     stats.regional = true;
++                    stats.verified_region = Some(region);
+                 }
+                 Err(error) => {
+                     // A failed capability/read must not repeatedly seed/copy a
+diff --git a/code/apps/bpane-host/src/tile_loop/readback_choice.rs b/code/apps/bpane-host/src/tile_loop/readback_choice.rs
+new file mode 100644
+index 0000000..452dcd1
+--- /dev/null
++++ b/code/apps/bpane-host/src/tile_loop/readback_choice.rs
+@@ -0,0 +1,34 @@
++use crate::capture::region::PixelRect;
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub(super) enum ReadbackChoice {
++    #[default]
++    Disabled,
++    Forced,
++    NoHistory,
++    UnknownDamage,
++    InvalidDamage,
++    BroadDamage,
++    Regional(PixelRect),
++}
++
++impl ReadbackChoice {
++    pub fn label(self) -> &'static str {
++        match self {
++            Self::Disabled => "disabled",
++            Self::Forced => "forced",
++            Self::NoHistory => "no_history",
++            Self::UnknownDamage => "unknown_damage",
++            Self::InvalidDamage => "invalid_damage",
++            Self::BroadDamage => "broad_damage",
++            Self::Regional(_) => "regional",
++        }
++    }
++
++    pub fn region(self) -> Option<PixelRect> {
++        match self {
++            Self::Regional(region) => Some(region),
++            _ => None,
++        }
++    }
++}
+diff --git a/code/apps/bpane-host/src/tile_loop/readback_tests.rs b/code/apps/bpane-host/src/tile_loop/readback_tests.rs
+index e12f5c4..92e2e59 100644
+--- a/code/apps/bpane-host/src/tile_loop/readback_tests.rs
++++ b/code/apps/bpane-host/src/tile_loop/readback_tests.rs
+@@ -139,6 +139,34 @@ fn disabled_unknown_broad_invalid_or_forced_damage_uses_full_capture() {
+     }
+ }
+ 
++#[test]
++fn every_readback_selection_reason_is_explicit_and_coverage_is_never_guessed() {
++    let mut capture = DamageReadback::new(true);
++    let previous = vec![0; PixelRect::frame_bytes(SIZE).unwrap()];
++    assert_eq!(
++        capture.region(SIZE, Some(SMALL), false, Some(&previous)),
++        ReadbackChoice::NoHistory
++    );
++    capture.size = Some(SIZE);
++    for (damage, force, reason) in [
++        (None, false, ReadbackChoice::UnknownDamage),
++        (Some((0, 0, 0, 3)), false, ReadbackChoice::InvalidDamage),
++        (
++            Some((0, 0, SIZE.0, SIZE.1)),
++            false,
++            ReadbackChoice::BroadDamage,
++        ),
++        (Some(SMALL), true, ReadbackChoice::Forced),
++    ] {
++        assert_eq!(capture.region(SIZE, damage, force, Some(&previous)), reason);
++    }
++    capture.enabled = false;
++    assert_eq!(
++        capture.region(SIZE, Some(SMALL), false, Some(&previous)),
++        ReadbackChoice::Disabled
++    );
++}
++
+ #[test]
+ fn failed_partial_write_recaptures_full_and_disables_region_until_new_session() {
+     let mut capture = DamageReadback::new(true);
+@@ -196,11 +224,13 @@ fn failed_full_capture_resize_and_missing_previous_invalidate_region_history() {
+     capture.size = Some(SIZE);
+     assert!(capture
+         .region((96, 128), Some(SMALL), false, Some(&vec![0; 128 * 96 * 4]))
++        .region()
+         .is_none());
+-    assert!(capture.region(SIZE, Some(SMALL), false, None).is_none());
++    assert!(capture.region(SIZE, Some(SMALL), false, None).region().is_none());
+     capture.invalidate();
+     assert!(capture
+         .region(SIZE, Some(SMALL), false, Some(&vec![0; 128 * 96 * 4]))
++        .region()
+         .is_none());
+ }
+ 
+diff --git a/code/apps/bpane-host/src/tile_loop/run.rs b/code/apps/bpane-host/src/tile_loop/run.rs
+index c7db2d8..aa7385d 100644
+--- a/code/apps/bpane-host/src/tile_loop/run.rs
++++ b/code/apps/bpane-host/src/tile_loop/run.rs
+@@ -162,6 +162,7 @@ impl super::TileCaptureThread {
+             };
+             self.frame_damage_bounds = self.damage.as_mut()
+                 .and_then(|dt| dt.begin_capture_for_size(self.screen_w, self.screen_h));
++            let damage_observation = self.damage.as_ref().map(|dt| dt.observation()).unwrap_or_default();
+             let mut rgba = std::mem::take(&mut self.capture_scratch);
+             let size = (self.screen_w, self.screen_h);
+             // Keep active video ownership on the established capture path.
+@@ -216,6 +217,7 @@ impl super::TileCaptureThread {
+             let classify = self.classify_tiles(
+                 &rgba,
+                 stride,
++                readback.verified_region,
+                 cdp.cdp_video_region_hint,
+                 cdp.cdp_hint_tile_bounds,
+                 VIDEO_ENTER_SCORE,
+@@ -230,6 +232,7 @@ impl super::TileCaptureThread {
+                 MIN_VIDEO_BBOX_AREA_RATIO,
+             );
+             let classify_done = timings_enabled.then(std::time::Instant::now);
++            let classification_work = classify.work;
+ 
+             // ── Phase 3: Scroll residual + dirty set ─────────────
+             let scroll = self.compute_scroll_and_dirty(
+@@ -327,6 +330,16 @@ impl super::TileCaptureThread {
+                     interval_us = frame_interval.as_micros() as u64,
+                     dirty_tiles,
+                     readback_regional = readback.regional,
++                    readback_choice = readback.choice.label(),
++                    damage_reason = damage_observation.reason.label(),
++                    damage_rects = damage_observation.rects,
++                    damage_area = damage_observation.bounds.map(|(_, _, w, h)| u64::from(w) * u64::from(h)).unwrap_or(0),
++                    damage_width = damage_observation.geometry.0,
++                    damage_height = damage_observation.geometry.1,
++                    classify_current_tiles = classification_work.current_tiles,
++                    classify_previous_tiles = classification_work.previous_tiles,
++                    classify_reused_tiles = classification_work.reused_tiles,
++                    classify_inactive_tiles = classification_work.inactive_tiles,
+                     readback_fallback = readback.fallback,
+                     readback_requested_pixels = readback.requested_pixels,
+                     readback_repair_bytes = readback.repair_bytes,
+diff --git a/code/apps/bpane-host/src/tile_loop/tests.rs b/code/apps/bpane-host/src/tile_loop/tests.rs
+index c9b6df2..6e13196 100644
+--- a/code/apps/bpane-host/src/tile_loop/tests.rs
++++ b/code/apps/bpane-host/src/tile_loop/tests.rs
+@@ -69,6 +69,7 @@ fn cdp_scroll_result_no_scroll() {
+ #[test]
+ fn classify_result_empty_by_default() {
+     let cr = ClassifyResult {
++        work: Default::default(),
+         latched_video_tiles: Vec::new(),
+         cdp_motion_tiles: 0,
+     };

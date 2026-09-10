@@ -22,7 +22,7 @@ export class ObservationStore {
     const view = this.#nextId();
     const state = view;
     this.#states.set(state, { state, tab: capture.tab, document: capture.document, mutation: capture.mutation,
-      url: capture.url, title: capture.title, snapshot: capture.snapshot });
+      url: capture.url, title: capture.title, snapshot: capture.snapshot, coverage: capture.coverage });
     while (this.#states.size > 4) this.#states.delete(this.#states.keys().next().value);
     return this.#project(capture, state, view);
   }
@@ -33,7 +33,7 @@ export class ObservationStore {
     if (!source) throw new ObservationError('unknown_state', 'Observation state expired; capture a fresh pane_view.');
     this.#states.delete(state); this.#states.set(state, source); // Bounded LRU touch.
     const capture = ObservationInput.capture({ ...source, ...options, tab: source.tab, document: source.document,
-      mutation: source.mutation, url: source.url, title: source.title, snapshot: source.snapshot });
+      mutation: source.mutation, url: source.url, title: source.title, snapshot: source.snapshot, coverage: source.coverage });
     return this.#project(capture, state, this.#nextId());
   }
 
@@ -54,7 +54,7 @@ export class ObservationStore {
   #project(capture, state, view) {
     const projected = ObservationProjection.create(capture.lines, capture.projection);
     const stored = { view, state, tab: capture.tab, document: capture.document, url: capture.url, title: capture.title,
-      snapshot: capture.snapshot, projection: capture.projection, ...projected };
+      snapshot: capture.snapshot, projection: capture.projection, ...(capture.coverage ? { coverage: capture.coverage } : {}), ...projected };
     const wire = this.#wire(stored, capture.since);
     this.#views.set(view, stored);
     while (this.#views.size > 4) this.#views.delete(this.#views.keys().next().value);
@@ -65,7 +65,7 @@ export class ObservationStore {
   inspect(view) {
     if (typeof view !== 'string') return undefined;
     const stored = this.#views.get(view);
-    return stored ? { ...stored, projection: structuredClone(stored.projection), refs: new Map(stored.refs),
+    return stored ? { ...stored, ...(stored.coverage ? { coverage: structuredClone(stored.coverage) } : {}), projection: structuredClone(stored.projection), refs: new Map(stored.refs),
       truncatedLines: [...stored.truncatedLines] } : undefined;
   }
 
@@ -90,6 +90,7 @@ export class ObservationStore {
   #wire(stored, since) {
     const { view, state, tab, document, url, title, projection, total, matches, next, truncated, truncatedLines, text } = stored;
     const wire = { view, state, tab, document, url, title, total, mode: 'full', text };
+    if (stored.coverage) wire.coverage = structuredClone(stored.coverage);
     if (projection.detail !== 'full') wire.detail = projection.detail;
     if (projection.filter) wire.filter = projection.filter;
     if (matches !== undefined) wire.matches = matches;
@@ -100,6 +101,7 @@ export class ObservationStore {
     if (truncated) { wire.truncated = true; wire.truncatedLines = [...truncatedLines]; }
     const base = since === undefined ? undefined : this.#views.get(since);
     if (!base || base.tab !== tab || base.document !== document ||
+      JSON.stringify(base.coverage) !== JSON.stringify(stored.coverage) ||
       JSON.stringify(base.projection) !== JSON.stringify(projection)) {
       if (since !== undefined) wire.reset = true;
       return wire;

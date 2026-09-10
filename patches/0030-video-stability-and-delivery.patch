@@ -1,0 +1,800 @@
+diff --git a/code/apps/bpane-gateway/src/transport.rs b/code/apps/bpane-gateway/src/transport.rs
+index ddfd8ce..06093d5 100644
+--- a/code/apps/bpane-gateway/src/transport.rs
++++ b/code/apps/bpane-gateway/src/transport.rs
+@@ -10,6 +10,7 @@ use wtransport::{Endpoint, Identity, ServerConfig};
+ mod bitrate;
+ mod bootstrap;
+ mod egress;
++mod egress_lanes;
+ mod ingress;
+ mod negotiation;
+ mod policy;
+diff --git a/code/apps/bpane-gateway/src/transport/egress.rs b/code/apps/bpane-gateway/src/transport/egress.rs
+index cd53713..8e8a193 100644
+--- a/code/apps/bpane-gateway/src/transport/egress.rs
++++ b/code/apps/bpane-gateway/src/transport/egress.rs
+@@ -9,6 +9,7 @@ use tracing::{debug, warn};
+ use wtransport::{Connection, SendStream};
+ 
+ use super::bitrate::DatagramStats;
++use super::egress_lanes::EgressLanes;
+ use super::negotiation::ConnectionProtocol;
+ use super::policy::{
+     adapt_frame_for_client_with_protocol, client_can_receive_frame, SessionTransportPolicy,
+@@ -31,93 +32,112 @@ pub(super) struct EgressTaskContext {
+ 
+ pub(super) fn spawn_agent_to_browser_task(
+     ctx: EgressTaskContext,
+-    mut from_host: broadcast::Receiver<Arc<Frame>>,
++    from_host: broadcast::Receiver<Arc<Frame>>,
+ ) -> JoinHandle<Option<ProtocolFailure>> {
+     tokio::spawn(async move {
+-        while ctx.session.is_active() {
+-            match from_host.recv().await {
+-                Ok(frame) => {
+-                    let is_owner = ctx.hub.is_browser_owner(ctx.client_id);
+-                    if !client_can_receive_frame(&frame, is_owner, &ctx.transport_policy) {
+-                        continue;
+-                    }
+-                    match ctx.protocol.server_frame_delivery(&frame) {
+-                        Ok(true) => {}
+-                        Ok(false) => {
+-                            debug!(
++        let (lanes, reliable, video) = EgressLanes::new();
++        let context = &ctx;
++        // Structured concurrency: returning/cancelling drops all three futures,
++        // their queued bytes and any pending write. No detached send task.
++        tokio::select! {
++            result = dispatch(&ctx, from_host, lanes) => result,
++            _ = reliable.run(|encoded| async move {
++                let started = Instant::now();
++                let mut stream = context.send_stream.lock().await;
++                context.hub.record_egress_send_stream_lock_wait(started.elapsed());
++                stream.write_all(&encoded).await.map_err(|_| ())
++            }) => None,
++            _ = video.run(|payload| {
++                match ctx.connection.send_datagram(payload) {
++                    Ok(()) => ctx.dgram_stats.record_success(),
++                    Err(_) => ctx.dgram_stats.record_failure(),
++                }
++            }) => None,
++        }
++    })
++}
++
++async fn dispatch(
++    ctx: &EgressTaskContext,
++    mut from_host: broadcast::Receiver<Arc<Frame>>,
++    mut lanes: EgressLanes,
++) -> Option<ProtocolFailure> {
++    while ctx.session.is_active() {
++        match from_host.recv().await {
++            Ok(frame) => {
++                let is_owner = ctx.hub.is_browser_owner(ctx.client_id);
++                if !client_can_receive_frame(&frame, is_owner, &ctx.transport_policy) {
++                    continue;
++                }
++                match ctx.protocol.server_frame_delivery(&frame) {
++                    Ok(true) => {}
++                    Ok(false) => {
++                        debug!(
+                                 "suppressed optional host frame outside negotiated protocol upper bound"
+                             );
+-                            continue;
+-                        }
+-                        Err(failure) => {
+-                            warn!(
+-                                ctx.session_id,
+-                                ctx.client_id,
+-                                "invalid or unnegotiated dependent tile command; closing viewer"
+-                            );
+-                            ctx.session.deactivate();
+-                            return Some(failure);
+-                        }
++                        continue;
++                    }
++                    Err(failure) => {
++                        warn!(
++                            ctx.session_id,
++                            ctx.client_id,
++                            "invalid or unnegotiated dependent tile command; closing viewer"
++                        );
++                        ctx.session.deactivate();
++                        return Some(failure);
+                     }
++                }
+ 
+-                    if frame.channel == ChannelId::Video {
+-                        if is_video_keyframe_payload(&frame.payload) {
+-                            let encoded = frame.encode();
+-                            let lock_started = Instant::now();
+-                            let mut stream = ctx.send_stream.lock().await;
+-                            ctx.hub
+-                                .record_egress_send_stream_lock_wait(lock_started.elapsed());
+-                            if stream.write_all(&encoded).await.is_err() {
+-                                return None;
+-                            }
+-                        } else {
+-                            match ctx.connection.send_datagram(&frame.payload) {
+-                                Ok(()) => ctx.dgram_stats.record_success(),
+-                                Err(_) => ctx.dgram_stats.record_failure(),
+-                            };
+-                        }
++                let queued = if frame.channel == ChannelId::Video {
++                    if is_video_keyframe_payload(&frame.payload) {
++                        lanes.reliable(frame.encode(), true)
+                     } else {
+-                        let encoded = adapt_frame_for_client_with_protocol(
+-                            &frame,
+-                            is_owner,
+-                            &ctx.transport_policy,
+-                            &ctx.protocol,
+-                        )
+-                        .encode();
+-                        let lock_started = Instant::now();
+-                        let mut stream = ctx.send_stream.lock().await;
+-                        ctx.hub
+-                            .record_egress_send_stream_lock_wait(lock_started.elapsed());
+-                        if stream.write_all(&encoded).await.is_err() {
+-                            return None;
+-                        }
++                        lanes.datagram(frame.payload.clone())
+                     }
+-                }
+-                Err(broadcast::error::RecvError::Lagged(n)) => {
+-                    ctx.hub.record_egress_lagged(n);
+-                    warn!(
+-                        ctx.session_id,
+-                        ctx.client_id,
+-                        n,
+-                        "client lagged; closing render stream for snapshot reconnect"
+-                    );
+-                    // Tile frames are dependent deltas: dropping a ScrollCopy,
+-                    // GridOffset or cache insertion and continuing silently can
+-                    // leave persistent corruption. Only this viewer reconnects;
+-                    // the shared host/browser/profile remain running.
++                } else {
++                    let encoded = adapt_frame_for_client_with_protocol(
++                        &frame,
++                        is_owner,
++                        &ctx.transport_policy,
++                        &ctx.protocol,
++                    )
++                    .encode();
++                    lanes.reliable(encoded, false)
++                };
++                if queued.is_err() {
++                    ctx.hub.record_egress_lagged(1);
++                    warn!("bounded egress lane full; closing viewer for snapshot reconnect");
+                     close_lagged_session(&ctx.session, || {
+                         ctx.connection.close(
+                             wtransport::VarInt::from_u32(0),
+-                            b"render stream fell behind; reconnect required",
++                            b"render backlog; reconnect required",
+                         );
+                     });
+                     return None;
+                 }
+-                Err(broadcast::error::RecvError::Closed) => return None,
+             }
++            Err(broadcast::error::RecvError::Lagged(n)) => {
++                ctx.hub.record_egress_lagged(n);
++                warn!(
++                    ctx.session_id,
++                    ctx.client_id, n, "client lagged; closing render stream for snapshot reconnect"
++                );
++                // Tile frames are dependent deltas: dropping a ScrollCopy,
++                // GridOffset or cache insertion and continuing silently can
++                // leave persistent corruption. Only this viewer reconnects;
++                // the shared host/browser/profile remain running.
++                close_lagged_session(&ctx.session, || {
++                    ctx.connection.close(
++                        wtransport::VarInt::from_u32(0),
++                        b"render stream fell behind; reconnect required",
++                    );
++                });
++                return None;
++            }
++            Err(broadcast::error::RecvError::Closed) => return None,
+         }
+-        None
+-    })
++    }
++    None
+ }
+ 
+ fn close_lagged_session(session: &Session, close_connection: impl FnOnce()) {
+diff --git a/code/apps/bpane-gateway/src/transport/egress_lanes.rs b/code/apps/bpane-gateway/src/transport/egress_lanes.rs
+new file mode 100644
+index 0000000..802b8f0
+--- /dev/null
++++ b/code/apps/bpane-gateway/src/transport/egress_lanes.rs
+@@ -0,0 +1,127 @@
++//! Bounded delivery lanes. Slow reliable writes must not stop video datagrams.
++//! All reliable bytes retain order; video waits for its preceding codec/IDR
++//! writes, not unrelated tiles. Overflow fails the viewer closed, never drops
++//! a dependent tile or a random H.264 delta and continues with corrupt history.
++use bytes::Bytes;
++use std::{future::Future, sync::Arc};
++use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
++
++const BYTE_LIMIT: usize = 16 * 1024 * 1024 + 5; // one maximum legal wire frame
++const RELIABLE_PACKETS: usize = 512;
++const VIDEO_PACKETS: usize = 256;
++
++struct Packet {
++    bytes: Bytes,
++    barrier: u64,
++    _permit: OwnedSemaphorePermit,
++}
++
++pub(super) struct EgressLanes {
++    reliable: mpsc::Sender<Packet>,
++    video: mpsc::Sender<Packet>,
++    budget: Arc<Semaphore>,
++    barrier: u64,
++}
++
++pub(super) struct ReliableLane {
++    input: mpsc::Receiver<Packet>,
++    completed: watch::Sender<u64>,
++}
++
++pub(super) struct VideoLane {
++    input: mpsc::Receiver<Packet>,
++    completed: watch::Receiver<u64>,
++}
++
++impl EgressLanes {
++    pub fn new() -> (Self, ReliableLane, VideoLane) {
++        let (reliable, reliable_rx) = mpsc::channel(RELIABLE_PACKETS);
++        let (video, video_rx) = mpsc::channel(VIDEO_PACKETS);
++        let (completed, completed_rx) = watch::channel(0);
++        (
++            Self {
++                reliable,
++                video,
++                budget: Arc::new(Semaphore::new(BYTE_LIMIT)),
++                barrier: 0,
++            },
++            ReliableLane {
++                input: reliable_rx,
++                completed,
++            },
++            VideoLane {
++                input: video_rx,
++                completed: completed_rx,
++            },
++        )
++    }
++
++    fn packet(&self, bytes: Bytes, barrier: u64) -> Result<Packet, ()> {
++        let count = u32::try_from(bytes.len()).map_err(|_| ())?;
++        let permit = self
++            .budget
++            .clone()
++            .try_acquire_many_owned(count)
++            .map_err(|_| ())?;
++        Ok(Packet {
++            bytes,
++            barrier,
++            _permit: permit,
++        })
++    }
++
++    pub fn reliable(&mut self, bytes: Bytes, video_key: bool) -> Result<(), ()> {
++        let barrier = if video_key {
++            self.barrier.checked_add(1).ok_or(())?
++        } else {
++            0
++        };
++        let packet = self.packet(bytes, barrier)?;
++        self.reliable.try_send(packet).map_err(|_| ())?;
++        if video_key {
++            self.barrier = barrier;
++        }
++        Ok(())
++    }
++
++    pub fn datagram(&self, bytes: Bytes) -> Result<(), ()> {
++        let packet = self.packet(bytes, self.barrier)?;
++        self.video.try_send(packet).map_err(|_| ())
++    }
++}
++
++impl ReliableLane {
++    pub async fn run<F, W>(mut self, mut write: F) -> Result<(), ()>
++    where
++        F: FnMut(Bytes) -> W,
++        W: Future<Output = Result<(), ()>>,
++    {
++        while let Some(packet) = self.input.recv().await {
++            write(packet.bytes).await?;
++            if packet.barrier != 0 {
++                self.completed.send_replace(packet.barrier);
++            }
++            // The permit covers the in-flight write as well as queued bytes.
++        }
++        Ok(())
++    }
++}
++
++impl VideoLane {
++    pub async fn run<F>(mut self, mut send: F) -> Result<(), ()>
++    where
++        F: FnMut(&[u8]),
++    {
++        while let Some(packet) = self.input.recv().await {
++            while *self.completed.borrow_and_update() < packet.barrier {
++                self.completed.changed().await.map_err(|_| ())?;
++            }
++            send(&packet.bytes);
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++#[path = "egress_lanes_tests.rs"]
++mod tests;
+diff --git a/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs b/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs
+new file mode 100644
+index 0000000..b07eb92
+--- /dev/null
++++ b/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs
+@@ -0,0 +1,136 @@
++use super::*;
++use tokio::sync::oneshot;
++
++#[tokio::test]
++async fn video_flows_while_a_tile_write_is_blocked() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    lanes.reliable(Bytes::from_static(b"tile"), false).unwrap();
++    let (started, ready) = oneshot::channel();
++    let (release, unblock) = oneshot::channel::<()>();
++    let mut started = Some(started);
++    let mut unblock = Some(unblock);
++    let writer = tokio::spawn(reliable.run(move |_| {
++        started.take().unwrap().send(()).unwrap();
++        let wait = unblock.take().unwrap();
++        async move { wait.await.map_err(|_| ()) }
++    }));
++    ready.await.unwrap();
++    let (sent, received) = oneshot::channel();
++    let mut sent = Some(sent);
++    let datagrams = tokio::spawn(video.run(move |bytes| {
++        assert_eq!(bytes, b"delta");
++        sent.take().unwrap().send(()).unwrap();
++    }));
++    lanes.datagram(Bytes::from_static(b"delta")).unwrap();
++    tokio::time::timeout(std::time::Duration::from_secs(1), received)
++        .await
++        .unwrap()
++        .unwrap();
++    release.send(()).unwrap();
++    drop(lanes);
++    writer.await.unwrap().unwrap();
++    datagrams.await.unwrap().unwrap();
++}
++
++#[tokio::test]
++async fn delta_waits_for_its_keyframe_but_not_the_following_tile() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    lanes.reliable(Bytes::from_static(b"sps"), true).unwrap();
++    lanes.reliable(Bytes::from_static(b"idr"), true).unwrap();
++    lanes.reliable(Bytes::from_static(b"tile"), false).unwrap();
++    lanes.datagram(Bytes::from_static(b"delta")).unwrap();
++    let (sent, mut received) = mpsc::unbounded_channel();
++    let datagrams = tokio::spawn(video.run(move |bytes| {
++        sent.send(bytes.to_vec()).unwrap();
++    }));
++    tokio::task::yield_now().await;
++    assert!(received.try_recv().is_err());
++    let (tile_started, ready) = oneshot::channel();
++    let mut tile_started = Some(tile_started);
++    let writer = tokio::spawn(reliable.run(move |bytes| {
++        let signal = if bytes == b"tile"[..] {
++            tile_started.take()
++        } else {
++            None
++        };
++        async move {
++            if let Some(signal) = signal {
++                signal.send(()).unwrap();
++                std::future::pending::<()>().await;
++            }
++            Ok(())
++        }
++    }));
++    ready.await.unwrap();
++    assert_eq!(
++        tokio::time::timeout(std::time::Duration::from_secs(1), received.recv())
++            .await
++            .unwrap()
++            .unwrap(),
++        b"delta"
++    );
++    writer.abort();
++    drop(lanes);
++    datagrams.await.unwrap().unwrap();
++}
++
++#[tokio::test]
++async fn reliable_order_and_inflight_byte_budget_are_preserved() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    for value in [b"grid".as_slice(), b"region", b"tile", b"ack"] {
++        lanes
++            .reliable(Bytes::copy_from_slice(value), false)
++            .unwrap();
++    }
++    let mut seen = Vec::new();
++    drop(video);
++    let budget = lanes.budget.clone();
++    drop(lanes);
++    reliable
++        .run(|bytes| {
++            seen.push(bytes);
++            async { Ok(()) }
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        seen.iter().map(|b| b.as_ref()).collect::<Vec<_>>(),
++        vec![b"grid".as_slice(), b"region", b"tile", b"ack"]
++    );
++    assert_eq!(budget.available_permits(), BYTE_LIMIT);
++}
++
++#[test]
++fn overflow_is_explicit_and_cancellation_releases_every_permit() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    for _ in 0..RELIABLE_PACKETS {
++        lanes.reliable(Bytes::from_static(b"x"), false).unwrap();
++    }
++    assert!(lanes.reliable(Bytes::from_static(b"x"), false).is_err());
++    for _ in 0..VIDEO_PACKETS {
++        lanes.datagram(Bytes::from_static(b"y")).unwrap();
++    }
++    assert!(lanes.datagram(Bytes::from_static(b"y")).is_err());
++    drop(reliable);
++    drop(video);
++    assert_eq!(lanes.budget.available_permits(), BYTE_LIMIT);
++    let (mut lanes, reliable, _) = EgressLanes::new();
++    lanes
++        .reliable(Bytes::from(vec![0; BYTE_LIMIT]), false)
++        .unwrap();
++    assert!(lanes.datagram(Bytes::from_static(b"x")).is_err());
++    drop(reliable);
++    assert_eq!(lanes.budget.available_permits(), BYTE_LIMIT);
++}
++
++#[tokio::test]
++async fn failed_keyframe_never_releases_dependent_deltas() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    lanes.reliable(Bytes::from_static(b"idr"), true).unwrap();
++    lanes.datagram(Bytes::from_static(b"delta")).unwrap();
++    assert!(reliable.run(|_| async { Err(()) }).await.is_err());
++    assert!(video
++        .run(|_| panic!("delta escaped failed keyframe"))
++        .await
++        .is_err());
++}
+diff --git a/code/apps/bpane-host/src/cdp_video.rs b/code/apps/bpane-host/src/cdp_video.rs
+index c7293e8..a959e9b 100644
+--- a/code/apps/bpane-host/src/cdp_video.rs
++++ b/code/apps/bpane-host/src/cdp_video.rs
+@@ -19,6 +19,10 @@ mod resize_tests;
+ #[path = "cdp_video/browser_resize_tests.rs"]
+ mod browser_resize_tests;
+ 
++#[cfg(test)]
++#[path = "cdp_video/hint_retry_tests.rs"]
++mod hint_retry_tests;
++
+ const DEFAULT_DEBUG_PORT: u16 = 9222;
+ const DEFAULT_POLL_MS: u64 = 80;
+ const EVAL_TIMEOUT_MS: u64 = 450;
+@@ -953,7 +957,7 @@ pub fn spawn_video_hint_task(shared: Arc<Mutex<PageHintState>>) -> BrowserCdpHan
+ 
+             let Some(mut hint) = (match prefetched_hint.take() {
+                 Some(hint) => Some(hint),
+-                None => evaluate_page_hint(stream, &video_probe_js, &mut request_id).await,
++                None => evaluate_page_hint_with_retry(stream, &video_probe_js, &mut request_id).await,
+             }) else {
+                 ws_stream = None;
+                 prefetched_hint = None;
+@@ -1318,6 +1322,22 @@ async fn connect_visible_target_stream(
+     None
+ }
+ 
++async fn evaluate_page_hint_with_retry(
++    stream: &mut CdpWsStream,
++    probe: &str,
++    request_id: &mut u64,
++) -> Option<PageHintState> {
++    if let Some(hint) = evaluate_page_hint(stream, probe, request_id).await {
++        return Some(hint);
++    }
++    // A busy renderer can miss one deadline while video decode continues.
++    // Retry once, on the same connection with a fresh request ID. Late replies
++    // cannot be mistaken for the new observation. Do not manufacture freshness
++    // or retry an explicit hidden/empty/changed-region observation.
++    tracing::warn!("video hint probe delayed; trying one bounded refresh");
++    evaluate_page_hint(stream, probe, request_id).await
++}
++
+ async fn evaluate_page_hint(
+     stream: &mut CdpWsStream,
+     video_probe_js: &str,
+diff --git a/code/apps/bpane-host/src/cdp_video/hint_retry_tests.rs b/code/apps/bpane-host/src/cdp_video/hint_retry_tests.rs
+new file mode 100644
+index 0000000..bbbc570
+--- /dev/null
++++ b/code/apps/bpane-host/src/cdp_video/hint_retry_tests.rs
+@@ -0,0 +1,76 @@
++//! Private scripted CDP peer. No browser, profile, GPU or real sleep required.
++use super::*;
++use tokio::net::TcpListener;
++
++async fn exchange(late: bool, empty: bool) -> (Option<PageHintState>, u64) {
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let peer = tokio::spawn(async move {
++        let (socket, _) = listener.accept().await.unwrap();
++        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
++        let first: Value =
++            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
++        let request = if late {
++            // Withhold the first reply until the retry arrives. No wall-clock
++            // pacing; the client deadline drives this deterministic exchange.
++            let second: Value =
++                serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
++            ws.send(Message::Text(
++                json!({"id": first["id"], "result": {"result": {"value": null}}})
++                    .to_string()
++                    .into(),
++            ))
++            .await
++            .unwrap();
++            second
++        } else {
++            first
++        };
++        let value = if empty {
++            Value::Null
++        } else {
++            json!({
++                "visible": true, "focused": true, "regionKind": "video",
++                "region": {"x": 12, "y": 20, "w": 640, "h": 360}
++            })
++        };
++        ws.send(Message::Text(
++            json!({"id": request["id"], "result": {"result": {"value": value}}})
++                .to_string()
++                .into(),
++        ))
++        .await
++        .unwrap();
++        // A third request is a bug: retry is strictly bounded.
++        while let Some(message) = ws.next().await {
++            if message.unwrap().is_close() {
++                break;
++            }
++            panic!("unexpected extra probe");
++        }
++    });
++    let (mut ws, _) = connect_async(format!("ws://{address}")).await.unwrap();
++    let mut id = 1;
++    let hint = evaluate_page_hint_with_retry(&mut ws, "null", &mut id).await;
++    ws.close(None).await.unwrap();
++    peer.await.unwrap();
++    (hint, id)
++}
++
++#[tokio::test]
++async fn late_reply_cannot_revoke_the_fresh_retry() {
++    let (hint, next) = tokio::time::timeout(Duration::from_secs(3), exchange(true, false))
++        .await
++        .unwrap();
++    assert_eq!(next, 3);
++    assert_eq!(hint.unwrap().video_region.unwrap().w, 640);
++}
++
++#[tokio::test]
++async fn explicit_exit_is_not_retried_or_held() {
++    let (hint, next) = tokio::time::timeout(Duration::from_secs(3), exchange(false, true))
++        .await
++        .unwrap();
++    assert_eq!(next, 2);
++    assert!(!hint.unwrap().visible);
++}
+diff --git a/code/apps/bpane-host/src/gpu_video.rs b/code/apps/bpane-host/src/gpu_video.rs
+index 09ff638..5268d94 100644
+--- a/code/apps/bpane-host/src/gpu_video.rs
++++ b/code/apps/bpane-host/src/gpu_video.rs
+@@ -6,6 +6,11 @@ use bpane_protocol::frame::Frame;
+ use bpane_protocol::{VideoDatagram, VideoTileInfo};
+ use std::time::{Duration, Instant};
+ 
++// Cover two bounded 450 ms probe attempts plus polling/scheduling jitter.
++// Explicit hide/exit/move observations still revoke immediately; repeated
++// reads of one sample never renew its age.
++const HINT_FRESHNESS: Duration = Duration::from_millis(1200);
++
+ pub struct HintTracker {
+     sequence: u64,
+     changed_at: Instant,
+@@ -36,7 +41,7 @@ impl HintTracker {
+         let region = if hint.visible
+             && !hint.focus_ambiguous
+             && hint.region_kind == HintRegionKind::Video
+-            && now.saturating_duration_since(self.changed_at) < Duration::from_millis(500)
++            && now.saturating_duration_since(self.changed_at) < HINT_FRESHNESS
+         {
+             hint.video_region.and_then(|r| {
+                 // Keep odd edges lossless; never stretch the video to a tile grid.
+diff --git a/code/apps/bpane-host/src/gpu_video_tests.rs b/code/apps/bpane-host/src/gpu_video_tests.rs
+index 17bb831..9c521ab 100644
+--- a/code/apps/bpane-host/src/gpu_video_tests.rs
++++ b/code/apps/bpane-host/src/gpu_video_tests.rs
+@@ -27,8 +27,14 @@ fn hint_requires_fresh_stable_video_and_expires_without_damage() {
+         ready,
+         [16, 1, 14, 0, 22, 0, 130, 2, 106, 1, 0, 5, 208, 2, 0, 0]
+     );
+-    let stale = tracker.command(hint(2), now + Duration::from_millis(701), 1280, 720);
++    let delayed = tracker.command(hint(2), now + Duration::from_millis(1100), 1280, 720);
++    assert_eq!(&delayed[2..10], &ready[2..10]);
++    let stale = tracker.command(hint(2), now + Duration::from_millis(1400), 1280, 720);
+     assert_eq!(&stale[2..10], &[0; 8]);
++    let first_after_gap = tracker.command(hint(3), now + Duration::from_millis(1500), 1280, 720);
++    assert_eq!(&first_after_gap[2..10], &[0; 8]);
++    let stable_again = tracker.command(hint(4), now + Duration::from_millis(1600), 1280, 720);
++    assert_eq!(&stable_again[2..10], &ready[2..10]);
+ }
+ #[test]
+ fn no_editable_or_ambiguous_target_and_move_revokes_immediately() {
+diff --git a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+index d1033ac..377a6fb 100644
+--- a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+@@ -56,6 +56,30 @@ describe('SessionVideoDisplayRuntime', () => {
+       expect(frame.close).toHaveBeenCalledOnce();
+     });
+ 
++    it('counts decoded output, superseding, commits and retirement separately', () => {
++      const test = setup();
++      const first = test.frame();
++      const second = test.frame();
++      test.runtime.handleDecodedFrame(first, createTileInfo());
++      test.runtime.handleDecodedFrame(second, createTileInfo());
++      test.flush();
++      expect(first.close).toHaveBeenCalledOnce();
++      expect(second.close).toHaveBeenCalledOnce();
++      expect(test.runtime.getPresentationStats()).toMatchObject({
++        decodedOutputs: 2, supersededFrames: 1, textureCommits: 1, rejectedFrames: 0,
++      });
++      test.setRegion(null);
++      test.runtime.markDirty();
++      test.flush();
++      test.runtime.handleDecodedFrame(test.frame(), createTileInfo());
++      expect(test.runtime.getPresentationStats()).toMatchObject({
++        decodedOutputs: 3, textureCommits: 1, rejectedFrames: 1, overlayClears: 1,
++      });
++      const copy = test.runtime.getPresentationStats();
++      copy.textureCommits = 999;
++      expect(test.runtime.getPresentationStats().textureCommits).toBe(1);
++    });
++
+     it('rejects a pre-resize frame even when its crop rectangle is unchanged', () => {
+       const test = setup();
+       const frame = test.frame();
+diff --git a/code/web/bpane-client/js/render/video-presentation-stats.ts b/code/web/bpane-client/js/render/video-presentation-stats.ts
+new file mode 100644
+index 0000000..4af6c31
+--- /dev/null
++++ b/code/web/bpane-client/js/render/video-presentation-stats.ts
+@@ -0,0 +1,10 @@
++/** Texture commits are not decoder submissions or physical display scanout. */
++export type VideoPresentationStats = {
++  decodedOutputs: number;
++  supersededFrames: number;
++  rejectedFrames: number;
++  textureCommits: number;
++  overlayClears: number;
++  lastCommitAtMs: number;
++  maxCommitGapMs: number;
++};
+diff --git a/code/web/bpane-client/js/session-surface-runtime.ts b/code/web/bpane-client/js/session-surface-runtime.ts
+index 1850f85..2afbdfb 100644
+--- a/code/web/bpane-client/js/session-surface-runtime.ts
++++ b/code/web/bpane-client/js/session-surface-runtime.ts
+@@ -195,6 +195,10 @@ export class SessionSurfaceRuntime {
+     this.recordingSurfaceRuntime.stop();
+   }
+ 
++  getVideoPresentationStats(): import('./render/video-presentation-stats.js').VideoPresentationStats {
++    return this.videoDisplayRuntime.getPresentationStats();
++  }
++
+   getRenderDiagnostics(): WebGLRendererDiagnostics {
+     return { ...this.renderDiagnostics };
+   }
+diff --git a/code/web/bpane-client/js/session-video-display-runtime.ts b/code/web/bpane-client/js/session-video-display-runtime.ts
+index 20a5a46..cdda6f7 100644
+--- a/code/web/bpane-client/js/session-video-display-runtime.ts
++++ b/code/web/bpane-client/js/session-video-display-runtime.ts
+@@ -1,6 +1,7 @@
+ import type { TileInfo } from './nal.js';
+ import type { TileGridConfig } from './tile-cache.js';
+ import type { WebGLTileRenderer } from './webgl-compositor.js';
++import type { VideoPresentationStats } from './render/video-presentation-stats.js';
+ 
+ interface VideoRegion {
+   x: number;
+@@ -42,6 +43,12 @@ export class SessionVideoDisplayRuntime {
+   private lastVideoFrameAtMs = 0;
+   private displayLoopRunning = false;
+   private displayDirty = false;
++  private readonly presentation: VideoPresentationStats = {
++    decodedOutputs: 0, supersededFrames: 0, rejectedFrames: 0,
++    textureCommits: 0, overlayClears: 0, lastCommitAtMs: 0, maxCommitGapMs: 0,
++  };
++
++  getPresentationStats(): VideoPresentationStats { return { ...this.presentation }; }
+ 
+   constructor(input: SessionVideoDisplayRuntimeInput) {
+     this.canvas = input.canvas;
+@@ -71,11 +78,14 @@ export class SessionVideoDisplayRuntime {
+   }
+ 
+   handleDecodedFrame(frame: VideoFrame, tileInfo: TileInfo | null): void {
++    this.presentation.decodedOutputs++;
+     if ((!this.ctx && !this.glRenderer) || !this.canDisplayFrame(tileInfo)) {
++      this.presentation.rejectedFrames++;
+       frame.close();
+       return;
+     }
+     if (this.pendingVideoFrame) {
++      this.presentation.supersededFrames++;
+       this.pendingVideoFrame.close();
+     }
+     this.pendingVideoFrame = frame;
+@@ -84,7 +94,9 @@ export class SessionVideoDisplayRuntime {
+   }
+ 
+   clearVideoOverlay(): void {
++    if (this.pendingVideoFrame || this.lastVideoFrameAtMs) this.presentation.overlayClears++;
+     if (this.pendingVideoFrame) {
++      this.presentation.rejectedFrames++;
+       this.pendingVideoFrame.close();
+       this.pendingVideoFrame = null;
+     }
+@@ -142,6 +154,12 @@ export class SessionVideoDisplayRuntime {
+     this.pendingVideoFrame.close();
+     this.videoBufferTileInfo = this.pendingTileInfo;
+     this.lastVideoFrameAtMs = this.now();
++    if (this.presentation.lastCommitAtMs > 0) {
++      this.presentation.maxCommitGapMs = Math.max(this.presentation.maxCommitGapMs,
++        this.lastVideoFrameAtMs - this.presentation.lastCommitAtMs);
++    }
++    this.presentation.textureCommits++;
++    this.presentation.lastCommitAtMs = this.lastVideoFrameAtMs;
+     this.pendingVideoFrame = null;
+     this.pendingTileInfo = null;
+   }
+diff --git a/code/web/bpane-client/js/session/bpane-session.ts b/code/web/bpane-client/js/session/bpane-session.ts
+index 13f9f02..1458c3a 100644
+--- a/code/web/bpane-client/js/session/bpane-session.ts
++++ b/code/web/bpane-client/js/session/bpane-session.ts
+@@ -276,6 +276,10 @@ export class BpaneSession {
+   }
+ 
+   /** Change capture density without reconnecting; undefined restores legacy hiDpi behavior. */
++  getVideoPresentationStats(): import('../render/video-presentation-stats.js').VideoPresentationStats {
++    return this.surfaceRuntime.getVideoPresentationStats();
++  }
++
+   setCaptureScale(scale: number | undefined): void { this.surfaceRuntime.setCaptureScale(scale); }
+ 
+   /** Keep a fixed physical capture while fitting/centering its CSS container locally. */

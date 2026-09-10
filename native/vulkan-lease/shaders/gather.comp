@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=1) readonly uniform image2D currentFrame;
+layout(set=0,binding=3,std430) buffer Output { uvec4 header; uvec4 commands[512]; uint pixels[]; };
+layout(push_constant) uniform Params { uint width; uint height; uint scenario; uint spare; } p;
+void main() {
+    uint item=gl_WorkGroupID.x;
+    // Both exits are workgroup-uniform; no spin loop or indirect CPU dispatch.
+    if (item>=header.x) return;
+    uvec4 command=commands[item];
+    if (command.y!=2u) return;
+    uint columns=(p.width+63u)/64u;
+    uvec2 origin=uvec2(command.x%columns,command.x/columns)*64u;
+    for (uint y=0u;y<64u;y+=16u) for (uint x=0u;x<64u;x+=16u) {
+        uvec2 offset=gl_LocalInvocationID.xy+uvec2(x,y), q=origin+offset;
+        uint value=0u;
+        if (q.x<p.width && q.y<p.height) value=packUnorm4x8(vec4(imageLoad(currentFrame,ivec2(q)).rgb,1));
+        pixels[command.w*4096u+offset.y*64u+offset.x]=value;
+    }
+}

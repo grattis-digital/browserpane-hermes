@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=3,std430) buffer Output { uvec4 header; };
+layout(push_constant) uniform Params { uint width; uint height; uint scenario; uint spare; } p;
+void main() { header=uvec4(0,0,((p.width+63u)/64u)*((p.height+63u)/64u),1); }

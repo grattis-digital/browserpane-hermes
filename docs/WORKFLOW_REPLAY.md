@@ -200,7 +200,7 @@ bulk-download qualification. There is no claim of billed-token reduction, latenc
 speedup or Raspberry Pi results without those measurements. See also the
 [original learning baseline and endurance limitation](WORKFLOW_LEARNING.md).
 
-Local 2026-09-07 qualification (ARM64 Mac, 30 parameter pairs): all 30 recipe
+Local qualification (ARM64 Mac, 30 parameter pairs): all 30 recipe
 exports and all 30 baseline exports passed independent business verification.
 Median baseline time was 103.9 ms; recipe MCP work was 86.6 ms, but recipe execution
 including SDK connection/discovery was 399.5 ms and cold CLI wall time 508.0 ms

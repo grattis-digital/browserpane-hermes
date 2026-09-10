@@ -21,10 +21,12 @@ authority or proof of general real-site/endurance behavior.
 ## Preconditions and staging
 
 - Linux ARM64 Pi, cgroup v2, Docker, Python 3, Bash, existing qualified V3D/X11
-  devices and enough free memory/disk for a second, temporary browser bundle.
+  devices and enough free memory/disk for a temporary browser bundle. Stop any
+  existing browser before measurements; do not run competing browser sessions.
 - Build the browser from the reviewed local commit, its `Dockerfile.gpu`
   derivative, and the pinned `hermes/` image. Load those exact images on the
-  target. Supply a separately qualified ARM64 display-sidecar image. No registry
+  target. Supply the paired ARM64 `Dockerfile.gpu-dummy` / `gpu-live-display`
+  sidecar image for the experimental GPU pipeline. No registry
   push is required. A new browser build can resolve a newer Chromium package;
   the report records its actual version, not merely the source commit.
 - Create a private, operator-owned directory using
@@ -71,7 +73,7 @@ network and a separate owned X11 volume/IPC namespace. Host networking is unused
 The private test Hermes home is seeded without the unused gateway MCP alias;
 the actual helper supplies its own fixed loopback endpoint. No live config is read.
 
-Memory caps are browser 1536 MiB, Hermes 768 MiB, display 256 MiB and fixture
+Memory caps are browser 1536 MiB, Hermes 768 MiB, display 768 MiB and fixture
 128 MiB. CPU shares are 128, with no hard CPU quota. The existing services remain
 running, so host CPU contention is not controlled. One-second cgroup/host samples
 check for owned OOM kills, less than 768 MiB available host RAM, or temperature at

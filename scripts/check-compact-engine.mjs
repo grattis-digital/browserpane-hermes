@@ -3,11 +3,17 @@ import { writeFile } from 'node:fs/promises';
 import { CompactEngineFixture as Fixture } from './compact-engine-fixture.mjs';
 import { CompactTabChecks } from './compact-tab-checks.mjs';
 import { CompactBoundaryChecks } from './compact-boundary-checks.mjs';
+import { CompactSnapshotChecks } from './compact-snapshot-checks.mjs';
+import { CompactScopeChecks } from './compact-scope-checks.mjs';
 
 const fixture = new Fixture(), checks = [];
 const check = (name, result) => { assert(!result?.isError, `${name}: ${JSON.stringify(result)}`); checks.push(name); };
 try {
   await fixture.start();
+  await CompactSnapshotChecks.run(fixture);
+  check('busy renderer can complete snapshots and guarded input beyond 3s, with one tab');
+  await CompactScopeChecks.run(fixture);
+  check('bounded outline and expansion preserve scoped/frame/shadow references and reject stale labels');
   await CompactTabChecks.run(fixture);
   check('actual MCP HTTP clients reuse the default across navigation/reconnect and reject stale closed-tab input');
   await CompactBoundaryChecks.run(fixture);
@@ -148,12 +154,14 @@ try {
   const existing = await fixture.view(session);
   const lastClose = await fixture.act(session, existing, [{ op: 'close' }]);
   assert.equal(lastClose.error.code, 'LAST_TAB'); assert.equal(page.isClosed(), false); check('last shared tab cannot be closed');
-  const created = await fixture.act(session, undefined, [{ op: 'new', url: 'about:blank' }]); check('explicit new tab', created);
-  const closed = await fixture.act(session, created.observation, [{ op: 'close' }]); check('explicit extra-tab close', closed);
+  const refused = await fixture.act(session, undefined, [{ op: 'new', url: 'about:blank' }]);
+  assert.equal(refused.error.code, 'TAB_EXISTS'); await fixture.waitForTabs(1); check('MCP cannot create an extra tab');
+  const created = await fixture.openPage();
+  const closed = await fixture.act(session, await fixture.view(session, { tab: created.tab }), [{ op: 'close' }]); check('explicit extra-tab close', closed);
   assert(['tab_closed', 'close_requested'].includes(closed.stopped), JSON.stringify(closed));
   await fixture.waitForTabs(1); assert.equal(page.isClosed(), false);
 
-  const protectedTab = await fixture.act(session, undefined, [{ op: 'new', url: 'about:blank' }]);
+  const protectedTab = await fixture.openPage();
   const protectedPage = fixture.pageFor(protectedTab.tab);
   await protectedPage.setContent('<button>Activate beforeunload</button><script>window.onbeforeunload=e=>{e.preventDefault();e.returnValue="";};</script>');
   view = await fixture.view(session, { tab: protectedTab.tab });

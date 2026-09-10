@@ -1,0 +1,36 @@
+#version 310 es
+// Synthetic opaque RGBA8 source, generated on GPU; never uploaded per frame.
+precision highp float;
+precision highp int;
+layout(local_size_x=8, local_size_y=8) in;
+layout(rgba8, binding=0) writeonly uniform highp image2D current;
+uniform ivec2 size;
+uniform int scene;
+uniform int frame;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, size))) return;
+    uint x = uint(p.x), y = uint(p.y);
+    if ((scene == 2 || scene == 5 || scene == 6 || scene == 8) && y >= 48u)
+        y += uint(frame * 31);
+    uint value = (x * 13u + y * 37u) ^ ((x / 11u) * 971u + (y / 7u) * 97u);
+    if (scene == 1 && x >= 31u && x < 55u && y >= 63u && y < 87u)
+        value ^= uint(frame) * 0x13579u;
+    if (scene == 3) value ^= uint(frame) * 0x91357u;
+    if (scene == 4 && p == size - 1) value ^= uint(frame);
+    // Stationary overlay across the scrolling body: no global-scroll assumption.
+    if (scene == 6 && p.x >= 400 && p.x < 451 && p.y >= 180 && p.y < 231)
+        value = 0x716251u;
+    int widget_x = 320 + (frame * 7) % 128;
+    if (scene == 8 && p.x >= widget_x && p.x < widget_x + 51 && p.y >= 180 && p.y < 231)
+        value = 0x716251u ^ (uint(frame) * 0x13579u);
+    // All row fingerprints collide and overflow eight buckets, while pixels
+    // outside the sampled columns change. Equality must NOT trust fingerprints.
+    if (scene == 9) {
+        value = 0xffffffu;
+        if (x % 32u == 0u && y % 32u == 16u) value = uint(frame) * 0x13579u;
+    }
+    uvec4 bytes = uvec4(value & 255u, (value >> 8u) & 255u,
+        (value >> 16u) & 255u, 255u);
+    imageStore(current, p, vec4(bytes) / 255.0);
+}

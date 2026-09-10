@@ -2,7 +2,7 @@
 
 ## Status and user constraint
 
-Research/proposal, 2026-09-07, followed by a local **pacing-only implementation**.
+Research/proposal, followed by a local **pacing-only implementation**.
 See [configuration and exact limits](WORKFLOW_PACING.md). Disabled by default;
 automatic website backoff/challenge handling below remains proposed. This is
 separate from the click-completion fix and its Pi qualification. No deployment,

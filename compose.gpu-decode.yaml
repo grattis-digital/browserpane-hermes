@@ -1,0 +1,13 @@
+# Layer LAST, after GPU-tail + GPU-video. Experimental; qualify the exact stack.
+# Decoder is Chromium's device; encoder remains exclusive to gpu-display.
+services:
+  browserpane:
+    image: ${BPANE_GPU_DECODE_IMAGE:?Build and qualify the GPU decode candidate}
+    user: "10000:${BPANE_GPU_DECODE_GID:?Select the decoder device group ID}"
+    environment:
+      BPANE_GPU_DECODE: v4l2
+      BPANE_EXTENSION_DIRS: ${BPANE_GPU_EXTENSION_DIRS:-/opt/browserpane/h264ify}
+    devices:
+      # Chromium enumerates /dev/videoN, not arbitrary aliases. Map ONE selected
+      # bcm2835-codec-decode device at this canonical in-container name.
+      - ${BPANE_GPU_DECODE_DEVICE:?Select the bcm2835-codec-decode node}:/dev/video10:rw

@@ -1,6 +1,6 @@
 # Managed AdBlock installation fix
 
-Branch: `experiment/compact-mcp`. Focused follow-up to the bundle setup scope in
+Focused follow-up to the bundle setup scope in
 issue #1, requested by the user after qualifying the existing managed extension.
 
 ## Problem and use case

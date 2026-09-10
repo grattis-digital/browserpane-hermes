@@ -9,17 +9,20 @@ test('local source archive keeps public configuration but excludes nested operat
   const scratch = await mkdtemp(join(tmpdir(), 'bph-source-package-'));
   try {
     const files = ['.dockerignore', '.gitignore', '.gitattributes', '.env.example', 'AGENTS.md', 'Dockerfile',
-      'Dockerfile.pipeline-test', 'Dockerfile.gpu', 'Dockerfile.gpu-display', 'compose.yaml', 'compose.gpu.yaml', 'package.json', 'package-lock.json',
+      'Dockerfile.pipeline-test', 'Dockerfile.gpu', 'compose.yaml', 'compose.gpu.yaml', 'package.json', 'package-lock.json',
+      'Dockerfile.gpu-dummy', 'Dockerfile.gpu-decode', 'compose.gpu-decode.yaml',
+      'compose.gpu-dummy-test.yaml', 'compose.gpu-video.yaml', 'native/gpu-dummy/src/lib.rs',
       'vitest.config.mjs', 'LICENSE', 'README.md', 'UPSTREAM.md', 'UPSTREAM_COMMIT',
       'NODEJS_STANDARDS.md', 'RUST_STANDARDS.md', 'upstream/Cargo.lock', 'config/Caddyfile'];
     const dirs = ['.github', 'client', 'config', 'docs', 'hermes', 'patches', 'runtime',
-      'scripts', 'server', 'test', 'upstream'];
+      'scripts', 'server', 'test', 'upstream', 'native/gpu-dummy/src'];
     for (const directory of dirs) await mkdir(join(scratch, directory), { recursive: true });
     for (const path of files) await writeFile(join(scratch, path), 'public synthetic source\n');
     const excluded = ['config/.env.production', 'docs/nested/.env.local', 'hermes/.env',
       'config/private.key', 'config/private.pem', 'config/caddy-root.crt',
       'docs/secrets/token.txt', 'scripts/test-results/trace.txt', 'docs/.git/config',
       'hermes/__pycache__/bootstrap.pyc', 'upstream/target/artifact',
+      'native/gpu-dummy/target/compiled-artifact', 'native/gpu-dummy/.env.local',
       'upstream/code/web/bpane-client/node_modules/dependency.js', 'server/.access.json'];
     for (const path of excluded) {
       await mkdir(dirname(join(scratch, path)), { recursive: true });
@@ -31,6 +34,8 @@ test('local source archive keeps public configuration but excludes nested operat
     assert(entries.includes('.env.example'));
     assert(entries.includes('config/Caddyfile'));
     assert(entries.includes('upstream/Cargo.lock'));
+    assert(entries.includes('native/gpu-dummy/src/lib.rs'));
+    assert(entries.includes('Dockerfile.gpu-dummy'));
     for (const path of excluded) assert(!entries.includes(path), `Archive leaked ${path}`);
     const contents = execFileSync('tar', ['-xOzf', 'source.tar.gz'], { cwd: scratch, encoding: 'utf8' });
     assert(!contents.includes('SYNTHETIC_SECRET_DO_NOT_ARCHIVE'));

@@ -21,3 +21,4 @@ source.tar.gz
 caddy-root.crt
 **/__pycache__
 **/*.pyc
+native/gpu-dummy/target/

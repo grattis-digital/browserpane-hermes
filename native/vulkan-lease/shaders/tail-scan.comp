@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=256) in;
+shared uint scan[512];
+shared uint counts[4];
+void main() {
+    uint lane=gl_LocalInvocationIndex;
+    if (lane<4u) counts[lane]=0u;
+    barrier();
+    for (uint i=lane;i<512u;i+=256u) {
+        scan[i]=i<tiles()?frame_size(i):0u;
+        if (i<tiles()) atomicAdd(counts[work[i].x],1u);
+    }
+    barrier();
+    for (uint step=1u;step<512u;step*=2u) {
+        uint i=(lane+1u)*step*2u-1u; if (i<512u) scan[i]+=scan[i-step]; barrier();
+    }
+    if (lane==0u) {
+        outputWords[0]=0x42504754u; outputWords[1]=1u;
+        outputWords[2]=control.y+scan[511]+10u; outputWords[3]=p.serial;
+        outputWords[4]=counts[0]; outputWords[5]=counts[1]; outputWords[6]=counts[2]; outputWords[7]=counts[3];
+        outputWords[8]=control.x; outputWords[9]=tiles(); outputWords[10]=p.flags;
+        for (uint i=11u;i<16u;i++) outputWords[i]=0u;
+        scan[511]=0u;
+    }
+    barrier();
+    for (uint step=256u;step>0u;step/=2u) {
+        uint i=(lane+1u)*step*2u-1u;
+        if (i<512u) { uint left=scan[i-step]; scan[i-step]=scan[i]; scan[i]+=left; } barrier();
+    }
+    for (uint i=lane;i<tiles();i+=256u) offsets[i]=control.y+scan[i];
+}

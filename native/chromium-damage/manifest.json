@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "version": "152.0.7977.75",
+  "revision": "4999cc1efed37c4d91dc4ce6ec4b0a50e2a9a8cb",
+  "feature": "BrowserPaneSurfaceDamage",
+  "sources": {
+    "DEPS": "2557b5a638eb7f6d4efc81afee0e94e8ac811e70dfbca32d4214715c1fb3c4c9",
+    "LICENSE": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b",
+    "components/viz/common/display/renderer_settings.h": "af34e3ac14b01e6a9c7b9cb6b0a4148ca91b042c63250a56db3d035a9995d1f1",
+    "components/viz/service/display/direct_renderer.cc": "845ca26767dd6fce575aa9f0fe16c33bfc5f62b53313d061936fda8b98b9aaeb",
+    "components/viz/service/display/direct_renderer.h": "05449b7a732c573c7c7e880b1a381eab6b3cc4207beb6e6d1247494f2f7081b4",
+    "components/viz/service/display/output_surface_frame.cc": "49df21c717b6f1df23715892535545f93f27b3be77dd66262e4de4e9414f7fb4",
+    "components/viz/service/display/output_surface_frame.h": "a154980943f149c7bae155f1ac8ec711bbdf2397282c3eba70fb27a0b5ed88f5",
+    "components/viz/service/display/skia_renderer.cc": "d184a3117f039596810fcd462f127af1ae7511e67b919d0c05fde1835176d021",
+    "components/viz/service/display/skia_renderer.h": "fdfbe65f83c91c9d3500d929e59a406e5051a1ee7473dca05d38779f86fca73c",
+    "components/viz/service/display_embedder/skia_output_device_gl.cc": "95ab7e6f168329ddeb9f6fe7ca2e82c44316099639536c4ca13f5eb34a672ff8",
+    "components/viz/service/display_embedder/skia_output_device_gl.h": "5088f2b6950e35ddd345bc8f14528153e8a7b152a98179436d75f642ead8beb5",
+    "components/viz/service/display_embedder/skia_output_surface_impl.cc": "730cc273e50e577f380dc0fcca236eb5e1b61cdc0d0c9279c36c6e14011c810f",
+    "components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc": "9c8eef472741d60657d34a121a24c7cabe32c5560474fc5e4272f4363b4509f0",
+    "ui/gfx/BUILD.gn": "016053cf7d0b8cf9ca7d457a9d4836c6c14477f99d207f0c814540d7624a042b",
+    "ui/gfx/frame_data.h": "d96a737b644e6ecf47186beb4ebb08b781cdaaa72c7cc88182adcf823cf196bc",
+    "ui/gl/gl_features.cc": "d0768a48abcbae336f551ca7dd4558175fe7c882c22aed81f9a940a2084bbb02",
+    "ui/gl/gl_features.h": "dad5b65d55493880a6088f2c6a4042c4640742e18959ebe8d9cca4eda2aaa05c",
+    "ui/gl/gl_surface.h": "d0229e4d931b1a89fb19e3cbdb875cfcb99ab80770895cd771d6146235c270d9",
+    "ui/gl/gl_surface_egl.cc": "9bedf6f5ed23b568c80e452e17d7cf771098fe1645672c3e33a4ba42a446d77b",
+    "ui/gl/gl_surface_egl.h": "4afd9d8d0e3f2cddd973c4dfa5350d34d7da56ea5cb6eb2df34998421fa4f684",
+    "ui/gl/gl_surface_egl_x11.cc": "6b4e9fc9ead19a0a0429e9c530f0f5970c69740058935b0941da5aafb23e040d",
+    "ui/gl/gl_surface_egl_x11.h": "ce5fa67bca9092aa3775c4251c502bf0d14a06ca0ac5230f41ddad59c02111ae"
+  },
+  "artifacts": {
+    "surface-damage.patch": "d1e3709b7d12771a530c5a28634afaaa1bf7c2aacce682fd160980aacafeff19",
+    "overlay/ui/gfx/browserpane_surface_damage.h": "16147834b13393bb9cc1f47e001308640eb00182e1b676c3ca28b9125b87a87d"
+  }
+}

@@ -1,0 +1,34 @@
+#version 450
+// One bounded, stable exclusive scan: <=510 64x64 tiles at 1920x1080.
+// Scan both command and raw-payload counts; no global atomic append counter.
+layout(local_size_x=256) in;
+layout(set=0,binding=2,std430) readonly buffer Scratch { uint flags[512]; uint colors[512]; };
+layout(set=0,binding=3,std430) buffer Output { uvec4 header; uvec4 commands[512]; uint pixels[]; };
+layout(push_constant) uniform Params { uint width; uint height; uint scenario; uint spare; } p;
+shared uvec2 scan[512];
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uint count = ((p.width+63u)/64u)*((p.height+63u)/64u);
+    for (uint i=lane;i<512u;i+=256u) {
+        uint f = i<count ? flags[i] : 0u;
+        scan[i] = uvec2((f&1u)!=0u ? 1u:0u, (f&3u)==3u ? 1u:0u);
+    }
+    memoryBarrierShared(); barrier();
+    for (uint stride=1u;stride<512u;stride*=2u) {
+        uint i=(lane+1u)*stride*2u-1u;
+        if (i<512u) scan[i]+=scan[i-stride];
+        memoryBarrierShared(); barrier();
+    }
+    if (lane==0u) { header=uvec4(scan[511],count,1u); scan[511]=uvec2(0); }
+    memoryBarrierShared(); barrier();
+    for (uint stride=256u;stride>0u;stride/=2u) {
+        uint i=(lane+1u)*stride*2u-1u;
+        if (i<512u) { uvec2 left=scan[i-stride]; scan[i-stride]=scan[i]; scan[i]+=left; }
+        memoryBarrierShared(); barrier();
+    }
+    for (uint i=lane;i<count;i+=256u) if ((flags[i]&1u)!=0u) {
+        bool raw=(flags[i]&2u)!=0u;
+        // tile ID, Fill=1/Raw=2, fill RGBA, compact raw slot (or zero).
+        commands[scan[i].x]=uvec4(i,raw?2u:1u,colors[i],raw?scan[i].y:0u);
+    }
+}

@@ -1,0 +1,98 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=16,local_size_y=16) in;
+shared uint changed,nonuniform,hx,hy,different;
+shared uvec2 fingerprint;
+shared uint candidate;
+void main() {
+    uint lane=gl_LocalInvocationIndex,tile=gl_WorkGroupID.y*gl_NumWorkGroups.x+gl_WorkGroupID.x;
+    uvec2 start=origin(tile),size=extent(tile);
+    bool stableVideo=p.video.z>0u && acknowledged() && all(equal(p.video,p.previousVideo));
+    bool intersects=p.video.z>0u && all(lessThan(start,p.video.xy+p.video.zw)) &&
+        all(greaterThan(start+size,p.video.xy));
+    bool covered=p.video.z>0u && all(greaterThanEqual(start,p.video.xy)) &&
+        all(lessThanEqual(start+size,p.video.xy+p.video.zw));
+    if (covered && stableVideo) {
+        if (lane==0u) { metadata[p.writeBank*512u+tile]=uvec4(0); work[tile]=uvec4(0); }
+        return; // Entirely video-owned: no QOI, fingerprint or raw readback.
+    }
+    bool repair=!stableVideo && p.previousVideo.z>0u && all(lessThan(start,p.previousVideo.xy+p.previousVideo.zw)) &&
+        all(greaterThan(start+size,p.previousVideo.xy));
+    if (lane==0u) { changed=acknowledged()&&!repair?0u:1u; nonuniform=0u; hx=0u; hy=0u; }
+    barrier();
+    uint first=pixel(imageLoad(newFrame,ivec2(start))),localChanged=0u,localSolid=0u;
+    int dy=int(control.x);
+    for (uint y=0u;y<64u;y+=16u) for (uint x=0u;x<64u;x+=16u) {
+        uvec2 offset=gl_LocalInvocationID.xy+uvec2(x,y),q=start+offset;
+        if (offset.x>=size.x || offset.y>=size.y) continue;
+        uint value=pixel(imageLoad(newFrame,ivec2(q)));
+        localSolid|=uint(value!=first);
+        ivec2 source=ivec2(q)+ivec2(0,dy);
+        // Video owns pixels, not whole grid cells. Boundary tiles compare only
+        // their lossless remainder; motion inside the crop must not resend it.
+        bool videoPixel=stableVideo && all(greaterThanEqual(q,p.video.xy)) && all(lessThan(q,p.video.xy+p.video.zw));
+        if (acknowledged() && !videoPixel) localChanged|=uint(source.y<0 || source.y>=int(p.height) ||
+            value!=pixel(imageLoad(oldFrame,clamp(source,ivec2(0),ivec2(p.width-1u,p.height-1u)))));
+    }
+    atomicOr(changed,localChanged); atomicOr(nonuniform,localSolid);
+    barrier();
+    uint target=p.writeBank*512u+tile;
+    if (lane==0u) {
+        metadata[target]=uvec4(0);
+        work[tile]=uvec4(3u,tile+1u,p.serial,0);
+        if (changed==0u) {
+            work[tile]=uvec4(0);
+            // The ACK snapshot advances but suppressed video pixels do not.
+            // Such a tile is no longer an exact cache source for later refs.
+            if (dy==0 && !intersects) metadata[target]=metadata[p.readBank*512u+tile];
+        } else if (nonuniform==0u) work[tile]=uvec4(1u,first,0,0);
+    }
+    barrier();
+    if (changed==0u || nonuniform==0u) return;
+    // Fingerprints are useful only for nonuniform changed tiles. Unchanged
+    // tiles inherit ACK metadata; moved framebuffer-only pixels carry no token.
+    uint xh=0u,yh=0u;
+    for (uint y=0u;y<64u;y+=16u) for (uint x=0u;x<64u;x+=16u) {
+        uvec2 offset=gl_LocalInvocationID.xy+uvec2(x,y);
+        if (offset.x>=size.x || offset.y>=size.y) continue;
+        uint value=pixel(imageLoad(newFrame,ivec2(start+offset)));
+        uint h=mix32(value^mix32(offset.y*64u+offset.x)); xh^=h; yh+=h*0x9e3779b9u;
+    }
+    atomicXor(hx,xh); atomicAdd(hy,yh); barrier();
+    if (lane==0u) {
+        fingerprint=uvec2(hx,hy)^uvec2(mix32(size.x),mix32(size.y));
+        metadata[target].xy=fingerprint;
+    }
+    barrier();
+    if (acknowledged()) for (uint way=0u;way<4u;way++) {
+        if (lane==0u) {
+            uint bucket=((p.flags&4u)!=0u?0u:fingerprint.x&255u)*4u;
+            candidate=lookup[bucket+way]; different=0u;
+            if (candidate!=0xffffffffu) {
+                uvec4 m=metadata[p.readBank*512u+candidate];
+                if (any(notEqual(extent(candidate),size)) ||
+                    ((p.flags&4u)==0u && any(notEqual(m.xy,fingerprint)))) candidate=0xffffffffu;
+            }
+        }
+        barrier();
+        if (candidate==0xffffffffu) continue;
+        uvec2 oldStart=origin(candidate);
+        uint mismatch=0u;
+        for (uint y=0u;y<64u;y+=16u) for (uint x=0u;x<64u;x+=16u) {
+            uvec2 offset=gl_LocalInvocationID.xy+uvec2(x,y);
+            if (offset.x<size.x && offset.y<size.y) mismatch|=uint(any(notEqual(
+                imageLoad(newFrame,ivec2(start+offset)).rgb,imageLoad(oldFrame,ivec2(oldStart+offset)).rgb)));
+        }
+        atomicOr(different,mismatch); barrier();
+        if (different==0u) {
+            if (lane==0u) {
+                uvec2 token=metadata[p.readBank*512u+candidate].zw;
+                metadata[target].zw=token; work[tile]=uvec4(2u,token,0);
+            }
+            return;
+        }
+        barrier();
+    }
+    if (lane==0u) metadata[target].zw=uvec2(tile+1u,p.serial);
+}

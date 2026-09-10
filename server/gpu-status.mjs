@@ -20,7 +20,7 @@ export class GpuStatus {
     this.#fetch = fetch; this.#Socket = Socket; this.#timers = timers;
   }
 
-  async check() {
+  async check({ requireVideoDecode = false } = {}) {
     let response, url;
     try {
       response = await this.#fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(2500) });
@@ -61,6 +61,8 @@ export class GpuStatus {
       });
     });
     GpuStatus.validate(gpu);
+    if (requireVideoDecode) return GpuVideoStatus.validate(gpu);
   }
 }
 import { GpuStatusError } from './gpu-status-error.mjs';
+import { GpuVideoStatus } from './gpu-video-status.mjs';
