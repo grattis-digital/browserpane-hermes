@@ -1,0 +1,62 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=256) in;
+shared uint scan[256];
+shared uint total;
+uint bytes[16]; uint count;
+void put(uint byte) { bytes[count/4u]|=(byte&255u)<<((count%4u)*8u); count++; }
+void append(uint base,uint byte,uint value) { atomicOr(encoded[base+byte/4u],(value&255u)<<((byte%4u)*8u)); }
+uvec3 rgb(uint v) { return uvec3(v&255u,(v>>8)&255u,(v>>16)&255u); }
+void main() {
+    uint tile=gl_WorkGroupID.x,lane=gl_LocalInvocationIndex;
+    if (work[tile].x!=3u) return;
+    uvec2 size=extent(tile),start=origin(tile); uint n=size.x*size.y;
+    uint begin=lane*16u,end=min(begin+16u,n),run=0u; count=0u;
+    for (uint i=0u;i<16u;i++) bytes[i]=0u;
+    uvec3 previous=uvec3(0);
+    if (begin>0u && begin<n) {
+        uint i=begin-1u; previous=rgb(pixel(imageLoad(newFrame,ivec2(start+uvec2(i%size.x,i/size.x)))));
+    }
+    // QOI's RGB/DIFF/LUMA/RUN subset is independently encodable in segments.
+    // No INDEX state crosses lanes; split RUNs are valid standard QOI.
+    for (uint i=begin;i<end;i++) {
+        uvec3 value=rgb(pixel(imageLoad(newFrame,ivec2(start+uvec2(i%size.x,i/size.x)))));
+        if (all(equal(value,previous))) { run++; continue; }
+        if (run>0u) { put(0xc0u+run-1u); run=0u; }
+        ivec3 d=ivec3(value)-ivec3(previous); int dg=d.g,dr=d.r-dg,db=d.b-dg;
+        if (all(greaterThanEqual(d,ivec3(-2))) && all(lessThanEqual(d,ivec3(1))))
+            put(0x40u|uint(d.r+2)*16u|uint(d.g+2)*4u|uint(d.b+2));
+        else if (dg>=-32 && dg<=31 && dr>=-8 && dr<=7 && db>=-8 && db<=7) {
+            put(0x80u|uint(dg+32)); put(uint(dr+8)*16u|uint(db+8));
+        } else { put(0xfeu); put(value.r); put(value.g); put(value.b); }
+        previous=value;
+    }
+    if (run>0u) put(0xc0u+run-1u);
+    scan[lane]=count; barrier();
+    for (uint step=1u;step<256u;step*=2u) {
+        uint i=(lane+1u)*step*2u-1u; if (i<256u) scan[i]+=scan[i-step]; barrier();
+    }
+    if (lane==0u) { total=scan[255]+22u; scan[255]=0u; work[tile].w=total; }
+    barrier();
+    for (uint step=128u;step>0u;step/=2u) {
+        uint i=(lane+1u)*step*2u-1u;
+        if (i<256u) { uint left=scan[i-step]; scan[i-step]=scan[i]; scan[i]+=left; } barrier();
+    }
+    uint base=tile*SLOT_WORDS;
+    // Only encoded bytes are cleared, not a raw frame or worst-case payload.
+    for (uint i=lane;i<(total+3u)/4u;i+=256u) encoded[base+i]=0u;
+    memoryBarrierBuffer(); barrier();
+    uint offset=14u+scan[lane];
+    // Adjacent lanes can share a destination word. Atomic OR avoids byte races.
+    for (uint i=0u;i<(count+3u)/4u;i++) {
+        uint pos=offset+4u*i,shift=(pos%4u)*8u,value=bytes[i];
+        atomicOr(encoded[base+pos/4u],value<<shift);
+        if (shift!=0u && pos+4u<offset+count+3u) atomicOr(encoded[base+pos/4u+1u],value>>(32u-shift));
+    }
+    if (lane==0u) {
+        append(base,0,113u); append(base,1,111u); append(base,2,105u); append(base,3,102u);
+        append(base,7,size.x); append(base,11,size.y); append(base,12,4u);
+        append(base,total-1u,1u);
+    }
+}

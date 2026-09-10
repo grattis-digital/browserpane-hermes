@@ -32,9 +32,12 @@ export class CompactTabChecks {
       assert.equal(flow.completed, 1); assert.equal(flow.stages, 1);
       assert.equal(await page.evaluate(() => window.httpFlowClicks), 1);
       await fixture.waitForTabs(1);
-      const created = await call(a.client, 'pane_act', { lease: initial.lease, request: 2,
+      const refused = await call(a.client, 'pane_act', { lease: initial.lease, request: 2,
         steps: [{ op: 'new', url: 'about:blank' }] });
-      assert.equal(created.completed, 1); assert.notEqual(created.tab, initial.tab);
+      assert.equal(refused.error.code, 'TAB_EXISTS'); assert.equal(refused.completed, 0);
+      assert.equal(refused.mayHaveActed, undefined); await fixture.waitForTabs(1);
+      const created = await fixture.openPage(); // Existing human tabs remain manageable.
+      assert.notEqual(created.tab, initial.tab);
       await fixture.waitForTabs(2);
       for (let request = 3; request <= 5; request++) {
         const view = await call(a.client, 'pane_view');

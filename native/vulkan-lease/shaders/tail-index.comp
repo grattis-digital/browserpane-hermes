@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=256) in;
+shared uint score;
+void main() {
+    uint lane=gl_LocalInvocationIndex,group=gl_WorkGroupID.x;
+    if (lane==0u) score=0u;
+    if (group==0u) for (uint i=lane;i<1024u;i+=256u) lookup[i]=0xffffffffu;
+    memoryBarrierBuffer(); barrier();
+    if (group==0u && acknowledged()) for (uint tile=lane;tile<tiles();tile+=256u) {
+        uvec4 m=metadata[p.readBank*512u+tile];
+        if (m.z==0u) continue; // Fill/scroll-only content is not a client QOI cache entry.
+        uint bucket=((p.flags&4u)!=0u?0u:m.x&255u)*4u;
+        for (uint way=0u;way<4u;way++) if (atomicCompSwap(lookup[bucket+way],0xffffffffu,tile)==0xffffffffu) break;
+    }
+    if (acknowledged() && (p.flags&8u)==0u) {
+        // One distributed workgroup per candidate; no long serial sampling loop.
+        // Jitter avoids aliasing a regular sampling grid with stripes/text.
+        uint h=mix32(lane+1u);
+        ivec2 q=ivec2(h%p.width,mix32(h)%p.height),source=q+ivec2(0,int(group)-64);
+        if (source.y>=0 && source.y<int(p.height) &&
+            all(equal(imageLoad(newFrame,q).rgb,imageLoad(oldFrame,source).rgb))) atomicAdd(score,1u);
+    }
+    barrier();
+    if (lane==0u) motion[group]=score;
+}

@@ -11,6 +11,10 @@ Open the viewer, sign in yourself, and let Hermes work in that **same session**.
 When a task needs your judgment or MFA, take over. Your browser profile and
 downloads remain on your machine across container restarts and recreation.
 
+Two deployment modes are available: the default CPU/Xorg baseline and an explicitly
+**experimental custom Xorg/Vulkan GPU pipeline**. See [rendering modes](#rendering-modes)
+for build, enablement, hardware checks and rollback instructions.
+
 This is a focused fork of [BrowserPane](https://github.com/ITmedes/browserpane),
 integrated with [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 It keeps BrowserPane’s native capture, tile/cache renderer, WebTransport, video
@@ -33,9 +37,12 @@ The page is a synthetic demo; no private browsing data or live model response is
   session without appending another startup tab.
 - **Compact agent control.** Six focused MCP tools provide bounded observations,
   immutable-state pagination, semantic flows and guarded action batches. Untargeted observations
-  reuse one shared default tab; normal navigation stays in that tab, while extra
-  tabs require an explicit request. The original Playwright
+  reuse one shared default tab; normal navigation stays in that tab. The original Playwright
   MCP remains selectable; see the [protocol and limits](docs/COMPACT_MCP.md).
+  Compact MCP reuses existing tabs and rejects explicit extra-tab creation;
+  `new` is reserved for recovery when no tabs remain. Fresh accessibility
+  outlines and observed-region expansion bound browser traversal, while cached
+  pagination avoids recapture. See [progressive observations and measurements](docs/MCP_SCOPED_OBSERVATIONS.md).
 - **Managed ad blocking.** Upstream AdBlock with EasyPrivacy uses the persistent
   browser profile. See [installation, defaults and checks](docs/CONFIGURATION.md#managed-ad-blocking);
   blocking is not a security boundary or a guaranteed bandwidth reduction.
@@ -59,8 +66,8 @@ Pi 4/5 with 8 GB RAM is the practical target; the measured reference was a Pi 4B
 ARM64 and x86-64 images are build targets; the supported rendering baseline is
 CPU Chromium on X11, not an experimental GPU path.
 
-This branch also provides an explicit [V3D GPU/X11 configuration](docs/GPU.md)
-with its own hardware qualification gates; it is not silently enabled by setup.
+Choose the default below, or follow the experimental GPU instructions after
+configuring the common networking, HTTPS and persistent volumes.
 
 ```sh
 git clone https://github.com/grattis-digital/browserpane-hermes.git
@@ -178,6 +185,8 @@ The first connected viewer owns shared capture resizing. Other viewers fit the
 same capture locally. Resolution presets set actual capture pixels; HiDPI adjusts
 local display density and fitting, not Chromium’s shared DPI or zoom. Small
 captures are centered. See [display controls](docs/DISPLAY.md).
+Scrollbar drags retain pointer ownership when leaving the viewer and release on
+mouse-up or cancellation; this does not force scrollbar movement onto the tile grid.
 
 ## What is different from other approaches?
 
@@ -193,22 +202,181 @@ The specialization is the ready-to-run combination and its explicit one-session
 contract. It is not multi-tenant isolation, a cloud browser fleet, or a general
 desktop replacement.
 
+## Rendering modes
+
+Both modes use the same persistent Chromium profile, Hermes MCP endpoint, viewer,
+ports and shared downloads. They are alternatives: run **one browser service**,
+not one of each. The GPU mode adds one private display/encoder sidecar, not
+another Chromium session.
+
+| | CPU / Xorg (default) | Custom Xorg / Vulkan (**experimental**) |
+| --- | --- | --- |
+| Chromium page rendering | Software rendering with the bundled default flags | Sandboxed V3D rendering through X11/ANGLE |
+| Display | Standard Xorg dummy driver, `DUMMY0` | Custom Rust-core/glamor driver, `DUMMY0`, immutable DMA-BUF leases |
+| Capture and tile work | CPU capture, damage analysis, classification and tile encoding | Vulkan comparison, scroll verification, flat-colour classification, acknowledged tile cache, lossless QOI and command packing |
+| CPU boundary | Captured pixel buffers are processed on CPU | CPU forwards encoded tile commands; browser logic, driver submission, networking and viewer decoding still use CPU |
+| Video | Existing CPU capture/encoding path | Tile-only by default; optional Pi 4 hardware video-region encoding and separate source decoding |
+| Hardware scope | 64-bit Linux; ARM64 and x86-64 build targets | Qualified target: Pi 4 / V3D 4.2, 64-bit Linux; not a generic GPU or Pi 5 compatibility promise |
+| Select | `compose.yaml` | `compose.yaml` + `compose.gpu.yaml` |
+
+“CPU” describes the actual shipped baseline, not merely its capture backend:
+the standard dummy display and launch flags do **not** promise GPU-accelerated
+Chromium. Do not remove flags manually to create an undocumented third mode.
+
+### CPU / Xorg baseline
+
+Use the quick start above. No graphics devices, extra sidecar or GPU environment
+variables are needed:
+
+```sh
+docker compose build
+docker compose up -d
+./scripts/doctor.sh
+```
+
+This is the portable fallback and the reference for comparisons. Capture uses
+the existing damage/tile/cache transport rather than sending every screen as
+a full-frame video. High-resolution animation and software video can still
+saturate a Pi; begin at 1280×720 and keep agent work on the shared default tab.
+
+### Experimental custom GPU / Vulkan pipeline
+
+This is an opt-in coupled stack, not a production-support or universal-FPS
+guarantee. It supports **one interactive viewer**, with capture up to
+**1920×1080**. Hermes is not another viewer. Start at 1280×720; test resize,
+scroll, reconnect and video with synthetic content before trusting a real task.
+The CPU capture thread is not started when this pipeline is enabled.
+
+Run these commands on the ARM64 Pi, or build matching ARM64 images elsewhere
+and load them onto it. Build browser, gateway, client and display from the
+**same checkout**; mixing versions can break acknowledgement/cache ownership.
+
+1. Run `./scripts/setup.sh` if needed and configure the common `.env` settings.
+   Use a current Docker Compose plugin supporting `!reset`.
+2. Discover the Linux host's devices:
+
+   ```sh
+   ./scripts/gpu-devices.sh
+   ```
+
+   Copy its four `BPANE_GPU_RENDER_DEVICE`, `BPANE_GPU_DISPLAY_DEVICE`,
+   `BPANE_GPU_RENDER_GID` and `BPANE_GPU_DISPLAY_GID` assignments into your
+   private `.env`. Discovery requires stable V3D render and VC4 display links.
+   Do not guess `card0`, add privileged mode or expose every device. If discovery
+   fails, fix the host's supported DRM driver configuration before continuing.
+
+3. Build the paired images:
+
+   ```sh
+   docker compose build browserpane hermes
+   docker build -f Dockerfile.gpu -t browserpane-hermes-browser:gpu-local .
+   docker compose -f compose.yaml -f compose.gpu.yaml build gpu-display
+   docker compose -f compose.yaml -f compose.gpu.yaml config --quiet
+   ```
+
+   The GPU derivative adds compatible Mesa libraries and a narrowly scoped
+   Chromium scheduler shim; it does not rebuild Chromium. To select another
+   matching local browser image, set `BPANE_GPU_BROWSER_IMAGE` in `.env`.
+   The override enables `BPANE_GPU_MODE=v3d`,
+   `BPANE_X11_BACKEND=gpu-dummy` and `BPANE_GPU_TAIL=1` together.
+
+4. Stop users/agent tasks, retain your previous images and back up persistent
+   volumes with writers stopped. Switch the same Compose project:
+
+   ```sh
+   docker compose stop hermes browserpane
+   docker compose -f compose.yaml -f compose.gpu.yaml up -d
+   docker compose -f compose.yaml -f compose.gpu.yaml exec browserpane node server/check-gpu.mjs
+   docker compose -f compose.yaml -f compose.gpu.yaml ps
+   ```
+
+   The check requires sandboxed V3D, enabled compositing/rasterization, no
+   reported GPU-process crashes and a responsive capture worker. Failure must
+   be investigated, not bypassed with `--no-sandbox` or a software renderer.
+   Reload the viewer to obtain the matching client. Keep using both `-f`
+   arguments for subsequent GPU-mode operations.
+
+Only the selected DRM nodes are openable; read-only `/dev/dri` visibility lets
+libdrm resolve their canonical identities. X11, IPC and the encoded-output socket
+are private to the browser/display pair. There are no extra published ports.
+The browser retains its 2300 MiB memory limit; the display has a 768 MiB limit.
+These are caps, not reservations. CPU shares are relative weights, not a fixed
+CPU-core quota. Monitor the combined browser/display load.
+
+GPU-side work includes exact changed-tile comparison, arbitrary-pixel scroll
+reuse with repair, flat-colour commands, cache references and lossless changed
+tile encoding. Only encoded output crosses to the host's transport path.
+DMA-BUF sharing still has synchronization and GPU memory-bandwidth costs;
+the pipeline is **not** claimed to be zero-copy or CPU-free end to end.
+
+#### Optional Pi 4 video
+
+Without another override, video motion is carried as lossless tiles. For
+outgoing H.264 video regions, identify the `bcm2835-codec-encode` node and put
+its path/GID in `BPANE_GPU_VIDEO_DEVICE` and `BPANE_GPU_VIDEO_GID` in `.env`.
+Then include `-f compose.gpu-video.yaml` after the GPU override:
+
+```sh
+docker compose -f compose.yaml -f compose.gpu.yaml -f compose.gpu-video.yaml config --quiet
+docker compose -f compose.yaml -f compose.gpu.yaml -f compose.gpu-video.yaml up -d
+```
+
+The worker crops and converts the video region on GPU into the Pi's hardware
+encoder; surrounding UI stays lossless. Video has an independent bounded
+cadence capped at 30 fps, not a guaranteed delivered frame rate. Hardware
+encoder failure restores lossless tiles, not a hidden CPU video encoder.
+See [video setup, device identity and acceptance checks](docs/GPU_LIVE_TEST.md#optional-pi-4-hardware-video-regions).
+
+**Source playback decoding is separate.** GPU compositing does not mean that
+Chromium decodes YouTube's AV1 stream in hardware. The additional experimental
+`Dockerfile.gpu-decode` / `compose.gpu-decode.yaml` option uses pinned Pi
+Chromium, a selected V4L2 decoder device and h264ify. Follow the
+[decoder build/configuration and player-level checks](docs/GPU_VIDEO_DECODE.md).
+Do not enable Pi 4 codec overrides on hardware without the matching codec nodes.
+
+#### Recovery and return to CPU mode
+
+Both modes retain the profile and shared files. Docker restarts exited services
+unless explicitly stopped. GPU mode also monitors worker progress and display
+generation: a failed worker triggers display/session recovery. This can lose
+unsaved page state and does not guarantee recovery from a wedged kernel.
+See [capture recovery](docs/GPU_LIVE_TEST.md#capture-failure-recovery).
+
+To return to the baseline, finish agent work and stop the GPU pair with the
+same override set used to start it; then recreate the base browser:
+
+```sh
+docker compose -f compose.yaml -f compose.gpu.yaml stop hermes browserpane gpu-display
+docker compose up -d --force-recreate browserpane
+docker compose up -d hermes web
+```
+
+Include any video/decode overrides in the stop command if enabled. Keep the
+project name and volumes unchanged. Do **not** use `down -v`.
+If the decoder candidate changes Chromium versions, use a compatible profile
+backup when reverting; browser profile downgrades are not guaranteed safe.
+
 ## Performance, correctness, and upstream backports
 
-The fork carries changes to capture scheduling, buffer reuse, scroll detection,
-tile/subtile caches, client GPU texture reuse, stream recovery, and display
-geometry. Host, gateway, and client must be upgraded together.
+The fork carries capture scheduling, buffer reuse, tile/subtile caches, scroll
+repair, client texture reuse, bounded video delivery, recovery and exact display
+geometry changes. Host, gateway and viewer changes must travel together.
 
-On the earlier Pi 4B qualification, keyboard input-to-completed-tile latency
-fell from **127 ms to 22.3 ms median** (180 physical key events per version).
-That measures the host portion, **not end-to-end input-to-photon latency**.
-Later correctness fixes prioritize complete frames over optimistic stale tiles;
-they are not all speed improvements. No universal 60 FPS or bandwidth guarantee
-is claimed.
+Read the [optimization evidence and limits](docs/OPTIMIZATIONS.md),
+[ordered backport guide](docs/BACKPORTING.md) and
+[GPU ownership/protocol guide](docs/GPU_LIVE_TEST.md).
+Synthetic component timings, host processing time and actual input-to-photon
+latency are different measurements. No universal FPS or bandwidth claim follows
+from a component benchmark. The [render pilot](scripts/render-pilot/README.md)
+uses one disposable browser and synthetic fixtures, never a live profile.
 
-Read the [optimization evidence and limits](docs/OPTIMIZATIONS.md) and
-[ordered backport guide](docs/BACKPORTING.md). GPU experiments are documented as
-research, not enabled in the supported Compose configuration.
+[Scoped MCP observations](docs/MCP_SCOPED_OBSERVATIONS.md) bound accessibility
+traversal and response size while retaining Playwright's input safeguards.
+[GPU cache/encoding](docs/GPU_CACHE_ENCODING.md) documents flat-colour and cache
+commands, lossless output and correctness oracles. The
+[custom Chromium source experiment](native/chromium-damage/README.md) is a
+separate, default-off research path; no custom Chromium build is needed for
+either deployment mode.
 
 ## Operations and development
 
@@ -221,6 +389,12 @@ research, not enabled in the supported Compose configuration.
 `docker compose down` preserves named volumes. **`docker compose down -v`
 deletes them**, including profile, credentials and CA state. Keep the Compose
 project name stable across upgrades, and stop writers before making backups.
+
+The wrapper also recovers from cgroup-v2 OOM kills that leave the main browser
+alive; see [recovery behavior and qualification](docs/OOM_RECOVERY.md). This does
+not prevent memory exhaustion or replay interrupted agent actions. Compact MCP
+serializes individual calls; [whole-research-job admission](docs/MCP_WORKLOAD_ADMISSION_PLAN.md)
+is a separate planned safeguard, not an active feature.
 
 The pipelines are tailored to this bundle: patch replay, wrapper/client/native
 regressions, Compose and exposure checks, real container smoke tests, MCP and

@@ -32,7 +32,7 @@ index 6cae6ae..f3b3af7 100644
 +    xrandr --addmode DUMMY0 "1280x720_60.00" 2>/dev/null || true
 +    xrandr --output DUMMY0 --mode "1280x720_60.00" 2>/dev/null || true
 +    ;;
-+  xvnc)
++  gpu-dummy)
 +    # The dedicated GPU display sidecar owns its socket, lock and lifetime.
 +    # Never remove those files or launch a second server on its display.
 +    ready=0
@@ -42,7 +42,7 @@ index 6cae6ae..f3b3af7 100644
 +    done
 +    [ "$ready" = 1 ] || { echo 'GPU X11 display is unavailable or lacks DRI3' >&2; exit 1; }
 +    ;;
-+  *) echo 'BPANE_X11_BACKEND must be dummy or xvnc' >&2; exit 64 ;;
++  *) echo 'BPANE_X11_BACKEND must be dummy or gpu-dummy' >&2; exit 64 ;;
 +esac
  # Apply DPI scaling for larger UI (Chromium chrome + web content)
  BPANE_DPI=${BPANE_DPI:-144}

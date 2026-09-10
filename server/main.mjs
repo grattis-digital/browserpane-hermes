@@ -4,9 +4,11 @@ import { access, readFile } from 'node:fs/promises';
 import { X509Certificate, createHash } from 'node:crypto';
 import { GatewayAdmin, trustedBootstrap } from './gateway-admin.mjs';
 import { RuntimeSettings } from './runtime-settings.mjs';
+import { GpuCaptureHealth } from './gpu-capture-health.mjs';
 
 const { base, origin, gatewayUrl } = RuntimeSettings.fromEnvironment(process.env);
 const admin = new GatewayAdmin({ gatewayUrl, certHashUrl: `${base}/cert-hash` });
+const captureHealth = new GpuCaptureHealth();
 const files = new Map([
   ['/', ['/app/dist/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['/app/dist/app.js', 'text/javascript; charset=utf-8']],
@@ -44,6 +46,7 @@ const server = createServer(async (request, response) => {
   if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
   if (path === '/healthz') {
     try {
+      if (process.env.BPANE_GPU_TAIL === '1') await captureHealth.check();
       await access('/tmp/bpane/agent.sock');
       const cdp = await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(1500) });
       const mcp = await fetch('http://127.0.0.1:8931/mcp', { signal: AbortSignal.timeout(1500) });

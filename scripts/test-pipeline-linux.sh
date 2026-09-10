@@ -131,7 +131,15 @@ for regression in \
   cargo test --locked --offline -p bpane-host -p bpane-gateway \
     "capture::x11::tests::$regression" -- --exact --ignored --test-threads=1
 done
-echo 'Linux host/gateway and all seven X11 capture regressions passed.'
+for regression in \
+  tile_loop::readback::x11_tests::regional_x11_pixels_preserve_damage_arriving_after_acknowledgement \
+  capture::x11::regional::tests::regional_and_packed_reads_account_for_shm_and_getimage_without_extra_owned_copy \
+  tile_loop::classify_integration_tests::damage_directed_classification_preserves_video_state_through_hint_gaps; do
+  registered=$(cargo test --locked --offline -p bpane-host "$regression" -- --ignored --list)
+  case "$registered" in *"$regression: test"*) ;; *) echo "Missing $regression" >&2; exit 1 ;; esac
+  cargo test --locked --offline -p bpane-host "$regression" -- --exact --ignored --test-threads=1
+done
+echo 'Linux host/gateway, nine X11 capture regressions and classifier lifecycle regression passed.'
 CONTAINER_TESTS
 
 echo "Disposable test containers removed; reusable caches retained: $registry_volume, $target_volume"

@@ -4,9 +4,10 @@ set -eu
 cd "$(dirname "$0")/.."
 test -f upstream/Cargo.lock || { echo 'Run scripts/fetch-upstream.sh first.' >&2; exit 1; }
 set -- .dockerignore .gitignore .gitattributes .env.example .github AGENTS.md Dockerfile \
-  Dockerfile.pipeline-test Dockerfile.gpu Dockerfile.gpu-display compose.yaml compose.gpu.yaml package.json package-lock.json \
+  Dockerfile.pipeline-test Dockerfile.gpu Dockerfile.gpu-dummy Dockerfile.gpu-decode \
+  compose.yaml compose.gpu.yaml compose.gpu-video.yaml compose.gpu-decode.yaml compose.gpu-dummy-test.yaml package.json package-lock.json \
   vitest.config.mjs LICENSE README.md UPSTREAM.md UPSTREAM_COMMIT \
-  NODEJS_STANDARDS.md RUST_STANDARDS.md client config docs hermes patches \
+  NODEJS_STANDARDS.md RUST_STANDARDS.md client config docs hermes native patches \
   runtime scripts server test upstream
 if [ -d assets ]; then set -- "$@" assets; fi
 for public_doc in CONTRIBUTING.md SECURITY.md CHANGELOG.md; do

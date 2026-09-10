@@ -1,0 +1,79 @@
+#version 310 es
+// Exact comparisons, not hashes or sampled guesses. One GPU dispatch both
+// classifies and gathers; no CPU decision round trip between those operations.
+precision highp float;
+precision highp int;
+layout(local_size_x=16, local_size_y=16) in;
+// Immutable RGBA8 storage is image-format-compatible by size with R32UI.
+// Compare exact packed words without float conversion/clamp/repacking.
+layout(r32ui, binding=0) readonly uniform highp uimage2D current;
+layout(r32ui, binding=1) readonly uniform highp uimage2D previous;
+layout(r32ui, binding=2) readonly uniform highp uimage2D checkpoint;
+layout(std430, binding=2) buffer Header { uint count; uint data[]; };
+layout(std430, binding=3) writeonly buffer Payload { uint pixels[]; };
+uniform ivec2 size;
+uniform int wrong_candidate;
+uniform int history_valid;
+shared uint differences[256];
+shared uint command;
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    ivec2 origin = ivec2(gl_WorkGroupID.xy) * 32;
+    uint columns = uint((size.x + 31) / 32);
+    uint tiles = columns * uint((size.y + 31) / 32);
+    uint tile = gl_WorkGroupID.y * columns + gl_WorkGroupID.x;
+    int dy = int(data[tiles + tile]);
+    uint bank = data[2u * tiles + tile];
+    if (wrong_candidate != 0) { dy = 32; bank = 0u; }
+    uint difference = 0u;
+    for (int j = 0; j < 4; ++j) {
+        ivec2 offset = ivec2(gl_LocalInvocationID.xy) + ivec2(j % 2, j / 2) * 16;
+        ivec2 p = origin + offset;
+        if (any(greaterThanEqual(p, size))) continue;
+        uint value = imageLoad(current, p).r;
+        if (history_valid == 0) { difference |= 3u; continue; }
+#if BPANE_DEDUPLICATE
+        uint stationary = imageLoad(previous, p).r;
+        if (value != stationary) difference |= 1u;
+        // Identical immutable source: the second comparison cannot add evidence.
+        // Keep both result bits exact without another texture read/bounds check.
+        if (bank == 0u && dy == 0) {
+            if (value != stationary) difference |= 2u;
+            continue;
+        }
+#else
+        if (value != imageLoad(previous, p).r) difference |= 1u;
+#endif
+        ivec2 q = p + ivec2(0, dy);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size)))
+            difference |= 2u;
+        else {
+            uint old = bank == 0u ? imageLoad(previous, q).r : imageLoad(checkpoint, q).r;
+            if (value != old) difference |= 2u;
+        }
+    }
+    differences[lane] = difference;
+    barrier();
+    for (uint step = 128u; step > 0u; step >>= 1u) {
+        if (lane < step) differences[lane] |= differences[lane + step];
+        barrier();
+    }
+    if (lane == 0u) {
+        // 0: stationary previous reuse; 1: verified cached region; >=2: slot.
+        command = (differences[0] & 1u) == 0u ? 0u :
+            ((differences[0] & 2u) == 0u ? 1u : 2u + atomicAdd(count, 1u));
+        data[tile] = command;
+        data[tiles + tile] = uint(dy); data[2u * tiles + tile] = bank;
+    }
+    barrier();
+    if (command < 2u) return;
+    // Do not retain every RGBA value across reduction barriers: that creates
+    // register pressure for the common reused tiles. Reload only dirty pixels.
+    for (int j = 0; j < 4; ++j) {
+        uvec2 offset = gl_LocalInvocationID.xy + uvec2(j % 2, j / 2) * 16u;
+        ivec2 p = origin + ivec2(offset);
+        uint value = 0u;
+        if (all(lessThan(p, size))) value = imageLoad(current, p).r;
+        pixels[(command - 2u) * 1024u + offset.y * 32u + offset.x] = value;
+    }
+}

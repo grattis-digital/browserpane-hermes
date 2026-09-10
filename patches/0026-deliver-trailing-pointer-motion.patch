@@ -1,0 +1,125 @@
+diff --git a/code/web/bpane-client/js/__tests__/pointer-trailing-move.test.ts b/code/web/bpane-client/js/__tests__/pointer-trailing-move.test.ts
+new file mode 100644
+index 0000000..e28e68b
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/pointer-trailing-move.test.ts
+@@ -0,0 +1,53 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { PointerInputRuntime } from '../input/pointer-input-runtime.js';
++
++function pointer(target: EventTarget, type: string, x: number): void {
++  const event = new Event(type, { bubbles: true, cancelable: true });
++  Object.defineProperties(event, { pointerId: { value: 1 }, button: { value: 0 },
++    clientX: { value: x }, clientY: { value: 50 } });
++  target.dispatchEvent(event);
++}
++
++function fixture() {
++  vi.useFakeTimers(); vi.setSystemTime(100);
++  const canvas = document.createElement('canvas'); document.body.append(canvas);
++  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 } as DOMRect);
++  canvas.setPointerCapture = vi.fn(); canvas.releasePointerCapture = vi.fn();
++  const moves = vi.fn(), buttons = vi.fn(), abort = new AbortController();
++  const runtime = new PointerInputRuntime({ canvas, drawCursor: vi.fn(), getRemoteDims: () => ({ width: 100, height: 100 }),
++    sendMouseMove: moves, sendMouseButton: buttons, sendScroll: vi.fn(), now: () => Date.now() });
++  runtime.bind({ signal: abort.signal, focusKeyboardTarget: vi.fn() });
++  pointer(canvas, 'pointermove', 10); pointer(canvas, 'pointerdown', 10);
++  vi.advanceTimersByTime(5); pointer(canvas, 'pointermove', 20);
++  return { canvas, moves, buttons, abort, runtime };
++}
++
++afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); document.body.innerHTML = ''; });
++
++describe('bounded trailing pointer movement', () => {
++  it('delivers the latest held-drag endpoint without waiting for another input', () => {
++    const f = fixture();
++    vi.advanceTimersByTime(3); pointer(f.canvas, 'pointermove', 30);
++    expect(vi.getTimerCount()).toBe(1);
++    expect(f.moves.mock.calls).toEqual([[10, 50]]);
++    vi.advanceTimersByTime(8);
++    expect(f.moves.mock.calls).toEqual([[10, 50], [30, 50]]);
++    expect(vi.getTimerCount()).toBe(0);
++    f.abort.abort();
++  });
++
++  it.each(['up', 'abort', 'reset', 'blur', 'pointercancel', 'lostpointercapture'])(
++    'cannot send an old pending movement after %s', action => {
++      const f = fixture();
++      if (action === 'up') pointer(document.body, 'pointerup', 40);
++      else if (action === 'abort') f.abort.abort();
++      else if (action === 'reset') f.runtime.reset();
++      else if (action === 'blur') window.dispatchEvent(new Event('blur'));
++      else pointer(f.canvas, action, 20);
++      vi.advanceTimersByTime(50);
++      expect(f.moves.mock.calls).toEqual([[10, 50]]);
++      expect(f.buttons).toHaveBeenLastCalledWith(0, false, action === 'up' ? 40 : 20, 50);
++      expect(vi.getTimerCount()).toBe(0);
++      f.abort.abort();
++    });
++});
+diff --git a/code/web/bpane-client/js/input/pointer-input-runtime.ts b/code/web/bpane-client/js/input/pointer-input-runtime.ts
+index 08b412f..e5998ff 100644
+--- a/code/web/bpane-client/js/input/pointer-input-runtime.ts
++++ b/code/web/bpane-client/js/input/pointer-input-runtime.ts
+@@ -29,6 +29,8 @@ export class PointerInputRuntime {
+   private lastMouseSendTime = 0;
+   private scrollState: ScrollState = createScrollState();
+   private drag: { id: number; button: number; x: number; y: number } | undefined;
++  private pendingMove: { x: number; y: number } | undefined;
++  private moveTimer: ReturnType<typeof setTimeout> | undefined;
+ 
+   constructor(input: PointerInputRuntimeInput) {
+     this.canvas = input.canvas;
+@@ -49,6 +51,7 @@ export class PointerInputRuntime {
+     this.canvas.addEventListener('pointerdown', (event: PointerEvent) => {
+       event.preventDefault();
+       if (this.drag) return; // One owned pointer; unrelated touches cannot retarget a drag.
++      this.cancelPendingMove();
+       const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
+       this.drag = { id: event.pointerId, button: event.button, x, y };
+       this.sendMouseButtonFn(event.button, true, x, y);
+@@ -85,6 +88,7 @@ export class PointerInputRuntime {
+         this.scrollState,
+       );
+       if (dx || dy) {
++        this.cancelPendingMove(); // Wheel position supersedes any older hover/drag motion.
+         const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
+         this.drawCursor(null, x, y);
+         this.sendMouseMoveFn(x, y);
+@@ -122,14 +126,33 @@ export class PointerInputRuntime {
+     if (this.drag && this.drag.id !== event.pointerId) return;
+     const { x, y } = this.resolveCanvasPoint(event.clientX, event.clientY);
+     if (this.drag) { this.drag.x = x; this.drag.y = y; }
++    this.pendingMove = { x, y };
+     const now = this.now();
+-    if (now - this.lastMouseSendTime < INPUT_THROTTLE_MS) return;
++    const wait = INPUT_THROTTLE_MS - (now - this.lastMouseSendTime);
++    if (wait <= 0) this.sendPendingMove(now);
++    else if (this.moveTimer === undefined) {
++      // At most one timer and one latest position. Never strand the final event.
++      this.moveTimer = setTimeout(() => this.sendPendingMove(), wait);
++    }
++  }
++
++  private sendPendingMove(now = this.now()): void {
++    const point = this.pendingMove;
++    this.cancelPendingMove();
++    if (!point) return;
+     this.lastMouseSendTime = now;
+-    this.drawCursor(null, x, y);
+-    this.sendMouseMoveFn(x, y);
++    this.drawCursor(null, point.x, point.y);
++    this.sendMouseMoveFn(point.x, point.y);
++  }
++
++  private cancelPendingMove(): void {
++    if (this.moveTimer !== undefined) clearTimeout(this.moveTimer);
++    this.moveTimer = undefined;
++    this.pendingMove = undefined;
+   }
+ 
+   private releaseDrag(point?: { x: number; y: number }): void {
++    this.cancelPendingMove(); // Up/cancel already carries the latest owned position.
+     const drag = this.drag;
+     if (!drag) return;
+     this.drag = undefined; // Clear before releasing capture; lostcapture may be synchronous.

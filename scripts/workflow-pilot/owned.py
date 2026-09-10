@@ -82,8 +82,8 @@ class OwnedPilot:
             "--mount", f"type=bind,src={self.code},dst=/pilot,readonly"], ["/pilot/fixture.mjs"])
         self.execute("fixture", "curl", "--retry", "5", "--retry-connrefused", "--retry-delay", "1",
                      "-fsS", "--max-time", "5", "http://127.0.0.1:9130/" + self.token + "/report")
-        self.create("display", self.images["display"], ["--network=none", "--ipc=shareable", "--shm-size=256m",
-            "--memory=256m", "--pids-limit=128", "--cpu-shares=128", "--tmpfs=/tmp:size=128m,mode=1777,nosuid,nodev",
+        self.create("display", self.images["display"], ["--network=none", "--ipc=shareable", "--shm-size=512m",
+            "--memory=768m", "--pids-limit=128", "--cpu-shares=128", "--tmpfs=/tmp:size=128m,mode=1777,nosuid,nodev",
             *self.gpu(), *self.mount("x11", "/tmp/.X11-unix")])
         self.healthy("display")
         self.start_browser()
@@ -103,7 +103,7 @@ class OwnedPilot:
             "--tmpfs=/tmp:size=1g,mode=1777,nosuid,nodev", *self.gpu(), *self.mount("x11", "/tmp/.X11-unix"),
             *self.mount("profile", "/data"), *self.mount("shared", "/shared"), "--env-file", str(self.code / "host-runtime.env"),
             "-e", "VIEWER_ORIGIN=https://pilot.invalid", "-e", "GATEWAY_URL=https://pilot.invalid:4433",
-            "-e", "BPANE_GPU_MODE=v3d", "-e", "BPANE_X11_BACKEND=xvnc", "-e", "BPANE_DEVICE_SCALE=1",
+            "-e", "BPANE_GPU_MODE=v3d", "-e", "BPANE_X11_BACKEND=gpu-dummy", "-e", "BPANE_GPU_TAIL=1", "-e", "BPANE_DEVICE_SCALE=1",
             "-e", "BPANE_URL=http://127.0.0.1:9130/" + self.token + "/report", "-e", "BPANE_CHROMIUM_SANDBOX_MODE=strict",
             "-e", "BPANE_CHROMIUM_EXTRA_FLAGS=--disable-setuid-sandbox", "-e", "BPANE_MCP_MODE=compact",
             "-e", "BPANE_MCP_TIMINGS=1", "-e", "RUST_LOG=warn",

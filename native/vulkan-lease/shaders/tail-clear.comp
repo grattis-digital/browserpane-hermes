@@ -1,0 +1,20 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=256) in;
+void main() {
+    uint lane=gl_LocalInvocationIndex;
+    for (uint tile=lane;tile<tiles();tile+=256u) {
+        uint size=frame_size(tile); if (size==0u) continue;
+        // Only shared boundary words require clearing. Interior words will be
+        // overwritten once, avoiding a full-output memset/copy cycle.
+        atomicExchange(outputWords[16u+offsets[tile]/4u],0u);
+        atomicExchange(outputWords[16u+(offsets[tile]+size-1u)/4u],0u);
+    }
+    if (lane<(control.y+3u)/4u) atomicExchange(outputWords[16u+lane],0u);
+    uint end=outputWords[2];
+    if (lane<4u) {
+        uint word=(end-10u)/4u+lane;
+        if (word<(end+3u)/4u) atomicExchange(outputWords[16u+word],0u);
+    }
+}

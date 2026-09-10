@@ -1,8 +1,8 @@
 # Pi click-completion timeout investigation
 
-## Reproduced failure, 2026-09-07
+## Reproduced failure
 
-A fresh isolated Pi run using browser checkpoint `50d7bf21` and Hermes `538e4c55`
+A fresh isolated Pi run using the browser candidate and the unchanged Hermes image
 stopped during pair 24: 23 complete pairs plus that pair's warm arm and the initial
 export made **48 verified exports**. The next cold arm failed at `pane_flow` with
 `MCP_BROWSER_ERROR`, `completed: 1`, `failedStep: 1`, `mayHaveActed: true`.

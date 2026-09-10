@@ -1,0 +1,394 @@
+diff --git a/components/viz/service/display/direct_renderer.cc b/components/viz/service/display/direct_renderer.cc
+index dc776c68b751916a0050d042652722e86c6da41b..f880415da785259c845853750582e16956b79f2f 100644
+--- a/components/viz/service/display/direct_renderer.cc
++++ b/components/viz/service/display/direct_renderer.cc
+@@ -52,6 +52,7 @@
+ #include "ui/gfx/geometry/size.h"
+ #include "ui/gfx/geometry/transform.h"
+ #include "ui/gfx/geometry/transform_util.h"
++#include "ui/gl/gl_features.h"
+ 
+ namespace viz {
+ 
+@@ -89,6 +90,8 @@ DirectRenderer::DirectRenderer(const RendererSettings* settings,
+                                DisplayResourceProvider* resource_provider,
+                                OverlayProcessorInterface* overlay_processor)
+     : settings_(settings),
++      browserpane_surface_damage_enabled_(base::FeatureList::IsEnabled(
++          ::features::kBrowserPaneSurfaceDamage)),
+       debug_settings_(debug_settings),
+       output_surface_(output_surface),
+       resource_provider_(resource_provider),
+@@ -431,6 +434,41 @@ void DirectRenderer::DrawFrame(
+       current_frame()->root_damage_rect.IsEmpty() && use_partial_swap_ &&
+       !needs_full_frame_redraw;
+ 
++  // Preserve logical surface damage BEFORE expanding for buffer repair. The
++  // complete back buffer is still drawn below: no capability is falsified.
++  if (browserpane_surface_damage_enabled_ && !use_partial_swap_ &&
++      output_surface_->capabilities().uses_default_gl_framebuffer &&
++      !output_surface_->capabilities().renderer_allocates_images) {
++    gfx::Rect damage = current_frame()->root_damage_rect;
++    ExpandDamageForPixelMovingFilters(root_render_pass, damage);
++    const bool has_overlays = !current_frame()->overlay_list.empty();
++    const bool unsafe_geometry =
++        display_transform != gfx::OVERLAY_TRANSFORM_NONE ||
++        surface_resource_size != device_viewport_size ||
++        root_render_pass->output_rect != gfx::Rect(device_viewport_size) ||
++        !root_render_pass->transform_to_root_target.IsIdentity() ||
++        output_surface_clip_rect_.has_value();
++    const bool debug_drawing = debug_settings_->tint_composited_content ||
++                              debug_settings_->show_overdraw_feedback ||
++                              debug_settings_->show_dc_layer_debug_borders ||
++                              debug_settings_->show_aggregated_damage;
++    const bool incompatible =
++        unsafe_geometry || debug_drawing || has_overlays ||
++        output_surface_->color_matrix() != SkM44() ||
++        GetDelegatedInkPointRenderer(/*create_if_necessary=*/false);
++    const bool colors_changed =
++        browserpane_previous_color_spaces_ != display_color_spaces;
++    if (browserpane_surface_damage_guard_.ObserveFrame(
++            needs_full_frame_redraw || colors_changed, incompatible)) {
++      damage = gfx::Rect(device_viewport_size);
++    }
++    damage.Intersect(gfx::Rect(device_viewport_size));
++    current_frame()->browserpane_surface_damage = damage;
++    if (colors_changed) {
++      browserpane_previous_color_spaces_ = display_color_spaces;
++    }
++  }
++
+   // If partial swap is not used, and the frame can not be skipped, the whole
+   // frame has to be redrawn.
+   if (!use_partial_swap_ && !skip_drawing_root_render_pass)
+diff --git a/components/viz/service/display/direct_renderer.h b/components/viz/service/display/direct_renderer.h
+index b52be5c36eb99e6d11c69eec6753010a7403a08d..dc387d4c35ffab189fb16818ac97cbc8c81e65ad 100644
+--- a/components/viz/service/display/direct_renderer.h
++++ b/components/viz/service/display/direct_renderer.h
+@@ -25,6 +25,7 @@
+ #include "components/viz/service/display/overlay_processor_interface.h"
+ #include "components/viz/service/display/render_pass_alpha_type.h"
+ #include "components/viz/service/viz_service_export.h"
++#include "ui/gfx/browserpane_surface_damage.h"
+ #include "ui/gfx/ca_layer_result.h"
+ #include "ui/gfx/delegated_ink_metadata.h"
+ #include "ui/gfx/display_color_spaces.h"
+@@ -144,6 +145,8 @@ class VIZ_SERVICE_EXPORT DirectRenderer {
+     raw_ptr<const AggregatedRenderPass> current_render_pass = nullptr;
+ 
+     gfx::Rect root_damage_rect;
++    // Logical changes before full-buffer repair. Never used for draw scissoring.
++    std::optional<gfx::Rect> browserpane_surface_damage;
+     gfx::Size device_viewport_size;
+     gfx::DisplayColorSpaces display_color_spaces;
+ 
+@@ -339,6 +342,9 @@ class VIZ_SERVICE_EXPORT DirectRenderer {
+       const AggregatedRenderPass* render_pass) const;
+ 
+   const raw_ptr<const RendererSettings> settings_;
++  const bool browserpane_surface_damage_enabled_;
++  gfx::BrowserPaneSurfaceDamageGuard browserpane_surface_damage_guard_;
++  std::optional<gfx::DisplayColorSpaces> browserpane_previous_color_spaces_;
+   // Points to the viz-global singleton.
+   const raw_ptr<const DebugRendererSettings> debug_settings_;
+   const raw_ptr<OutputSurface> output_surface_;
+diff --git a/components/viz/service/display/skia_renderer.cc b/components/viz/service/display/skia_renderer.cc
+index 474f47ec396af6037f3fec9fdefc00f3c130665a..55a965cfa1410536c29709b8ef422e9dc3682a44 100644
+--- a/components/viz/service/display/skia_renderer.cc
++++ b/components/viz/service/display/skia_renderer.cc
+@@ -1152,6 +1152,25 @@ void SkiaRenderer::FinishDrawingFrame() {
+ 
+   swap_buffer_rect_ = current_frame()->root_damage_rect;
+ 
++  browserpane_damage_for_swap_.reset();
++  if (browserpane_surface_damage_enabled_ &&
++      browserpane_damage_sequence_ != std::numeric_limits<uint64_t>::max()) {
++    // Count DRAWs, including those later skipped by Viz or the GPU thread.
++    ++browserpane_damage_sequence_;
++    if (current_frame()->browserpane_surface_damage) {
++      if (browserpane_damage_producer_.is_empty()) {
++        browserpane_damage_producer_ = base::UnguessableToken::Create();
++      }
++      const auto& damage = *current_frame()->browserpane_surface_damage;
++      const auto& size = current_frame()->device_viewport_size;
++      browserpane_damage_for_swap_ = gfx::BrowserPaneSurfaceDamage{
++          {browserpane_damage_producer_.GetHighForSerialization(),
++           browserpane_damage_producer_.GetLowForSerialization()},
++          browserpane_damage_sequence_, size.width(), size.height(),
++          {damage.x(), damage.y(), damage.width(), damage.height()}};
++    }
++  }
++
+   VizDebuggerLog::DebugLogDumpRenderPassBackings(render_pass_backings_);
+ 
+ #if BUILDFLAG(IS_OZONE)
+@@ -1203,6 +1222,8 @@ void SkiaRenderer::SwapBuffers(SwapFrameData swap_frame_data) {
+   output_frame.size = viewport_size_for_swap_buffers();
+   output_frame.data.seq = swap_frame_data.seq;
+   output_frame.data.swap_trace_id = swap_frame_data.swap_trace_id;
++  output_frame.data.browserpane_surface_damage =
++      std::exchange(browserpane_damage_for_swap_, std::nullopt);
+   if (use_partial_swap_) {
+     swap_buffer_rect_.Intersect(gfx::Rect(surface_size_for_swap_buffers()));
+     output_frame.sub_buffer_rect = swap_buffer_rect_;
+@@ -1269,6 +1290,7 @@ void SkiaRenderer::SwapBuffers(SwapFrameData swap_frame_data) {
+ }
+ 
+ void SkiaRenderer::SwapBuffersSkipped() {
++  browserpane_damage_for_swap_.reset();
+   gfx::Rect root_pass_damage_rect = gfx::Rect(surface_size_for_swap_buffers());
+   if (use_partial_swap_)
+     root_pass_damage_rect.Intersect(swap_buffer_rect_);
+diff --git a/components/viz/service/display/skia_renderer.h b/components/viz/service/display/skia_renderer.h
+index 12c2b8b548ba945837fa0bca9036312be3168535..c14af6e36a8b52f14b32002dd0fe628fbfbf3ba7 100644
+--- a/components/viz/service/display/skia_renderer.h
++++ b/components/viz/service/display/skia_renderer.h
+@@ -15,6 +15,7 @@
+ #include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/unguessable_token.h"
+ #include "build/build_config.h"
+ #include "components/viz/common/resources/transferable_resource.h"
+ #include "components/viz/service/display/direct_renderer.h"
+@@ -25,6 +26,7 @@
+ #include "gpu/vulkan/buildflags.h"
+ #include "media/gpu/buildflags.h"
+ #include "third_party/skia/include/core/SkCanvas.h"
++#include "ui/gfx/browserpane_surface_damage.h"
+ #include "ui/gfx/geometry/mask_filter_info.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/latency/latency_info.h"
+@@ -379,6 +381,9 @@ class VIZ_SERVICE_EXPORT SkiaRenderer : public DirectRenderer {
+   std::optional<gfx::Rect> scissor_rect_;
+ 
+   gfx::Rect swap_buffer_rect_;
++  base::UnguessableToken browserpane_damage_producer_;
++  uint64_t browserpane_damage_sequence_ = 0;
++  std::optional<gfx::BrowserPaneSurfaceDamage> browserpane_damage_for_swap_;
+ 
+   // State common to all quads in a batch. Draws that require an SkPaint not
+   // captured by this state cannot be batched.
+diff --git a/components/viz/service/display_embedder/skia_output_device_gl.cc b/components/viz/service/display_embedder/skia_output_device_gl.cc
+index 5000ec1f374a0e7ac789e6bd5737d36d4c6bd3e1..c5f8585984fe0a7f9ba4ea3ea4aeb1f3be8ff56a 100644
+--- a/components/viz/service/display_embedder/skia_output_device_gl.cc
++++ b/components/viz/service/display_embedder/skia_output_device_gl.cc
+@@ -104,7 +104,10 @@ SkiaOutputDeviceGL::SkiaOutputDeviceGL(
+                        std::move(did_swap_buffer_complete_callback)),
+       context_state_(context_state),
+       gl_surface_(std::move(gl_surface)),
+-      supports_async_swap_(gl_surface_->SupportsAsyncSwap()) {
++      supports_async_swap_(gl_surface_->SupportsAsyncSwap()),
++      browserpane_surface_damage_allowed_(
++          !feature_info->workarounds()
++               .disable_post_sub_buffers_for_onscreen_surfaces) {
+   capabilities_.uses_default_gl_framebuffer = true;
+   capabilities_.output_surface_origin = gl_surface_->GetOrigin();
+   capabilities_.supports_post_sub_buffer = gl_surface_->SupportsPostSubBuffer();
+@@ -256,6 +259,11 @@ bool SkiaOutputDeviceGL::Reshape(const ReshapeParams& params) {
+ void SkiaOutputDeviceGL::Present(const std::optional<gfx::Rect>& update_rect,
+                                  BufferPresentedCallback feedback,
+                                  OutputSurfaceFrame frame) {
++  // Keep driver workarounds, partial-buffer and async paths unchanged.
++  if (!browserpane_surface_damage_allowed_ || update_rect ||
++      supports_async_swap_) {
++    frame.data.browserpane_surface_damage.reset();
++  }
+   if (multisurface_swapbuffers_tracker_) {
+     const bool multiple_surface_swaps =
+         multisurface_swapbuffers_tracker_->TrackSwapBuffers();
+diff --git a/components/viz/service/display_embedder/skia_output_device_gl.h b/components/viz/service/display_embedder/skia_output_device_gl.h
+index 3859789d76f743d92c1e0ae2b1404f131a790615..c3c3d8116ff72478443dec8b7a4fe4e67ce6cd55 100644
+--- a/components/viz/service/display_embedder/skia_output_device_gl.h
++++ b/components/viz/service/display_embedder/skia_output_device_gl.h
+@@ -69,6 +69,7 @@ class SkiaOutputDeviceGL final : public SkiaOutputDevice {
+   const raw_ptr<gpu::SharedContextState> context_state_;
+   scoped_refptr<gl::GLSurface> gl_surface_;
+   const bool supports_async_swap_;
++  const bool browserpane_surface_damage_allowed_;
+ 
+   uint64_t backbuffer_estimated_size_ = 0;
+ 
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+index 2a608f6c14c59390403c057d3eba39a71d34b8d3..8163117cee998f4dd4d50da15df3bda9d6a47965 100644
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -73,6 +73,7 @@ config("gfx_impl_define") {
+ component("gfx") {
+   sources = [
+     "break_list.h",
++    "browserpane_surface_damage.h",
+     "color_analysis.cc",
+     "color_analysis.h",
+     "color_conversions.cc",
+diff --git a/ui/gfx/frame_data.h b/ui/gfx/frame_data.h
+index f01ff78af13245abee658e61b84b1d060ea616e7..f90830fc8664a5b6a67963848e0d3991c2593c69 100644
+--- a/ui/gfx/frame_data.h
++++ b/ui/gfx/frame_data.h
+@@ -6,8 +6,10 @@
+ #define UI_GFX_FRAME_DATA_H_
+ 
+ #include <cstdint>
++#include <optional>
+ 
+ #include "build/build_config.h"
++#include "ui/gfx/browserpane_surface_damage.h"
+ #include "ui/gfx/ca_layer_result.h"
+ 
+ namespace gfx {
+@@ -28,6 +30,10 @@ struct FrameData {
+   // |viz::Display::swapped_trace_id|.
+   int64_t swap_trace_id = -1;
+ 
++  // Opt-in logical changes carried by value across the existing Viz/GPU task.
++  // Absence means unknown/full damage. Never populated from browser page data.
++  std::optional<BrowserPaneSurfaceDamage> browserpane_surface_damage;
++
+   // The HDR headroom of the display that this frame is being swapped to. This
+   // is used if tone mapping needs to be baked into overlays.
+   float display_hdr_headroom = 1.f;
+diff --git a/ui/gl/gl_features.cc b/ui/gl/gl_features.cc
+index d7ef4195d16f302e0062fbd13d3ce3faa62b3751..ff6d0d38652a4389c9b548048b83ee2df0ffb800 100644
+--- a/ui/gl/gl_features.cc
++++ b/ui/gl/gl_features.cc
+@@ -35,6 +35,10 @@
+ #endif
+ 
+ namespace features {
++BASE_FEATURE(kBrowserPaneSurfaceDamage,
++             "BrowserPaneSurfaceDamage",
++             base::FEATURE_DISABLED_BY_DEFAULT);
++
+ namespace {
+ 
+ #if BUILDFLAG(IS_ANDROID)
+diff --git a/ui/gl/gl_features.h b/ui/gl/gl_features.h
+index 653478cf81293b8af99f2f8285cd8ce8a567ceb4..71640c1e6fd78605643f83c4aceb7087aef56e5a 100644
+--- a/ui/gl/gl_features.h
++++ b/ui/gl/gl_features.h
+@@ -15,6 +15,9 @@
+ 
+ namespace features {
+ 
++// Experimental X11 EGL surface-damage metadata, never partial buffer repair.
++GL_EXPORT BASE_DECLARE_FEATURE(kBrowserPaneSurfaceDamage);
++
+ // Controls if GPU should synchronize presentation with vsync.
+ GL_EXPORT bool UseGpuVsync();
+ 
+diff --git a/ui/gl/gl_surface_egl.cc b/ui/gl/gl_surface_egl.cc
+index 4324577756241f4b03fac4a7106df585849f82b4..859971be5710b364f70735c8842efbecd6cc566a 100644
+--- a/ui/gl/gl_surface_egl.cc
++++ b/ui/gl/gl_surface_egl.cc
+@@ -558,6 +558,7 @@ bool NativeViewGLSurfaceEGL::InitializeNativeWindow() {
+ }
+ 
+ void NativeViewGLSurfaceEGL::Destroy() {
++  browserpane_surface_damage_tracker_.Reset();
+   presentation_helper_ = nullptr;
+   vsync_provider_internal_ = nullptr;
+ 
+@@ -574,10 +575,14 @@ bool NativeViewGLSurfaceEGL::IsOffscreen() {
+   return false;
+ }
+ 
++bool NativeViewGLSurfaceEGL::SupportsBrowserPaneSurfaceDamage() const {
++  return false;
++}
++
+ gfx::SwapResult NativeViewGLSurfaceEGL::SwapBuffers(
+     PresentationCallback callback,
+     gfx::FrameData data) {
+-  TRACE_EVENT2("gpu", "NativeViewGLSurfaceEGL:RealSwapBuffers",
++  TRACE_EVENT2("gpu", "NativeViewGLSurfaceEGL:SwapBuffers",
+       "width", GetSize().width(),
+       "height", GetSize().height());
+ 
+@@ -593,7 +598,29 @@ gfx::SwapResult NativeViewGLSurfaceEGL::SwapBuffers(
+   GLSurfacePresentationHelper::ScopedSwapBuffers scoped_swap_buffers(
+       presentation_helper_.get(), std::move(callback), new_frame_id);
+ 
+-  if (!eglSwapBuffers(display_->GetDisplay(), surface_)) {
++  const auto damage = browserpane_surface_damage_tracker_.Select(
++      data.browserpane_surface_damage, GetSize().width(), GetSize().height(),
++      SupportsBrowserPaneSurfaceDamage() && supports_swap_buffer_with_damage_ &&
++          GetOrigin() == gfx::SurfaceOrigin::kBottomLeft);
++  EGLBoolean swapped;
++  if (damage) {
++    // Preserve the normal timestamp/feedback lifetime and error path. This is
++    // still a complete-buffer swap, not NV post-sub-buffer emulation.
++    TRACE_EVENT("gpu", "NativeViewGLSurfaceEGL:SurfaceDamageSwap",
++                "x", (*damage)[0], "y", (*damage)[1],
++                "width", (*damage)[2], "height", (*damage)[3]);
++    std::array<EGLint, 4> rect = *damage;
++    swapped = eglSwapBuffersWithDamageKHR(display_->GetDisplay(), surface_,
++                                          rect.data(), 1);
++  } else {
++    TRACE_EVENT2("gpu", "NativeViewGLSurfaceEGL:RealSwapBuffers",
++                 "width", GetSize().width(), "height", GetSize().height());
++    swapped = eglSwapBuffers(display_->GetDisplay(), surface_);
++  }
++  browserpane_surface_damage_tracker_.Complete(
++      data.browserpane_surface_damage, GetSize().width(), GetSize().height(),
++      swapped == EGL_TRUE);
++  if (!swapped) {
+     DVLOG(1) << "eglSwapBuffers failed with error "
+              << GetLastEGLErrorString();
+     scoped_swap_buffers.set_result(gfx::SwapResult::SWAP_FAILED);
+diff --git a/ui/gl/gl_surface_egl.h b/ui/gl/gl_surface_egl.h
+index 6b32843fe339c69474e005e6f3ab9a577e46caff..bd1b8b8c26c9da7637837b575fdd099029788eda 100644
+--- a/ui/gl/gl_surface_egl.h
++++ b/ui/gl/gl_surface_egl.h
+@@ -145,6 +145,9 @@ class GL_EXPORT NativeViewGLSurfaceEGL : public GLSurfaceEGL,
+                                         PresentationCallback callback,
+                                         gfx::FrameData data);
+ 
++  // Only the X11 subclass opts in; other EGL platforms remain unchanged.
++  virtual bool SupportsBrowserPaneSurfaceDamage() const;
++
+  private:
+   struct SwapInfo {
+     bool frame_id_is_valid;
+@@ -160,6 +163,7 @@ class GL_EXPORT NativeViewGLSurfaceEGL : public GLSurfaceEGL,
+   EGLSurface surface_ = nullptr;
+   bool supports_post_sub_buffer_ = false;
+   bool supports_swap_buffer_with_damage_ = false;
++  gfx::BrowserPaneSurfaceDamageTracker browserpane_surface_damage_tracker_;
+   gfx::SurfaceOrigin surface_origin_ = gfx::SurfaceOrigin::kBottomLeft;
+ 
+   std::unique_ptr<gfx::VSyncProvider> vsync_provider_external_;
+diff --git a/ui/gl/gl_surface_egl_x11.cc b/ui/gl/gl_surface_egl_x11.cc
+index 3a6401b222fbe1a000cb9ef2d6780e297dc0db98..c474e96d2b02687b3095bbadaaf97fd6a1319b67 100644
+--- a/ui/gl/gl_surface_egl_x11.cc
++++ b/ui/gl/gl_surface_egl_x11.cc
+@@ -13,6 +13,7 @@
+ #include "ui/gfx/x/visual_manager.h"
+ #include "ui/gfx/x/xproto.h"
+ #include "ui/gl/egl_util.h"
++#include "ui/gl/gl_features.h"
+ 
+ namespace gl {
+ 
+@@ -78,6 +79,10 @@ EGLint NativeViewGLSurfaceEGLX11::GetNativeVisualID() const {
+   return static_cast<EGLint>(visual_id);
+ }
+ 
++bool NativeViewGLSurfaceEGLX11::SupportsBrowserPaneSurfaceDamage() const {
++  return base::FeatureList::IsEnabled(features::kBrowserPaneSurfaceDamage);
++}
++
+ NativeViewGLSurfaceEGLX11::~NativeViewGLSurfaceEGLX11() {
+   InvalidateWeakPtrs();
+   Destroy();
+diff --git a/ui/gl/gl_surface_egl_x11.h b/ui/gl/gl_surface_egl_x11.h
+index 0325e86d60fb64c9637d77b322b5b96a65264255..38809e806c712ae959daa75af6c73e547ec4bd36 100644
+--- a/ui/gl/gl_surface_egl_x11.h
++++ b/ui/gl/gl_surface_egl_x11.h
+@@ -37,6 +37,7 @@ class GL_EXPORT NativeViewGLSurfaceEGLX11 : public NativeViewGLSurfaceEGL,
+ 
+  private:
+   // NativeViewGLSurfaceEGL overrides:
++  bool SupportsBrowserPaneSurfaceDamage() const override;
+   std::unique_ptr<gfx::VSyncProvider> CreateVsyncProviderInternal() override;
+ 
+   // x11::EventObserver:

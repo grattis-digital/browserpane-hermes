@@ -1,0 +1,520 @@
+diff --git a/code/apps/bpane-gateway/src/transport/egress_lanes.rs b/code/apps/bpane-gateway/src/transport/egress_lanes.rs
+index 802b8f0..dba8856 100644
+--- a/code/apps/bpane-gateway/src/transport/egress_lanes.rs
++++ b/code/apps/bpane-gateway/src/transport/egress_lanes.rs
+@@ -13,6 +13,7 @@ const VIDEO_PACKETS: usize = 256;
+ struct Packet {
+     bytes: Bytes,
+     barrier: u64,
++    video_sequence: u64,
+     _permit: OwnedSemaphorePermit,
+ }
+ 
+@@ -21,16 +22,19 @@ pub(super) struct EgressLanes {
+     video: mpsc::Sender<Packet>,
+     budget: Arc<Semaphore>,
+     barrier: u64,
++    video_sequence: u64,
+ }
+ 
+ pub(super) struct ReliableLane {
+     input: mpsc::Receiver<Packet>,
+     completed: watch::Sender<u64>,
++    video_sent: watch::Receiver<u64>,
+ }
+ 
+ pub(super) struct VideoLane {
+     input: mpsc::Receiver<Packet>,
+     completed: watch::Receiver<u64>,
++    sent: watch::Sender<u64>,
+ }
+ 
+ impl EgressLanes {
+@@ -38,20 +42,24 @@ impl EgressLanes {
+         let (reliable, reliable_rx) = mpsc::channel(RELIABLE_PACKETS);
+         let (video, video_rx) = mpsc::channel(VIDEO_PACKETS);
+         let (completed, completed_rx) = watch::channel(0);
++        let (sent, video_sent) = watch::channel(0);
+         (
+             Self {
+                 reliable,
+                 video,
+                 budget: Arc::new(Semaphore::new(BYTE_LIMIT)),
+                 barrier: 0,
++                video_sequence: 0,
+             },
+             ReliableLane {
+                 input: reliable_rx,
+                 completed,
++                video_sent,
+             },
+             VideoLane {
+                 input: video_rx,
+                 completed: completed_rx,
++                sent,
+             },
+         )
+     }
+@@ -66,6 +74,7 @@ impl EgressLanes {
+         Ok(Packet {
+             bytes,
+             barrier,
++            video_sequence: self.video_sequence,
+             _permit: permit,
+         })
+     }
+@@ -84,9 +93,13 @@ impl EgressLanes {
+         Ok(())
+     }
+ 
+-    pub fn datagram(&self, bytes: Bytes) -> Result<(), ()> {
+-        let packet = self.packet(bytes, self.barrier)?;
+-        self.video.try_send(packet).map_err(|_| ())
++    pub fn datagram(&mut self, bytes: Bytes) -> Result<(), ()> {
++        let next = self.video_sequence.checked_add(1).ok_or(())?;
++        let mut packet = self.packet(bytes, self.barrier)?;
++        packet.video_sequence = next;
++        self.video.try_send(packet).map_err(|_| ())?;
++        self.video_sequence = next;
++        Ok(())
+     }
+ }
+ 
+@@ -97,6 +110,13 @@ impl ReliableLane {
+         W: Future<Output = Result<(), ()>>,
+     {
+         while let Some(packet) = self.input.recv().await {
++            // Codec transitions must not jump ahead of already queued older
++            // deltas. Tiles remain independent; only video keys wait here.
++            if packet.barrier != 0 {
++                while *self.video_sent.borrow_and_update() < packet.video_sequence {
++                    self.video_sent.changed().await.map_err(|_| ())?;
++                }
++            }
+             write(packet.bytes).await?;
+             if packet.barrier != 0 {
+                 self.completed.send_replace(packet.barrier);
+@@ -117,6 +137,7 @@ impl VideoLane {
+                 self.completed.changed().await.map_err(|_| ())?;
+             }
+             send(&packet.bytes);
++            self.sent.send_replace(packet.video_sequence);
+         }
+         Ok(())
+     }
+diff --git a/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs b/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs
+index b07eb92..513cf2c 100644
+--- a/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs
++++ b/code/apps/bpane-gateway/src/transport/egress_lanes_tests.rs
+@@ -134,3 +134,38 @@ async fn failed_keyframe_never_releases_dependent_deltas() {
+         .await
+         .is_err());
+ }
++
++#[tokio::test]
++async fn a_keyframe_cannot_jump_over_preceding_queued_deltas() {
++    let (mut lanes, reliable, video) = EgressLanes::new();
++    lanes.datagram(Bytes::from_static(b"old delta")).unwrap();
++    lanes
++        .reliable(Bytes::from_static(b"new idr"), true)
++        .unwrap();
++    lanes.datagram(Bytes::from_static(b"new delta")).unwrap();
++    let trace = Arc::new(std::sync::Mutex::new(Vec::new()));
++    let writes = trace.clone();
++    let writer = tokio::spawn(reliable.run(move |bytes| {
++        writes.lock().unwrap().push(bytes.to_vec());
++        async { Ok(()) }
++    }));
++    tokio::task::yield_now().await;
++    assert!(trace.lock().unwrap().is_empty()); // old delta has not been sent
++    let sends = trace.clone();
++    let sender = tokio::spawn(video.run(move |bytes| sends.lock().unwrap().push(bytes.to_vec())));
++    drop(lanes);
++    tokio::time::timeout(std::time::Duration::from_secs(1), async {
++        writer.await.unwrap().unwrap();
++        sender.await.unwrap().unwrap();
++    })
++    .await
++    .unwrap();
++    assert_eq!(
++        *trace.lock().unwrap(),
++        [
++            b"old delta".to_vec(),
++            b"new idr".to_vec(),
++            b"new delta".to_vec()
++        ]
++    );
++}
+diff --git a/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
+index 8c32629..766801a 100644
+--- a/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-video-decoder-runtime.test.ts
+@@ -167,7 +167,7 @@ describe('SessionVideoDecoderRuntime', () => {
+     runtime.decodeNal(sps, null);
+     runtime.decodeNal(pps, null);
+     runtime.ensureDecoder();
+-    MockVideoDecoder.instances[0].decodeQueueSize = 4;
++    MockVideoDecoder.instances[0].decodeQueueSize = 8;
+     runtime.decodeNal(idr, null);
+ 
+     expect(MockVideoDecoder.instances[0].decodedChunks).toHaveLength(0);
+@@ -190,7 +190,7 @@ describe('SessionVideoDecoderRuntime', () => {
+     const delta = new Uint8Array([0, 0, 1, 0x41, 0x99]);
+     runtime.decodeNal(idr, null);
+     const retired = MockVideoDecoder.instances[0];
+-    retired.decodeQueueSize = 4;
++    retired.decodeQueueSize = 8;
+     runtime.decodeNal(delta, null);
+     runtime.decodeNal(delta, null);
+     expect(retired.closed).toBe(true);
+@@ -208,6 +208,31 @@ describe('SessionVideoDecoderRuntime', () => {
+     expect(resumed.decodedChunks).toHaveLength(2);
+   });
+ 
++  it('tolerates a short burst and rejects an old delta overtaken by an IDR', () => {
++    const incrementDroppedFrame = vi.fn();
++    const runtime = new SessionVideoDecoderRuntime({
++      onDecodedFrame: vi.fn(), incrementFrameCount: vi.fn(), incrementDroppedFrame,
++      onDecoderError: vi.fn(),
++      videoDecoderCtor: MockVideoDecoder as unknown as typeof VideoDecoder,
++      encodedVideoChunkCtor: MockEncodedVideoChunk as unknown as typeof EncodedVideoChunk,
++    });
++    const idr = new Uint8Array([0, 0, 1, 0x65, 0x88]);
++    const delta = new Uint8Array([0, 0, 1, 0x41, 0x99]);
++    runtime.decodeNal(idr, null, 2000);
++    const decoder = MockVideoDecoder.instances[0];
++    decoder.decodeQueueSize = 5;
++    runtime.decodeNal(delta, null, 3000);
++    expect(decoder.closed).toBe(false);
++    expect(decoder.decodedChunks).toHaveLength(2);
++    runtime.decodeNal(delta, null, 1000);
++    expect(decoder.decodedChunks).toHaveLength(2);
++    expect(incrementDroppedFrame).toHaveBeenCalledOnce();
++    runtime.destroy();
++    runtime.decodeNal(idr, null, 100); // a new source clock is valid after reset
++    runtime.decodeNal(delta, null, 200);
++    expect(MockVideoDecoder.instances.at(-1)!.decodedChunks).toHaveLength(2);
++  });
++
+   it('waits for a keyframe after a synchronous decode exception', () => {
+     const runtime = new SessionVideoDecoderRuntime({
+       onDecodedFrame: vi.fn(), incrementFrameCount: vi.fn(), incrementDroppedFrame: vi.fn(),
+diff --git a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+index 377a6fb..f58de65 100644
+--- a/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
++++ b/code/web/bpane-client/js/__tests__/session-video-display-runtime.test.ts
+@@ -64,20 +64,22 @@ describe('SessionVideoDisplayRuntime', () => {
+       test.runtime.handleDecodedFrame(second, createTileInfo());
+       test.flush();
+       expect(first.close).toHaveBeenCalledOnce();
++      expect(second.close).not.toHaveBeenCalled();
++      test.flush();
+       expect(second.close).toHaveBeenCalledOnce();
+       expect(test.runtime.getPresentationStats()).toMatchObject({
+-        decodedOutputs: 2, supersededFrames: 1, textureCommits: 1, rejectedFrames: 0,
++        decodedOutputs: 2, supersededFrames: 0, textureCommits: 2, rejectedFrames: 0,
+       });
+       test.setRegion(null);
+       test.runtime.markDirty();
+       test.flush();
+       test.runtime.handleDecodedFrame(test.frame(), createTileInfo());
+       expect(test.runtime.getPresentationStats()).toMatchObject({
+-        decodedOutputs: 3, textureCommits: 1, rejectedFrames: 1, overlayClears: 1,
++        decodedOutputs: 3, textureCommits: 2, rejectedFrames: 1, overlayClears: 1,
+       });
+       const copy = test.runtime.getPresentationStats();
+       copy.textureCommits = 999;
+-      expect(test.runtime.getPresentationStats().textureCommits).toBe(1);
++      expect(test.runtime.getPresentationStats().textureCommits).toBe(2);
+     });
+ 
+     it('rejects a pre-resize frame even when its crop rectangle is unchanged', () => {
+@@ -319,7 +321,7 @@ describe('SessionVideoDisplayRuntime', () => {
+     expect(glRenderer.drawCachedVideo).not.toHaveBeenCalled();
+   });
+ 
+-  it('closes superseded pending frames and clears pending overlay state on reset', () => {
++  it('retains a brief burst and closes every pending frame on reset', () => {
+     let rafCallback: FrameRequestCallback | null = null;
+     const requestAnimationFrameFn = vi.fn((callback: FrameRequestCallback) => {
+       rafCallback = callback;
+@@ -353,12 +355,13 @@ describe('SessionVideoDisplayRuntime', () => {
+     runtime.start();
+     runtime.handleDecodedFrame(first, createTileInfo());
+     runtime.handleDecodedFrame(second, createTileInfo());
+-    expect(first.close).toHaveBeenCalledOnce();
++    expect(first.close).not.toHaveBeenCalled();
+ 
+     runtime.clearVideoOverlay();
+     flushAnimationFrame(rafCallback);
+ 
+     expect(second.close).toHaveBeenCalledOnce();
++    expect(first.close).toHaveBeenCalledOnce();
+     expect(glRenderer.uploadVideoFrame).not.toHaveBeenCalled();
+     expect(glRenderer.drawCachedVideo).not.toHaveBeenCalled();
+   });
+diff --git a/code/web/bpane-client/js/__tests__/video-frame-queue.test.ts b/code/web/bpane-client/js/__tests__/video-frame-queue.test.ts
+new file mode 100644
+index 0000000..e7440f6
+--- /dev/null
++++ b/code/web/bpane-client/js/__tests__/video-frame-queue.test.ts
+@@ -0,0 +1,38 @@
++import { describe, expect, it, vi } from 'vitest';
++import { VideoFrameQueue } from '../render/video-frame-queue.js';
++
++const frame = () => ({ close: vi.fn() }) as unknown as VideoFrame;
++
++describe('VideoFrameQueue', () => {
++  it('retains three brief-burst frames in order and closes overflow', () => {
++    const q = new VideoFrameQueue(), frames = Array.from({ length: 5 }, frame);
++    expect(frames.map(f => q.push(f, null, 100))).toEqual([0, 0, 0, 1, 1]);
++    expect(q.size).toBe(3);
++    for (const f of frames.slice(0, 2)) expect(f.close).toHaveBeenCalledOnce();
++    for (const f of frames.slice(2)) {
++      expect(q.take(110).pending?.frame).toBe(f);
++      expect(f.close).not.toHaveBeenCalled(); // ownership handed to compositor
++      f.close();
++    }
++    expect(q.size).toBe(0);
++  });
++
++  it('discards old buffered motion after a slow/background RAF', () => {
++    const q = new VideoFrameQueue(), a = frame(), b = frame(), c = frame();
++    q.push(a, null, 100); q.push(b, null, 110); q.push(c, null, 140);
++    const result = q.take(170);
++    expect(result.discarded).toBe(2);
++    expect(result.pending?.frame).toBe(c);
++    expect(a.close).toHaveBeenCalledOnce();
++    expect(b.close).toHaveBeenCalledOnce();
++    c.close();
++  });
++
++  it('clear closes all owned frames exactly once', () => {
++    const q = new VideoFrameQueue(), frames = Array.from({ length: 3 }, frame);
++    for (const f of frames) q.push(f, null, 100);
++    expect(q.clear()).toBe(3); expect(q.clear()).toBe(0);
++    for (const f of frames) expect(f.close).toHaveBeenCalledOnce();
++    expect(q.take(100).pending).toBeNull();
++  });
++});
+diff --git a/code/web/bpane-client/js/render/video-frame-queue.ts b/code/web/bpane-client/js/render/video-frame-queue.ts
+new file mode 100644
+index 0000000..8b1324f
+--- /dev/null
++++ b/code/web/bpane-client/js/render/video-frame-queue.ts
+@@ -0,0 +1,34 @@
++import type { TileInfo } from '../nal.js';
++
++type PendingFrame = { frame: VideoFrame; tileInfo: TileInfo | null; receivedAt: number };
++
++/** At most three GPU-backed frames; no copies, timers or prebuffering delay. */
++export class VideoFrameQueue {
++  private readonly frames: PendingFrame[] = [];
++  get size(): number { return this.frames.length; }
++
++  push(frame: VideoFrame, tileInfo: TileInfo | null, receivedAt: number): number {
++    this.frames.push({ frame, tileInfo, receivedAt });
++    if (this.frames.length <= 3) return 0;
++    this.frames.shift()!.frame.close();
++    return 1;
++  }
++
++  take(now: number): { pending: PendingFrame | null; discarded: number } {
++    let discarded = 0;
++    // A delayed/hidden viewer must catch up, not replay stale buffered motion.
++    // Always retain the newest frame if no newer picture has arrived.
++    while (this.frames.length > 1 && now - this.frames[0].receivedAt > 50) {
++      this.frames.shift()!.frame.close();
++      discarded++;
++    }
++    return { pending: this.frames.shift() ?? null, discarded };
++  }
++
++  clear(): number {
++    const count = this.frames.length;
++    for (const item of this.frames) item.frame.close();
++    this.frames.length = 0;
++    return count;
++  }
++}
+diff --git a/code/web/bpane-client/js/session-video-decoder-runtime.ts b/code/web/bpane-client/js/session-video-decoder-runtime.ts
+index 93cf253..85b5d3a 100644
+--- a/code/web/bpane-client/js/session-video-decoder-runtime.ts
++++ b/code/web/bpane-client/js/session-video-decoder-runtime.ts
+@@ -22,6 +22,7 @@ export class SessionVideoDecoderRuntime {
+   private waitingForKeyframe = true;
+   private decoderGeneration = 0;
+   private decoderTimestamp = 0;
++  private keyframePtsUs = 0;
+   private spsNal: Uint8Array | null = null;
+   private ppsNal: Uint8Array | null = null;
+   private seiNals: Uint8Array[] = [];
+@@ -41,6 +42,7 @@ export class SessionVideoDecoderRuntime {
+     this.decoderConfigured = false;
+     this.waitingForKeyframe = true;
+     this.decoderTimestamp = 0;
++    this.keyframePtsUs = 0;
+     this.spsNal = null;
+     this.ppsNal = null;
+     this.seiNals = [];
+@@ -53,7 +55,7 @@ export class SessionVideoDecoderRuntime {
+     }
+   }
+ 
+-  decodeNal(nalData: Uint8Array, tileInfo: TileInfo | null): void {
++  decodeNal(nalData: Uint8Array, tileInfo: TileInfo | null, ptsUs = 0): void {
+     const nalType = getNalType(nalData);
+ 
+     if (nalType === 7) {
+@@ -71,6 +73,13 @@ export class SessionVideoDecoderRuntime {
+     if (nalType !== 1 && nalType !== 5) {
+       return;
+     }
++    // A reliable IDR can overtake an older UDP delta. That old reference chain
++    // must never be submitted after the new recovery point.
++    const validPts = Number.isSafeInteger(ptsUs) && ptsUs > 0;
++    if (nalType === 1 && validPts && ptsUs < this.keyframePtsUs) {
++      this.incrementDroppedFrame();
++      return;
++    }
+ 
+     if (!this.videoDecoder) {
+       this.initDecoder();
+@@ -84,7 +93,9 @@ export class SessionVideoDecoderRuntime {
+     }
+ 
+     let decoder = this.videoDecoder!;
+-    if (decoder.decodeQueueSize > 3) {
++    // A short network burst is not proof of decoder saturation. Still bound
++    // queued work, and retire the reference chain if it truly exceeds the cap.
++    if (decoder.decodeQueueSize >= 8) {
+       // Arbitrarily skipping a delta breaks H.264 reference history. Bound
+       // latency by retiring the entire decoder, then resume only at an IDR.
+       this.closeDecoder();
+@@ -113,6 +124,7 @@ export class SessionVideoDecoderRuntime {
+         data: chunkData,
+       }));
+       this.decoderTimestamp = timestamp;
++      if (nalType === 5) this.keyframePtsUs = validPts ? ptsUs : 0;
+       this.waitingForKeyframe = false;
+     } catch (error) {
+       this.tileInfoByTimestamp.delete(timestamp);
+diff --git a/code/web/bpane-client/js/session-video-display-runtime.ts b/code/web/bpane-client/js/session-video-display-runtime.ts
+index cdda6f7..056f041 100644
+--- a/code/web/bpane-client/js/session-video-display-runtime.ts
++++ b/code/web/bpane-client/js/session-video-display-runtime.ts
+@@ -2,6 +2,7 @@ import type { TileInfo } from './nal.js';
+ import type { TileGridConfig } from './tile-cache.js';
+ import type { WebGLTileRenderer } from './webgl-compositor.js';
+ import type { VideoPresentationStats } from './render/video-presentation-stats.js';
++import { VideoFrameQueue } from './render/video-frame-queue.js';
+ 
+ interface VideoRegion {
+   x: number;
+@@ -35,8 +36,7 @@ export class SessionVideoDisplayRuntime {
+   private readonly now: () => number;
+   private readonly staleMs: number;
+ 
+-  private pendingVideoFrame: VideoFrame | null = null;
+-  private pendingTileInfo: TileInfo | null = null;
++  private readonly pendingFrames = new VideoFrameQueue();
+   private videoBuffer: HTMLCanvasElement | null = null;
+   private videoBufferCtx: CanvasRenderingContext2D | null = null;
+   private videoBufferTileInfo: TileInfo | null = null;
+@@ -84,23 +84,13 @@ export class SessionVideoDisplayRuntime {
+       frame.close();
+       return;
+     }
+-    if (this.pendingVideoFrame) {
+-      this.presentation.supersededFrames++;
+-      this.pendingVideoFrame.close();
+-    }
+-    this.pendingVideoFrame = frame;
+-    this.pendingTileInfo = tileInfo;
++    this.presentation.supersededFrames += this.pendingFrames.push(frame, tileInfo, this.now());
+     this.displayDirty = true;
+   }
+ 
+   clearVideoOverlay(): void {
+-    if (this.pendingVideoFrame || this.lastVideoFrameAtMs) this.presentation.overlayClears++;
+-    if (this.pendingVideoFrame) {
+-      this.presentation.rejectedFrames++;
+-      this.pendingVideoFrame.close();
+-      this.pendingVideoFrame = null;
+-    }
+-    this.pendingTileInfo = null;
++    if (this.pendingFrames.size || this.lastVideoFrameAtMs) this.presentation.overlayClears++;
++    this.presentation.rejectedFrames += this.pendingFrames.clear();
+     this.videoBuffer = null;
+     this.videoBufferCtx = null;
+     this.videoBufferTileInfo = null;
+@@ -125,21 +115,24 @@ export class SessionVideoDisplayRuntime {
+   };
+ 
+   private commitPendingFrame(): void {
+-    if (!this.pendingVideoFrame) {
+-      return;
+-    }
++    const { pending, discarded } = this.pendingFrames.take(this.now());
++    this.presentation.supersededFrames += discarded;
++    if (!pending) return;
++    this.displayDirty = this.pendingFrames.size > 0;
+     // Reliable tile batches can retire or move a region after decoder output
+     // but before the next animation frame. Never upload that obsolete frame.
+-    if (!this.canDisplayFrame(this.pendingTileInfo)) {
++    if (!this.canDisplayFrame(pending.tileInfo)) {
++      pending.frame.close();
++      this.presentation.rejectedFrames++;
+       this.clearVideoOverlay();
+       return;
+     }
+ 
+     if (this.glRenderer) {
+-      this.glRenderer.uploadVideoFrame(this.pendingVideoFrame);
++      this.glRenderer.uploadVideoFrame(pending.frame);
+     } else {
+-      const frameWidth = this.pendingVideoFrame.displayWidth;
+-      const frameHeight = this.pendingVideoFrame.displayHeight;
++      const frameWidth = pending.frame.displayWidth;
++      const frameHeight = pending.frame.displayHeight;
+       if (!this.videoBuffer || this.videoBuffer.width !== frameWidth || this.videoBuffer.height !== frameHeight) {
+         this.videoBuffer = this.createCanvas();
+         this.videoBuffer.width = frameWidth;
+@@ -147,12 +140,12 @@ export class SessionVideoDisplayRuntime {
+         this.videoBufferCtx = this.videoBuffer.getContext('2d');
+       }
+       if (this.videoBufferCtx) {
+-        this.videoBufferCtx.drawImage(this.pendingVideoFrame, 0, 0);
++        this.videoBufferCtx.drawImage(pending.frame, 0, 0);
+       }
+     }
+ 
+-    this.pendingVideoFrame.close();
+-    this.videoBufferTileInfo = this.pendingTileInfo;
++    pending.frame.close();
++    this.videoBufferTileInfo = pending.tileInfo;
+     this.lastVideoFrameAtMs = this.now();
+     if (this.presentation.lastCommitAtMs > 0) {
+       this.presentation.maxCommitGapMs = Math.max(this.presentation.maxCommitGapMs,
+@@ -160,8 +153,6 @@ export class SessionVideoDisplayRuntime {
+     }
+     this.presentation.textureCommits++;
+     this.presentation.lastCommitAtMs = this.lastVideoFrameAtMs;
+-    this.pendingVideoFrame = null;
+-    this.pendingTileInfo = null;
+   }
+ 
+   private drawOverlay(): void {
+diff --git a/code/web/bpane-client/js/session/bpane-session.ts b/code/web/bpane-client/js/session/bpane-session.ts
+index 1458c3a..a5d0d48 100644
+--- a/code/web/bpane-client/js/session/bpane-session.ts
++++ b/code/web/bpane-client/js/session/bpane-session.ts
+@@ -417,7 +417,7 @@ export class BpaneSession {
+   private handleVideoFrame(payload: Uint8Array): void {
+     const result = this.nalReassembler.push(payload);
+     if (!result) return;
+-    this.videoDecoderRuntime.decodeNal(result.data, result.tileInfo);
++    this.videoDecoderRuntime.decodeNal(result.data, result.tileInfo, result.ptsUs);
+   }
+ 
+   private handleCursorUpdate(payload: Uint8Array): void {

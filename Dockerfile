@@ -26,6 +26,7 @@ RUN cargo build --release --locked -j "$BPANE_BUILD_JOBS" -p bpane-gateway
 FROM node:22-bookworm-slim AS web-builder
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY scripts/playwright-patch scripts/playwright-patch
 RUN npm ci
 COPY --from=source-fetcher /source/upstream/code/web/bpane-client/js upstream/code/web/bpane-client/js
 COPY --from=source-fetcher /source/upstream/code/integrations/mcp-bridge/src/playwright-mcp-runtime.ts upstream/code/integrations/mcp-bridge/src/playwright-mcp-runtime.ts
@@ -60,9 +61,10 @@ COPY --from=source-builder /source/upstream/deploy/bpane-ext /home/bpane/bpane-e
 COPY --from=source-builder /source/upstream/deploy/chromium-policies/managed /etc/chromium/policies/managed
 COPY runtime/chromium-policy.json /etc/chromium/policies/managed/browserpane-hermes.json
 COPY runtime/wireplumber-headless.lua /etc/wireplumber/bluetooth.lua.d/51-headless.lua
-COPY runtime/start.sh runtime/healthcheck.sh runtime/watch-x11.sh runtime/watch-gpu.sh /app/runtime/
+COPY runtime/start.sh runtime/healthcheck.sh runtime/watch-x11.sh runtime/watch-gpu.sh runtime/watch-memory.sh /app/runtime/
 COPY runtime/chromium-wrapper.sh /usr/local/bin/chromium
 COPY server server
+COPY scripts/playwright-patch scripts/playwright-patch
 COPY LICENSE UPSTREAM.md /app/
 COPY --from=source-builder /source/source.tar.gz /app/source.tar.gz
 RUN mkdir -p /data/profile /shared/downloads && chown -R bpane:bpane /data /shared /home/bpane && chmod +x /app/runtime/*.sh /usr/local/bin/chromium

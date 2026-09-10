@@ -17,14 +17,24 @@ export class ActionRunner {
     const refs = [...new Set(steps.flatMap(step => [step.ref, step.to].filter(Boolean)))];
     const guards = new Map();
     if (!refs.length) return guards;
-    const snapshot = trace ? await trace.span('guardSnapshotMs', () => tab.snapshot()) : await tab.snapshot();
-    if (observation.requiredSnapshot !== undefined && snapshot !== observation.requiredSnapshot)
-      throw new PaneError('STALE_VIEW', 'Page state changed during guarded-flow preflight; no input was started.');
-    const current = ObservationRefs.from(snapshot);
+    let strict;
+    if (observation.requiredSnapshot !== undefined) {
+      const work = () => tab.snapshot();
+      const snapshot = trace ? await trace.span('guardSnapshotMs', work) : await work();
+      if (snapshot !== observation.requiredSnapshot)
+        throw new PaneError('STALE_VIEW', 'Page state changed during guarded-flow preflight; no input was started.');
+      strict = ObservationRefs.from(snapshot);
+    }
     try {
       for (const ref of refs) {
         const signature = observation.refs.get(ref);
-        if (!signature || current.get(ref) !== signature) throw new PaneError('STALE_REF', 'Target missing or changed since this view. Observe again.');
+        if (!signature) throw new PaneError('STALE_REF', 'Target was not returned in this view.');
+        // Refresh only this node's accessibility semantics. Playwright still
+        // computes external labels and checks visibility; no full-page walk.
+        const work = () => tab.snapshot({ root: ref, target: true });
+        const current = strict ?? ObservationRefs.from(trace ? await trace.span('guardSnapshotMs', work) : await work());
+        if (!current.has(ref) || ObservationRefs.signature(current.get(ref)) !== ObservationRefs.signature(signature))
+          throw new PaneError('STALE_REF', 'Target missing or changed since this view. Observe again.');
         const handle = await tab.page.locator(`aria-ref=${ref}`).elementHandle({ timeout: 1000 });
         if (!handle) throw new PaneError('STALE_REF', 'Target detached. Observe again.');
         try {

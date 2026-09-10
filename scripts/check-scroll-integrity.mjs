@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +7,11 @@ import { chromium } from 'playwright';
 import { ViewerDiagnostics } from './viewer-diagnostics.mjs';
 import { ScrollCopyDiagnostics } from './scroll-copy-diagnostics.mjs';
 import { ViewerInputProbe } from './viewer-input-probe.mjs';
+import { ScrollGestureProbe } from './scroll-gesture-probe.mjs';
+import { ReadbackDiagnostics } from './readback-diagnostics.mjs';
+import { DamageAnalysisDiagnostics } from './damage-analysis-diagnostics.mjs';
+import { ScrollbarDragProbe } from './scrollbar-drag-probe.mjs';
+import { ViewerPipelineMetrics, CaptureTimingSummary } from './viewer-pipeline-metrics.mjs';
 
 // Deliberately fixed local-only targets with disposable storage and synthetic pages.
 const containerName = 'browserpane-pipeline-viewer';
@@ -94,6 +99,7 @@ assert.equal(inspect.Mounts.length, 0, 'No persistent data may be mounted');
 let browser, page;
 const diagnostics = new ViewerDiagnostics();
 const checkpoints = [], pageErrors = [], downloads = [];
+const pipelineMetrics = new ViewerPipelineMetrics();
 const report = {
   label, image: inspect.Image, containerId, date: new Date().toISOString(),
   harnessSha256: createHash('sha256').update(await readFile(new URL(import.meta.url))).digest('hex'),
@@ -104,6 +110,10 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function viewerPixels() {
   return page.evaluate(async () => {
     const session = window.browserpaneSession;
+    if (window.__pipelineMetricsSession !== session) {
+      window.__pipelineMetricsSession = session;
+      window.__pipelineMetricsEpoch = (window.__pipelineMetricsEpoch ?? 0) + 1;
+    }
     await session.tileCompositor.tileBatchSequencer.flush();
     const canvas = document.querySelector('#screen canvas'), { width, height } = canvas;
     const gl = canvas.getContext('webgl2');
@@ -116,7 +126,7 @@ async function viewerPixels() {
     } else pixels = canvas.getContext('2d').getImageData(0,0,width,height).data;
     let binary = '';
     for (let i=0; i<pixels.length; i+=32768) binary += String.fromCharCode(...pixels.subarray(i,i+32768));
-    return { width, height, data:btoa(binary), cache:session.getTileCacheStats(), sessionStats:session.getSessionStats(),blits:window.__scrollOracleBlits,
+    return { width, height, data:btoa(binary), cache:session.getTileCacheStats(), sessionStats:session.getSessionStats(),epoch:window.__pipelineMetricsEpoch,blits:window.__scrollOracleBlits,
       canvasCopies:window.__scrollOracleCanvasCopies,
       grid:session.tileCompositor.getGridConfig(), render:session.getRenderDiagnostics() };
   });
@@ -167,22 +177,26 @@ async function checkpoint(name) {
     last={name,width:first.width,height:first.height,...compare(reference,Buffer.from(second.data,'base64'),first.width,first.height),
       physicalDisplay:displayAfter,geometryMatches:first.width===displayAfter.width&&first.height===displayAfter.height,
       cache:second.cache,grid:second.grid,blits:second.blits,canvasCopies:second.canvasCopies,render:second.render,
-      transfer:second.sessionStats.transfer,scrollHealth:second.sessionStats.tiles.scrollHealth};
+      transfer:second.sessionStats.transfer,scrollHealth:second.sessionStats.tiles.scrollHealth,
+      metricsSnapshot:{epoch:second.epoch,cache:second.cache,...second.sessionStats}};
     if(last.pixels===0&&last.geometryMatches) break;
     await delay(250);
   }
   assert(last,'X11 reference did not settle at '+name);
+  last.pipeline=pipelineMetrics.observe(last.metricsSnapshot);
+  delete last.metricsSnapshot;
   last.document = remote('eval',()=>({x:scrollX,y:scrollY,scrollHeight:document.documentElement.scrollHeight,innerHeight,nestedY:document.querySelector('#nested')?.scrollTop??null,
     focused:document.hasFocus(),input:window.__pipelineInputWitness}));
   checkpoints.push(last);
-  console.log(JSON.stringify({stage:name,mismatchedPixels:last.pixels,tiles:last.tiles.length,geometryMatches:last.geometryMatches,scrollCopies:last.cache.scrollCopies,cacheHits:last.cache.hits,batches:last.cache.batchesQueued,document:last.document}));
+  console.log(JSON.stringify({stage:name,mismatchedPixels:last.pixels,tiles:last.tiles.length,geometryMatches:last.geometryMatches,scrollCopies:last.cache.scrollCopies,cacheHits:last.cache.hits,batches:last.cache.batchesQueued,
+    document:{x:last.document.x,y:last.document.y,nestedY:last.document.nestedY,wheelEvents:last.document.input?.wheelEvents}}));
   if(last.pixels) await page.screenshot({path:outputDir+'/'+label+'-'+name+'.png'});
   return last;
 }
 try {
   targetId=remote('create',fixtureToken=>{
     window.__pipelineFixtureToken=fixtureToken;
-    window.__pipelineInputWitness={clicks:0,last:null,wheelEvents:0,lastWheel:null};
+    window.__pipelineInputWitness={clicks:0,last:null,wheelEvents:0,lastWheel:null,wheels:[]};
     document.addEventListener('click',event=>{
       const witness=window.__pipelineInputWitness;
       witness.clicks++;
@@ -192,6 +206,8 @@ try {
       const witness=window.__pipelineInputWitness;
       witness.wheelEvents++;
       witness.lastWheel={isTrusted:event.isTrusted,deltaX:event.deltaX,deltaY:event.deltaY,clientX:event.clientX,clientY:event.clientY};
+      witness.wheels.push({...witness.lastWheel,atMs:performance.now(),target:event.target.closest?.('#nested')?'nested':'document'});
+      if(witness.wheels.length>256)witness.wheels.shift();
     },{capture:true,passive:true});
     document.title='DISPOSABLE exact scroll pixel oracle';
     const style=document.createElement('style');
@@ -242,6 +258,31 @@ try {
     report.inputBarriers.push({stage:name,...await page.evaluate(ViewerInputProbe.flushHostInput,{timeoutMs:8000})});
     await checkpoint(name);
   }
+  report.gestures=[];
+  const gestureProbe=new ScrollGestureProbe({clock:()=>performance.now(),sleep:delay,
+    wheel:(dx,dy)=>page.mouse.wheel(dx,dy)});
+  for(const trace of ScrollGestureProbe.scenarios()) {
+    const hostBefore=remote('eval',()=>({innerHeight,x:scrollX,y:scrollY,
+      nested:document.querySelector('#nested').getBoundingClientRect().toJSON(),
+      wheelEvents:window.__pipelineInputWitness.wheelEvents}));
+    const canvas=page.locator('#screen canvas').first();
+    const box=await canvas.boundingBox();
+    const physical=await canvas.evaluate(c=>({width:c.width,height:c.height}));
+    assert(box && physical.height>=hostBefore.innerHeight);
+    const remoteX=trace.target==='nested'?hostBefore.nested.x+100:300;
+    const contentY=trace.target==='nested'?hostBefore.nested.y+70:200;
+    await page.mouse.move(box.x+remoteX/physical.width*box.width,
+      box.y+(physical.height-hostBefore.innerHeight+contentY)/physical.height*box.height);
+    const gesture=await gestureProbe.run(trace);
+    gesture.barrier=await page.evaluate(ViewerInputProbe.flushHostInput,{timeoutMs:8000});
+    const result=await checkpoint(trace.name); // No corrective scroll or focus repair.
+    gesture.hostEvents=result.document.input.wheelEvents-hostBefore.wheelEvents;
+    assert(gesture.hostEvents>0,trace.name+': did not exercise host wheel delivery');
+    const delivered=result.document.input.wheels.slice(-gesture.hostEvents);
+    assert(delivered.every(event=>event.isTrusted && event.target===trace.target),
+      trace.name+': wrong input target or untrusted delivery');
+    report.gestures.push(gesture);
+  }
   remote('eval',()=>{window.scrollTo(0,1376);return true;});
   await checkpoint('half-tile-offset');
   remote('eval',()=>{window.scrollTo(113,1911);return true;});
@@ -249,6 +290,25 @@ try {
   // Independent nested scroller must not be mistaken for full viewport motion.
   remote('eval',()=>{const n=document.querySelector('#nested');n.scrollTop=173;n.scrollLeft=87;return true;});
   await checkpoint('nested-scroll');
+  remote('eval',()=>{
+    const style=document.createElement('style');
+    style.textContent='html::-webkit-scrollbar{width:18px;height:18px}html::-webkit-scrollbar-button{display:none;width:0;height:0}html::-webkit-scrollbar-thumb{background:#365c8b}html::-webkit-scrollbar-track{background:#ddd}';
+    document.head.append(style);
+    window.__dragWitness={moves:0,buttons:null};
+    document.addEventListener('mousemove',event=>{window.__dragWitness.moves++;window.__dragWitness.buttons=event.buttons;},{capture:true});
+    return true;
+  });
+  await checkpoint('scrollbar-ready');
+  report.scrollbar=await new ScrollbarDragProbe({mouse:page.mouse,sleep:delay,checkpoint,
+    barrier:()=>page.evaluate(ViewerInputProbe.flushHostInput,{timeoutMs:8000}),
+    inspect:()=>remote('eval',()=>({y:scrollY,wheels:window.__pipelineInputWitness.wheelEvents,...window.__dragWitness})),
+    geometry:async()=>{
+      const canvas=page.locator('#screen canvas').first();
+      return {...remote('eval',()=>({innerWidth,innerHeight,clientWidth:document.scrollingElement.clientWidth,
+        clientHeight:document.scrollingElement.clientHeight,scrollHeight:document.scrollingElement.scrollHeight,scrollY})),
+        ...await canvas.evaluate(c=>({width:c.width,height:c.height})),box:await canvas.boundingBox()};
+    },
+  }).run();
   remote('eval',()=>{document.querySelector('#nested').remove();window.scrollTo(0,0);return true;});
   await checkpoint('occluder-removal');
   remote('eval',async()=>{
@@ -334,6 +394,14 @@ try {
   assert(checkpoints.find(c=>c.name==='horizontal-and-vertical').document.x>0,'Horizontal offset was not exercised');
   assert(checkpoints.find(c=>c.name==='nested-scroll').document.nestedY>0,'Nested scroller never moved');
   report.passed=checkpoints.every(c=>c.pixels===0&&c.geometryMatches);
+  if(inspect.Config.Env.includes('BPANE_CAPTURE_TIMINGS=1')) {
+    const logs=spawnSync('docker',['logs','--tail','10000',containerId],{encoding:'utf8',timeout:10000,maxBuffer:16*1024*1024});
+    if(logs.error) throw logs.error;
+    assert.equal(logs.status,0,'Owned host timing logs unavailable');
+    report.hostPhases=CaptureTimingSummary.parse(logs.stdout+logs.stderr);
+    report.readback=ReadbackDiagnostics.parse(logs.stdout+logs.stderr);
+    report.damageAnalysis=DamageAnalysisDiagnostics.parse(logs.stdout+logs.stderr);
+  }
   if(!report.passed) process.exitCode=1;
 } catch(error) {
   report.passed=false;report.error=error.stack??String(error);process.exitCode=1;console.error(error);

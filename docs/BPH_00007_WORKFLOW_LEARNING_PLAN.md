@@ -1,23 +1,13 @@
 # Learning reusable browser workflows through MCP
 
-Status: original research and phased implementation plan. The first P0/P1
-milestone was implemented locally on `experiment/workflow-learning`; see
-[usage and limits](WORKFLOW_LEARNING.md). Its local successor `experiment/workflow-replay`
-adds a [supervised P2 report-export runner](WORKFLOW_REPLAY.md), not a general engine.
-Local follow-up `experiment/workflow-warm-session` adds the narrow
-[Hermes-local execution interface](WORKFLOW_EXECUTION.md): a reviewed catalog,
-run/status/cancel/reconcile and warm SDK reuse, with persistent-profile fixtures.
-This is only a lifecycle subset, not completion of P3. A separate workflow MCP
-server, protected enforcement/reservation and model routing remain proposals. No remote push or
-production deployment is authorized for this implementation.
-A separately approved [disposable Pi qualification](WORKFLOW_PI_QUALIFICATION.md)
-initially failed its longer runs. After diagnosis and the click-completion fix,
-fresh smoke/recovery and a full 30-pair/recovery run passed. One coded readiness
-query timeout remains a diagnostic caveat; production rollout is not authorized.
-Assessed on 2026-09-07 against BrowserPane Hermes commit
-`06470ca168c8123d6643c11f552cd07a8f19da35` on
-`experiment/semantic-fast-path`, and the packaged Hermes source pinned at
-`ee5b5ec21e576ccf9b941f9ff71330418415a5cb`.
+Status: original research and phased implementation plan. The bundle provides
+opt-in [learning](WORKFLOW_LEARNING.md), [supervised replay](WORKFLOW_REPLAY.md)
+and a [Hermes-local execution interface](WORKFLOW_EXECUTION.md), including a
+reviewed catalog, run/status/cancel/reconcile and warm SDK reuse. A separate
+workflow MCP server, protected enforcement/reservation and model routing remain
+proposals. The [isolated Pi qualification](WORKFLOW_PI_QUALIFICATION.md) records
+synthetic successes and failures; it is not authorization for production use.
+Dependency provenance is maintained in UPSTREAM.md.
 
 ## Recommendation
 
@@ -253,12 +243,10 @@ wrapper. Preserve errors and partial/uncertain outcomes across both paths.
 
 ### Standards compatibility matters here
 
-The published MCP 2026-07-28 changes remove transport-level sessions in favor of
-explicit application handles, change discovery/capabilities, move Tasks to an
-extension, and deprecate sampling. This is not a reason to rewrite the working
-browser transport during the first workflow iteration. Preserve the browser's
-application lease and stale-action protections through any later migration.
-[MCP change log](https://modelcontextprotocol.io/specification/2026-07-28/changelog).
+MCP transport/session, discovery and task-extension contracts can evolve.
+Preserve application leases and stale-action protections through any protocol
+migration; negotiate capabilities instead of assuming every client supports
+the same lifecycle. See the [MCP specification](https://modelcontextprotocol.io/specification).
 
 The pinned Hermes already contains legacy/newer discovery negotiation, but the
 BrowserPane server remains session-oriented. No end-to-end Tasks integration was

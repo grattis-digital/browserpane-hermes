@@ -134,7 +134,7 @@ restart, no replay and explicit off. CI runs it separately from benchmarks.
 Local checks do not qualify paced performance on a Raspberry Pi; the earlier
 [hardware qualification](WORKFLOW_PI_QUALIFICATION.md) is an unpaced baseline.
 
-Local validation on 2026-09-07 passed 31 dedicated policy tests on macOS ARM64 and
+Local validation  passed 31 dedicated policy tests on macOS ARM64 and
 inside Linux ARM64, 131 Hermes unit tests, 13 pilot-harness unit tests and 264 Node
 tests. Real SDK/Chromium pacing, warm, 14-case replay and MCP regressions passed;
 a three-pair cold/warm check verified seven exports with zero policy delay.

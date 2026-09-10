@@ -1,6 +1,6 @@
 # Reuse shared tabs and bound restart-related tab growth
 
-User-requested follow-up on `experiment/pi-runtime-recovery`: avoid unnecessary
+User-requested follow-up on the integration: avoid unnecessary
 tabs on resource-constrained hosts. Reuse an existing default whenever possible,
 without closing human tabs or silently redirecting guarded input.
 

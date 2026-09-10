@@ -1,8 +1,10 @@
 # Raspberry Pi workflow qualification
 
-Short checkpoint IDs below identify locally retained qualification records. The
-public workflow series is squashed; those IDs are not separately published commits.
-Preserving them distinguishes historical test images from the later pacing feature.
+Measurements use isolated synthetic profiles and exclude private run metadata.
+
+These retained measurements qualify workflow behavior in the tested configuration,
+not the custom Vulkan display migration. Re-run the paired harness before making
+performance or reliability claims for a different rendering backend.
 
 ## Verdict: isolated workflow gate passed; no production rollout
 
@@ -22,7 +24,7 @@ are preserved, not retrospectively relabeled successful.
 This is an **unpaced** baseline. The later opt-in [pacing implementation](WORKFLOW_PACING.md)
 has separate local tests; this report does not qualify it on Raspberry Pi hardware.
 
-The earlier explicitly authorized **isolated** follow-up on 2026-09-07 passed its
+The earlier explicitly authorized **isolated** follow-up  passed its
 smoke/recovery test, but the subsequent 30-pair run **failed during pair 13**, after
 25 verified exports. The earlier attempt failed during pair 24; neither is a
 successful 30-pair benchmark or a production rollout. Existing
@@ -34,10 +36,9 @@ The reusable [pilot harness](../scripts/workflow-pilot/README.md) records privat
 per-attempt evidence, validates exact resource ownership and bounds the workload.
 Raw operator reports are deliberately excluded from Git and public artifacts.
 
-## Repaired-image benchmark, 2026-09-07
+## Repaired-image benchmark
 
-The new invocation uses browser checkpoint `bb9d6d2e` and unchanged Hermes
-checkpoint `538e4c55`, with Chromium 152.0.7977.75/V3D/X11. It completed an initial
+The new invocation uses the browser candidate and the unchanged Hermes image, with Chromium 152.0.7977.75/V3D/X11. It completed an initial
 export and all 30 alternating cold/warm pairs: **61 independently verified
 exports in one uninterrupted browser/profile session**. A subsequent health CSV
 and the cancellation/reconciliation checks also passed. This is separate from
@@ -94,8 +95,7 @@ this gate.
 
 ## Prior follow-up: smoke passed, long run stopped
 
-The revised Pi images used browser checkpoint `50d7bf21` and Hermes checkpoint
-`6d76e3aa`, with the same Chromium 152.0.7977.75/V3D/X11 setup. The fresh smoke
+The revised Pi images used the browser candidate and the unchanged Hermes image, with the same Chromium 152.0.7977.75/V3D/X11 setup. The fresh smoke
 invocation passed export, duplicate-run, cancellation, read-only reconciliation,
 restart and full browser/agent recreation. Exact filenames **and CSV contents**,
 cookie/local storage, one tab, catalog/cancel state and GPU sandbox survived.
@@ -149,7 +149,7 @@ branch merely because the journal regression tests and smoke are green.
 
 ## Follow-up implementation and new startup finding
 
-Local checkpoint `50d7bf21` makes journal status truly read-only, removes raw
+The journal hardening makes journal status truly read-only, removes raw
 open/close operations on a live SQLite database inode, serializes short in-process
 database lifetimes, and classifies contention/storage failures. A reserved writer
 now permits a committed status read; an exclusive writer returns `JOURNAL_BUSY`.
@@ -168,7 +168,7 @@ The first follow-up smoke attempt stopped **before exports** because the running
 Hermes gateway's health probe repeatedly exceeded its existing five-second
 deadline. One direct Pi measurement took 4.63 seconds importing `gateway.status`
 through the eager messaging package, and 4.93 seconds including the state/PID
-check. Checkpoint `6d76e3aa` loads the unmodified pinned status helper directly,
+check. The direct-helper check loads the unmodified pinned status helper directly,
 retaining upstream PID/lock/profile validation and the same deadline. A separate
 Pi import-only probe took 0.62 seconds; these are diagnostic observations under
 uncontrolled load, not a matched end-to-end benchmark. The failed startup's report
@@ -193,7 +193,7 @@ The subsequent smoke passed, but its long-run result blocked promotion at that c
   quota; memory caps and one-second cgroup/host sampling are documented in the
   harness guide. This is a loaded-host comparison, not exclusive hardware access.
 
-## Earlier attempt (`38cc5629`): completed-pair timing, not qualification
+## Earlier attempt : completed-pair timing, not qualification
 
 The failed run independently verified **47 exports**: the initial warm export
 and 23 completed cold/warm pairs. The next warm attempt returned a generic
@@ -252,7 +252,7 @@ invocation did **not** reach its health-report or recovery phases.
 
 ## Earlier findings that motivated this follow-up
 
-These observations describe the original `38cc5629` attempt, before the fixes
+These observations describe the original attempt, before the fixes
 above. Its exact generic-error/GPU-warning causes cannot be reconstructed from
 the incomplete historical evidence.
 

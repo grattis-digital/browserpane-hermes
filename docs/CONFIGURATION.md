@@ -30,6 +30,19 @@ original tool vocabulary on the same private endpoint. After a change, recreate
 the browser service and reconnect Hermes; retain all volumes. Existing custom
 tool allowlists/instructions may need adjustment and are never automatically
 overwritten. See the [protocol and compatibility guide](COMPACT_MCP.md).
+Compact mode rejects explicit `new` while any tab exists: reuse the default and
+navigate in place. Existing human/site-created tabs are not automatically closed.
+Start large-page discovery with `pane_view {"capture":"outline"}`, then expand
+observed refs. Outline/subtree/full capture ceilings are 3/5/15 seconds (not added
+waits); target revalidation retains a 15-second ceiling. Input deadlines remain
+unchanged. Cached `state`/`cursor` projections avoid recapture, but cannot widen
+a captured scope. See [progressive capture](COMPACT_MCP.md#progressive-capture-for-large-pages).
+
+`npm ci` installs the pinned, hash-verified Playwright snapshot extension; Docker
+includes the same install hook. If installing with lifecycle scripts disabled,
+explicitly run `node scripts/playwright-patch/apply.mjs` before starting the server.
+`npm run check:playwright` checks all four patched files. Dependency drift requires
+requalification, not bypassing the hash check.
 
 `BPANE_MCP_TIMINGS=1` enables one content-free JSON timing record per compact MCP
 call in the browser container's bounded logs. Records contain phase durations,
@@ -74,6 +87,29 @@ No Compose flag, browser setting, listener or automatic test delay is introduced
 
 For the separately opted-in V3D/X11 graphics configuration, see [GPU setup](GPU.md).
 The normal commands above do not enable GPU access.
+
+## Memory pressure and recovery
+
+The browser and display use Docker's `unless-stopped` restart policy. An individual
+renderer OOM can leave the container and browser-level health checks alive, so
+that policy alone is insufficient. On cgroup v2 the wrapper samples its own
+`memory.events` every five seconds. An OOM-kill counter change requests its normal
+graceful Chromium/profile shutdown and container exit, allowing Docker to restart
+the session. The baseline is captured before browser startup, and pre-existing
+counter history does not cause a permanent restart loop. Three consecutive
+counter-read failures also request recovery. Systems without readable cgroup v2
+memory events log that this additional watchdog is unavailable.
+
+Recovery never replays MCP requests or promises to retain unsaved forms/downloads.
+Repeated memory-heavy page loads can still cause repeated failures; stop the
+workload and inspect container/host memory rather than removing all limits.
+Increasing the container limit requires host headroom and a matching persistent
+Compose change. Keep browser, display, Hermes and host usage in the budget.
+
+Compact MCP already serializes tool calls and reuses the default tab. This is
+not whole-research-job isolation or a limit on post-navigation page activity.
+The [workload admission plan](MCP_WORKLOAD_ADMISSION_PLAN.md) specifies the next
+job-level queue, ownership and memory safeguards; it is not yet implemented.
 
 ## Managed ad blocking
 

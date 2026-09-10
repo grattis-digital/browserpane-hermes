@@ -3,6 +3,9 @@ import { ObservationInput } from './observation-input.mjs';
 
 /** Reads the pinned snapshot's structural reference suffix, never text/property values. */
 export class ObservationRefs {
+  /** Semantic ref key independent of subtree indentation and cursor inheritance. */
+  static signature(line) { return this.#key(line).replace(/ \[cursor=pointer\]$/, ''); }
+
   static from(snapshot) {
     const refs = new Map();
     for (const line of ObservationInput.snapshot(snapshot)) {

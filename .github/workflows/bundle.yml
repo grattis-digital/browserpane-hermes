@@ -29,6 +29,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run check:playwright
       - run: npm audit --omit=dev --audit-level=high
       - run: sh scripts/fetch-upstream.sh
       - run: node scripts/audit-upstream.mjs
@@ -38,7 +39,26 @@ jobs:
       - run: python3 -m unittest discover -s hermes -p 'test_*.py' -v
       - name: Hardware pilot ownership and result-oracle unit tests (no hardware access)
         run: python3 -m unittest discover -s scripts/workflow-pilot -p 'test_*.py' -v
+      - name: Render pilot ownership and firewall unit tests (no hardware or network access)
+        run: python3 -m unittest discover -s scripts/render-pilot -p 'test_*.py' -v
+      - name: Experimental Chromium patch preparation (offline, no browser build)
+        run: python3 -m unittest discover -s native/chromium-damage -p 'test_*.py' -v
       - run: docker compose --env-file .env.example config --quiet
+      - name: Validate experimental GPU and optional codec overlays (no device access)
+        env:
+          BPANE_GPU_RENDER_DEVICE: /dev/dri/renderD128
+          BPANE_GPU_DISPLAY_DEVICE: /dev/dri/card1
+          BPANE_GPU_RENDER_GID: '109'
+          BPANE_GPU_DISPLAY_GID: '44'
+          BPANE_GPU_VIDEO_DEVICE: /dev/video11
+          BPANE_GPU_VIDEO_GID: '44'
+          BPANE_GPU_DECODE_DEVICE: /dev/video10
+          BPANE_GPU_DECODE_GID: '44'
+          BPANE_GPU_DECODE_IMAGE: browserpane-hermes:decode-config-fixture
+        run: |
+          docker compose --env-file .env.example -f compose.yaml -f compose.gpu.yaml config --quiet
+          docker compose --env-file .env.example -f compose.yaml -f compose.gpu.yaml -f compose.gpu-video.yaml config --quiet
+          docker compose --env-file .env.example -f compose.yaml -f compose.gpu.yaml -f compose.gpu-video.yaml -f compose.gpu-decode.yaml config --quiet
       - name: Validate workflow syntax and embedded shell
         run: |
           docker run --rm --network none -i \
@@ -50,6 +70,8 @@ jobs:
         run: node scripts/ci-chromium-sandbox.mjs install
       - name: Real compact MCP input, references and replay correctness
         run: npm run test:mcp
+      - name: Scoped MCP paired business-outcome smoke (one tab, no timing threshold or model)
+        run: npm run bench:scoped -- 1
       - name: Paired MCP performance fixture smoke (no timing threshold or paid model)
         run: |
           node scripts/benchmark-mcp-baseline.mjs ci-playwright 1 0 batched playwright
@@ -115,6 +137,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run check:playwright
       - run: sh scripts/fetch-upstream.sh
       - name: Native host/gateway and private X11 regressions
         run: |
@@ -134,8 +157,37 @@ jobs:
           }
           trap cleanup_native EXIT
           npm run test:linux
+      - name: Experimental Xorg driver ABI and pixel checks (software fixture, not GPU qualification)
+        run: |
+          python3 scripts/test-gpu-dummy.py
+          python3 scripts/test-gpu-dummy-pilot.py
+          python3 scripts/test-gpu-compare-results.py
+          python3 scripts/test-vulkan-lease-results.py
+          python3 scripts/test-vulkan-audit-results.py
+          python3 scripts/test-vulkan-tail-results.py
+          docker build -f Dockerfile.gpu-dummy --target test-display -t browserpane-gpu-dummy:fixture .
+          docker build -f Dockerfile.gpu-dummy --target gpu-display -t browserpane-gpu-dummy:driver .
+          docker build -f Dockerfile.gpu-dummy --target gpu-check -t browserpane-gpu-dummy:check .
+          docker build -f Dockerfile.gpu-dummy --target vulkan-check -t browserpane-gpu-dummy:vulkan-check .
+          docker build -f Dockerfile.gpu-dummy --target gpu-live-display -t browserpane-gpu-dummy:live-check .
+          tail_evidence_dir=$(mktemp -d)
+          docker build -f Dockerfile.gpu-dummy --target vulkan-tail-evidence --output "type=local,dest=$tail_evidence_dir" .
+          node scripts/check-gpu-tail-wire.mjs "$tail_evidence_dir/tail-wire.bin"
+          test "$(docker image inspect browserpane-gpu-dummy:driver --format '{{.Architecture}}')" = "$ARCHITECTURE"
+          python3 scripts/check-gpu-dummy.py --software-image browserpane-gpu-dummy:fixture --gpu-image browserpane-gpu-dummy:driver
       - name: Build the actual browser image natively
         run: docker build --build-arg VCS_REF="$GITHUB_SHA" --tag browserpane-hermes:test .
+      - name: Pi decode package compatibility only (no GPU or browser launch)
+        if: matrix.architecture == 'arm64'
+        run: |
+          docker build -f Dockerfile.gpu-decode \
+            --build-arg BPANE_GPU_DECODE_BASE=browserpane-hermes:test \
+            -t browserpane-hermes:decode-package-check .
+          docker run --rm -i --label io.browserpane.test=decode-package-check \
+            --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --pids-limit 32 --memory 192m --entrypoint node \
+            browserpane-hermes:decode-package-check --input-type=module \
+            < scripts/check-gpu-decode-package.mjs
       - name: Real MCP, downloads and persistent profile across restart/recreate
         run: npm run test:runtime
       - name: Explicit legacy MCP fallback and profile compatibility
@@ -158,7 +210,7 @@ jobs:
         run: |
           BPANE_TEST_BROWSER_PATH="$(node --input-type=module -e "import {chromium} from 'playwright';process.stdout.write(chromium.executablePath())")"
           export BPANE_TEST_BROWSER_PATH
-          node scripts/test-viewer.mjs browserpane-hermes:test
+          BPANE_CAPTURE_TIMINGS=1 node scripts/test-viewer.mjs browserpane-hermes:test
       - name: Synthetic failure/checkpoint reports
         if: always() && matrix.architecture == 'amd64'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

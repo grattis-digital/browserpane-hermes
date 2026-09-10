@@ -1,0 +1,15 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "tail-common.glsl"
+layout(local_size_x=1) in;
+void main() {
+    int best=0; uint score=motion[64];
+    if (acknowledged() && (p.flags&8u)==0u) for (int dy=-64;dy<=64;dy++)
+        if (motion[dy+64]>score || (motion[dy+64]==score && abs(dy)<abs(best))) {
+            best=dy; score=motion[dy+64];
+        }
+    // One selection per frame, not a serial 129-candidate loop in every tile.
+    // This is only a prediction; analyze verifies every reused destination pixel.
+    if (!acknowledged() || score<192u || score<motion[64]+24u) best=0;
+    control=uvec4(uint(best),((p.flags&2u)!=0u?16u:0u)+(best!=0?16u:0u)+((p.flags&16u)!=0u?14u:0u),0,0);
+}
