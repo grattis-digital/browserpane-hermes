@@ -23,12 +23,21 @@
         <span>Resolution</span>
         <select id="resolution" aria-describedby="display-help"></select>
       </label>
+      <label class="display-field" for="enhancement">
+        <span>Enhance</span>
+        <select id="enhancement" aria-describedby="enhancement-help enhancement-status">
+          <option value="original">Original pixels</option>
+          <option value="smart">Smart 2× · Balanced · experimental</option>
+          <option value="smart-quality">Smart 2× · Quality · experimental</option>
+        </select>
+      </label>
       <button id="fullscreen" aria-pressed="false">Full screen</button>
       <a href="./source">Source</a>
     </div>
   </header>
   <div id="display-bar">
     <span id="display-summary">Auto · Pi balanced</span>
+    <span id="enhancement-status" role="status">Original pixels</span>
     <details id="display-help">
       <summary>Display help</summary>
       <p>Resolutions are actual capture pixels. Smaller views are centered;
@@ -40,6 +49,15 @@
         Large captures require more Pi CPU and bandwidth.</p>
       <p>Preferences are saved in this viewer. The first connected viewer controls
         the shared capture; other viewers fit that resolution locally.</p>
+      <p id="enhancement-help">Smart 2× optionally enhances enlarged, settled tiles
+        with a local GPU model. Balanced is lightweight; Quality uses a larger
+        RGB model with more GPU work, not a second filter on top. Larger does not
+        guarantee better text. Both need HTTPS and hardware WebGPU; enhancement does
+        not use a cloud service, the Pi, or Apple’s Neural Engine. Video and active
+        scrolling keep original pixels. Unsupported or slow clients fall back
+        automatically. Learned sharpening can change text and details: select
+        Original pixels whenever fidelity matters. This setting does not change
+        capture resolution, bandwidth, Chrome, or other viewers.</p>
     </details>
   </div>
   <main id="viewport" aria-label="Shared Chromium session">

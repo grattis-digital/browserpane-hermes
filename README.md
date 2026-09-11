@@ -185,6 +185,13 @@ The first connected viewer owns shared capture resizing. Other viewers fit the
 same capture locally. Resolution presets set actual capture pixels; HiDPI adjusts
 local display density and fitting, not Chromium’s shared DPI or zoom. Small
 captures are centered. See [display controls](docs/DISPLAY.md).
+The optional **Enhance → Smart 2×** modes enhance enlarged, settled tiles entirely
+on the viewer's WebGPU-capable GPU. **Balanced** uses a lightweight model;
+**Quality** tests a larger RGB model with more local GPU work. Both are experimental,
+and a larger model does not guarantee more faithful text. Original pixels remain
+the default; video/scrolling bypass enhancement and unsupported/slow clients
+fall back automatically. It does not change Pi capture or bandwidth and does
+not use Apple's Neural Engine. See [requirements, limits and tests](docs/CLIENT_UPSCALE.md).
 Scrollbar drags retain pointer ownership when leaving the viewer and release on
 mouse-up or cancellation; this does not force scrollbar movement onto the tile grid.
 

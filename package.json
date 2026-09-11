@@ -7,7 +7,9 @@
   "scripts": {
     "postinstall": "node scripts/playwright-patch/apply.mjs",
     "check:playwright": "node scripts/playwright-patch/apply.mjs --check",
-    "build": "node scripts/build.mjs",
+    "build": "npm run check:enhancement && node scripts/build.mjs",
+    "check:enhancement": "tsc -p client/enhancement/tsconfig.json",
+    "test:enhancement": "node --test test/smart-upscale-*.test.mjs && node scripts/check-smart-upscale.mjs",
     "test": "node --test test/*.test.mjs",
     "test:client": "node scripts/test-client.mjs",
     "test:linux": "bash scripts/test-pipeline-linux.sh",
@@ -34,8 +36,10 @@
     "ws": "8.21.3"
   },
   "devDependencies": {
+    "@webgpu/types": "0.1.72",
     "esbuild": "0.25.9",
     "jsdom": "26.1.0",
+    "typescript": "5.9.3",
     "vitest": "3.2.7"
   }
 }

@@ -8,6 +8,18 @@ license.
 
 ## Patch map
 
+Patch `0032-local-presentation-damage.patch` is frontend-only. It marks the WebGL
+canvas and emits opt-in local damage events after every visible draw, including
+video destinations, scroll regions, clear and resize. It changes no protocol,
+capture policy, caches or input. Pair the hook with its notification tests.
+The optional consumer lives in `client/enhancement/`: a bounded WebGPU model
+adapter and separate, revision-fenced presentation cache. Backport its lifecycle,
+halo, pixel-oracle and failure tests with it; do not filter the authoritative
+framebuffer used by scroll-copy. See [client upscale](CLIENT_UPSCALE.md).
+The Balanced/Quality selector and medium RGB model are wrapper-only additions
+using that same hook. Keep their weight pins, fused-head shader, eight-pixel
+halo and model-switch cancellation tests together; neither mode changes the wire.
+
 GPU consumer recovery is tracked directly in `native/vulkan-lease/live-watch.*`,
 the live listener/loop, `runtime/gpu-dummy-start.sh` and the wrapper's GPU health
 checks. It does not change the viewer wire protocol or require a new upstream
