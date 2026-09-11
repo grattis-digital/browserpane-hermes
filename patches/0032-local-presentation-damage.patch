@@ -1,0 +1,204 @@
+diff --git a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+index b78a5cf..50fabaf 100644
+--- a/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
++++ b/code/web/bpane-client/js/__tests__/webgl-compositor.test.ts
+@@ -113,6 +113,57 @@ afterEach(() => {
+   vi.restoreAllMocks();
+ });
+ 
++describe('optional local presentation damage', () => {
++  it('is allocation/event-free when off, and uploads/cache resets are not presentation', () => {
++    const canvas = document.createElement('canvas');
++    const gl = createHardwareGl('ANGLE hardware');
++    Object.defineProperty(gl, 'canvas', { value: canvas });
++    const renderer = new WebGLTileRenderer(gl);
++    const notify = vi.fn(); canvas.addEventListener('bpane:presentation-damage', notify);
++    renderer.resize(40, 40); renderer.drawFill(1, 2, 3, 4, 0, 0, 0, 1);
++    expect(canvas.dataset.bpaneRenderer).toBe('webgl2');
++    expect(notify).not.toHaveBeenCalled();
++    canvas.dataset.bpaneEnhancement = 'on';
++    expect(renderer.drawCachedVideo(0, 0, 4, 4)).toBe(false);
++    renderer.uploadVideoFrame({ displayWidth: 4, displayHeight: 4 } as VideoFrame);
++    renderer.clearTileCache(); renderer.invalidateVideoTexture();
++    expect(notify).not.toHaveBeenCalled();
++    delete canvas.dataset.bpaneEnhancement; renderer.destroy();
++  });
++
++  it('reports actual destination coordinates after every visible path, including arbitrary scroll', () => {
++    const canvas = document.createElement('canvas');
++    const gl = createHardwareGl('ANGLE hardware');
++    Object.defineProperty(gl, 'canvas', { value: canvas });
++    const renderer = new WebGLTileRenderer(gl);
++    canvas.dataset.bpaneEnhancement = 'on';
++    const events: Array<{ x: number; y: number; w: number; h: number; kind: string }> = [];
++    canvas.addEventListener('bpane:presentation-damage', event => events.push((event as CustomEvent).detail));
++    renderer.resize(40, 40);
++    renderer.drawFill(1, 2, 3, 4, 0, 0, 0, 1);
++    const pixels = { data: new Uint8ClampedArray(3 * 4 * 4), width: 3, height: 4 } as ImageData;
++    renderer.drawTileImageData(1, 2, 3, 4, pixels);
++    renderer.drawTileImageData(1, 2, 3, 4, pixels, false);
++    renderer.drawTileImageBitmap(1, 2, 3, 4, { width: 3, height: 4 } as ImageBitmap);
++    const frame = { displayWidth: 4, displayHeight: 4 } as VideoFrame;
++    renderer.drawVideoFrame(1, 2, 3, 4, frame);
++    renderer.uploadVideoFrame(frame);
++    renderer.drawCachedVideo(1, 2, 3, 4);
++    renderer.drawCachedVideoCropped(0, 0, 2, 2, 1, 2, 3, 4);
++    renderer.drawTexImageSource(1, 2, 3, 4, canvas);
++    renderer.drawTexImageSourceCropped(canvas, 0, 0, 2, 2, 1, 2, 3, 4, 40, 40);
++    renderer.scrollCopy(0, -13, 2, 30, 35, 40, 40);
++    renderer.clear(); renderer.destroy();
++    expect(events.map(event => event.kind)).toEqual([
++      'reset', 'tile', 'tile', 'tile', 'tile', 'video', 'video', 'video', 'video', 'video', 'scroll', 'reset', 'reset',
++    ]);
++    for (const event of events.slice(1, 10)) expect(event).toMatchObject({ x: 1, y: 2, w: 3, h: 4 });
++    expect(events[10]).toEqual({ x: 0, y: 2, w: 35, h: 28, kind: 'scroll' });
++    expect(gl.drawArrays).toHaveBeenCalled();
++    expect(gl.blitFramebuffer).toHaveBeenCalledTimes(2);
++  });
++});
++
+ describe('WebGLTileRenderer.tryCreate', () => {
+   it('requests a strict WebGL2 context first', () => {
+     const strictGetContext = vi.fn(() => null);
+diff --git a/code/web/bpane-client/js/render/presentation-damage.ts b/code/web/bpane-client/js/render/presentation-damage.ts
+new file mode 100644
+index 0000000..9de2220
+--- /dev/null
++++ b/code/web/bpane-client/js/render/presentation-damage.ts
+@@ -0,0 +1,18 @@
++/** Local, opt-in presentation invalidation. Never part of the wire protocol. */
++export class PresentationDamage {
++  public static mark(canvas: HTMLCanvasElement | OffscreenCanvas): void {
++    const target = canvas as HTMLCanvasElement | undefined;
++    if (target?.dataset) target.dataset.bpaneRenderer = 'webgl2';
++  }
++
++  public static notify(canvas: HTMLCanvasElement | OffscreenCanvas,
++    x: number, y: number, w: number, h: number,
++    kind: 'tile' | 'video' | 'scroll' | 'reset' = 'tile'): void {
++    const target = canvas as HTMLCanvasElement | undefined;
++    // No event/allocation when the optional local enhancement is off.
++    if (target?.dataset?.bpaneEnhancement !== 'on') return;
++    target.dispatchEvent(new CustomEvent('bpane:presentation-damage', {
++      detail: { x, y, w, h, kind },
++    }));
++  }
++}
+diff --git a/code/web/bpane-client/js/webgl-compositor.ts b/code/web/bpane-client/js/webgl-compositor.ts
+index 56b6402..80cbe0a 100644
+--- a/code/web/bpane-client/js/webgl-compositor.ts
++++ b/code/web/bpane-client/js/webgl-compositor.ts
+@@ -22,6 +22,7 @@ import { WebGLCachedVideoRenderer } from './render/webgl-cached-video-renderer.j
+ import { WebGLScrollCopyRenderer } from './render/webgl-scroll-copy-renderer.js';
+ import { WebGLTextureSourceRenderer } from './render/webgl-texture-source-renderer.js';
+ import { createWebGLTileProgram } from './render/webgl-tile-program.js';
++import { PresentationDamage } from './render/presentation-damage.js';
+ 
+ export type {
+   RenderBackend,
+@@ -59,6 +60,7 @@ export class WebGLTileRenderer {
+   constructor(gl: WebGL2RenderingContext, info: WebGLContextInfo = detectContextInfo(gl)) {
+     this.gl = gl;
+     this.info = info;
++    PresentationDamage.mark(gl.canvas);
+ 
+     const tileProgram = createWebGLTileProgram(gl);
+     this.program = tileProgram.program;
+@@ -129,6 +131,7 @@ export class WebGLTileRenderer {
+     gl.viewport(0, 0, width, height);
+     gl.useProgram(this.program);
+     gl.uniform2f(this.uResolution, width, height);
++    PresentationDamage.notify(gl.canvas, 0, 0, width, height, 'reset');
+   }
+ 
+   /** Draw a solid-color rectangle at pixel coordinates. */
+@@ -141,6 +144,7 @@ export class WebGLTileRenderer {
+     gl.uniform4f(this.uColor, r / 255, g / 255, b / 255, a);
+     gl.drawArrays(gl.TRIANGLES, 0, 6);
+     gl.bindVertexArray(null);
++    PresentationDamage.notify(gl.canvas, x, y, w, h);
+   }
+ 
+   /** Draw a tile from ImageData at pixel coordinates. */
+@@ -151,11 +155,13 @@ export class WebGLTileRenderer {
+       // Zero-hash repair/edge tiles are one-shot pixels, not reusable content.
+       this.textureSourceRenderer.draw(x, y, w, h, imageData);
+     }
++    PresentationDamage.notify(this.gl.canvas, x, y, w, h);
+   }
+ 
+   /** Draw a tile from an ImageBitmap at pixel coordinates (zero-copy on Chrome). */
+   drawTileImageBitmap(x: number, y: number, w: number, h: number, bitmap: ImageBitmap): void {
+     this.textureSourceRenderer.drawTile(x, y, w, h, bitmap);
++    PresentationDamage.notify(this.gl.canvas, x, y, w, h);
+   }
+ 
+   /** Drop GPU tile references on grid/session reset. Does not alter framebuffer. */
+@@ -169,6 +175,7 @@ export class WebGLTileRenderer {
+    */
+   drawVideoFrame(x: number, y: number, w: number, h: number, frame: VideoFrame): void {
+     this.textureSourceRenderer.draw(x, y, w, h, frame);
++    PresentationDamage.notify(this.gl.canvas, x, y, w, h, 'video');
+   }
+ 
+   /**
+@@ -184,7 +191,9 @@ export class WebGLTileRenderer {
+    * Returns false if no video texture has been uploaded yet.
+    */
+   drawCachedVideo(x: number, y: number, w: number, h: number): boolean {
+-    return this.cachedVideoRenderer.draw(x, y, w, h);
++    const drawn = this.cachedVideoRenderer.draw(x, y, w, h);
++    if (drawn) PresentationDamage.notify(this.gl.canvas, x, y, w, h, 'video');
++    return drawn;
+   }
+ 
+   /**
+@@ -195,7 +204,9 @@ export class WebGLTileRenderer {
+     srcX: number, srcY: number, srcW: number, srcH: number,
+     dstX: number, dstY: number, dstW: number, dstH: number,
+   ): boolean {
+-    return this.cachedVideoRenderer.drawCropped(srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH);
++    const drawn = this.cachedVideoRenderer.drawCropped(srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH);
++    if (drawn) PresentationDamage.notify(this.gl.canvas, dstX, dstY, dstW, dstH, 'video');
++    return drawn;
+   }
+ 
+   /** Invalidate the cached video texture (e.g., on disconnect). */
+@@ -209,6 +220,7 @@ export class WebGLTileRenderer {
+    */
+   drawTexImageSource(x: number, y: number, w: number, h: number, source: TexImageSource): void {
+     this.textureSourceRenderer.draw(x, y, w, h, source);
++    PresentationDamage.notify(this.gl.canvas, x, y, w, h, 'video');
+   }
+ 
+   /**
+@@ -238,6 +250,7 @@ export class WebGLTileRenderer {
+       sourceWidth,
+       sourceHeight,
+     );
++    PresentationDamage.notify(this.gl.canvas, destX, destY, destW, destH, 'video');
+   }
+ 
+   /**
+@@ -268,16 +281,21 @@ export class WebGLTileRenderer {
+       screenW,
+       screenH,
+     });
++    // Invalidate the whole copy region, including exposed repair strips.
++    PresentationDamage.notify(this.gl.canvas, 0, regionTop,
++      regionRight || screenW, regionBottom - regionTop, 'scroll');
+   }
+ 
+   /** Clear the entire canvas. */
+   clear(): void {
+     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
++    PresentationDamage.notify(this.gl.canvas, 0, 0, this.canvasW, this.canvasH, 'reset');
+   }
+ 
+   /** Release GPU resources. Call on disconnect/cleanup. */
+   destroy(): void {
+     const gl = this.gl;
++    PresentationDamage.notify(gl.canvas, 0, 0, this.canvasW, this.canvasH, 'reset');
+     this.cachedVideoRenderer.destroy();
+     this.scrollCopyRenderer.destroy();
+     this.textureSourceRenderer.destroy();

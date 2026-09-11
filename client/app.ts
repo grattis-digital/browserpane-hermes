@@ -1,5 +1,6 @@
 import { BpaneSession } from '../upstream/code/web/bpane-client/js/bpane.js';
 import { DisplayController } from './display-controller.js';
+import { EnhancementController } from './enhancement/enhancement-controller.js';
 
 const screen = document.querySelector<HTMLElement>('#screen')!;
 const status = document.querySelector<HTMLElement>('#status')!;
@@ -7,6 +8,10 @@ const connect = document.querySelector<HTMLButtonElement>('#connect')!;
 const disconnect = document.querySelector<HTMLButtonElement>('#disconnect')!;
 const fullscreen = document.querySelector<HTMLButtonElement>('#fullscreen')!;
 const display = new DisplayController();
+const enhancement = EnhancementController.mount();
+Object.defineProperty(window, 'browserpaneEnhancement', {
+  value: Object.freeze({ diagnostics: () => enhancement.diagnostics() }), configurable: true,
+});
 let session: BpaneSession | null = null;
 let desired = true;
 let generation = 0;
@@ -24,6 +29,7 @@ async function attach(): Promise<void> {
   session?.disconnect();
   session = null;
   display.attach(null);
+  enhancement.attach(null);
   connect.disabled = true;
   disconnect.disabled = false;
   status.textContent = 'Connecting…';
@@ -52,6 +58,7 @@ async function attach(): Promise<void> {
       onDisconnect: () => {
         if (current === generation) {
           session = null; display.attach(null);
+          enhancement.attach(null);
           status.textContent = 'Reconnecting…'; reconnect(current);
         }
       },
@@ -60,6 +67,7 @@ async function attach(): Promise<void> {
     if (current !== generation || !desired) { attached.disconnect(); return; }
     session = attached;
     display.attach(attached);
+    enhancement.attach(screen.querySelector('canvas'));
     Object.defineProperty(window, 'browserpaneSession', { value: session, configurable: true });
   } catch (error) {
     if (current !== generation) return;
@@ -74,6 +82,7 @@ disconnect.addEventListener('click', () => {
   desired = false; ++generation; clearTimeout(retry);
   session?.disconnect(); session = null;
   display.attach(null);
+  enhancement.attach(null);
   status.textContent = 'Disconnected'; connect.disabled = false; disconnect.disabled = true;
 });
 fullscreen.disabled = !document.fullscreenEnabled;
@@ -86,5 +95,7 @@ document.addEventListener('fullscreenchange', () => {
   fullscreen.textContent = active ? 'Exit full screen' : 'Full screen';
   fullscreen.setAttribute('aria-pressed', String(active));
 });
-window.addEventListener('beforeunload', () => { desired = false; display.destroy(); session?.disconnect(); });
+window.addEventListener('beforeunload', () => {
+  desired = false; enhancement.destroy(); display.destroy(); session?.disconnect();
+});
 void attach();

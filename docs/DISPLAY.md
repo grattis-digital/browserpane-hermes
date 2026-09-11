@@ -14,6 +14,11 @@ local control layer, not an alternative capture or streaming path.
   physical capture within the Pi pixel budget; locked secondary viewers never
   resize the shared capture.
 - Small views are centered; large ones fit while preserving aspect ratio.
+- **Enhance** optionally applies experimental, viewer-local Smart 2× to enlarged
+  stable tiles. Balanced uses a lightweight model; Quality tests a larger RGB
+  model with the same safety limits. Original pixels are the default. It neither changes capture
+  settings nor uses Pi/cloud inference; HTTPS and hardware WebGPU are required.
+  See [client upscale](CLIENT_UPSCALE.md) for fidelity, video and resource limits.
 - Local preferences survive viewer reloads. The first viewer owns shared capture
   sizing; subsequent viewers fit locally until ownership changes.
 

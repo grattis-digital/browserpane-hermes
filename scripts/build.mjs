@@ -1,10 +1,13 @@
 import { build } from 'esbuild';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readFile } from 'node:fs/promises';
 
 await mkdir('dist', { recursive: true });
+const modelLicenses = await Promise.all(['Anime4K', 'WebSR'].map(name =>
+  readFile(`client/enhancement/model/LICENSE-${name}.txt`, 'utf8')));
 await build({
   entryPoints: ['client/app.ts'], outfile: 'dist/app.js', bundle: true,
   format: 'esm', platform: 'browser', target: 'es2022', minify: true,
+  banner: { js: `/*! Smart upscale model notices:\n${modelLicenses.join('\n')} */` },
 });
 await build({
   entryPoints: ['upstream/code/integrations/mcp-bridge/src/playwright-mcp-runtime.ts'],
