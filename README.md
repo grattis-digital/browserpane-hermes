@@ -6,7 +6,25 @@
 <p align="center"><strong>One browser. Your Raspberry Pi. You and your agent.</strong></p>
 <p align="center">A small, self-hosted Docker Compose bundle for a persistent Chromium session,<br>an interactive remote viewer, and a Hermes agent connected over MCP.</p>
 
-Browser automation does not have to happen in an invisible, disposable browser.
+> [!NOTE]
+> **Hermes already supports local browser automation.** Its native options
+> include [Camofox (`camofox-browser`)](https://github.com/jo-inc/camofox-browser),
+> a self-hosted service built on Firefox-based Camoufox, as well as local
+> Chromium/CDP. **You do not need this project to give Hermes a local browser.**
+>
+> Camofox can also provide a headed browser through VNC/noVNC, persistent
+> profiles when supported and configured, and adoption of an existing tab.
+> Shared access and saved logins are therefore not unique to BrowserPane.
+> See the [official Hermes browser guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser/#camofox-local-mode).
+>
+> **This bundle's focus:** a Raspberry Pi-oriented Docker Compose setup with
+> one persistent **Chromium** session, BrowserPane's damage-aware, tile-cached
+> **WebTransport viewer**, and **MCP** control of that same session. It is an
+> optional integration, not a requirement for Hermes's native browser support.
+> The bundled configuration disables the native browser toolset and selects
+> BrowserPane's MCP tools instead.
+
+This bundle makes the shared browser the center of the workflow.
 Open the viewer, sign in yourself, and let Hermes work in that **same session**.
 When a task needs your judgment or MFA, take over. Your browser profile and
 downloads remain on your machine across container restarts and recreation.
